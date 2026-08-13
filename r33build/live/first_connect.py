@@ -153,7 +153,10 @@ def main():
     need = len(ROOTS) * len(tags) + len(ETFS)
     if len(rows) < need:
         raise SystemExit(f'реестр неполон: {len(rows)} из {need} — прежний файл сохранён')
-    out = ROOT / 'live' / 'instruments_live.csv'
+    # ГЕНЕРАТОР ПИШЕТ ТУДА, ОТКУДА ЧИТАЮТ (одиннадцатый круг, №6): при настроенном
+    # ADDFUT_REGISTRY торговля читала внешний файл, а «успешное обновление» ложилось в
+    # каталог кода — ложный след «реестр записан» при протухшем рабочем реестре.
+    out = Path(os.environ.get('ADDFUT_REGISTRY') or (ROOT / 'live' / 'instruments_live.csv'))
     tmp = out.with_suffix('.csv.tmp')
     pd.DataFrame(rows).to_csv(tmp, index=False)
     import os as _os

@@ -48,6 +48,26 @@ EXCHANGE_TZ = 'America/Chicago'
 # 15:00 по Чикаго; берётся 16:00 с запасом на расчётные бары.
 CLOSE_AFTER_H = 16
 
+# ЕВРОПЕЙСКИЙ КАЛЕНДАРЬ МАРШРУТА Е (одиннадцатый круг, №5): CSPX торгуется на LSE, CBU0 —
+# на SIX/EBS; календарь CME им не указ. Берётся ОБЪЕДИНЕНИЕ закрытий обеих площадок (торгуем
+# только когда открыты обе). Непокрытый год — отказ, как и у CME-таблицы.
+HOLIDAYS_EU = {
+    2026: ('2026-01-01', '2026-01-02', '2026-04-03', '2026-04-06', '2026-05-01',
+           '2026-05-04', '2026-05-14', '2026-05-25', '2026-08-31', '2026-12-24',
+           '2026-12-25', '2026-12-28', '2026-12-31'),
+}
+
+
+def eu_holidays(*years):
+    import pandas as pd
+    out = []
+    for y in sorted(set(int(x) for x in years)):
+        if y not in HOLIDAYS_EU:
+            raise FeedError(f'[EU_CAL] европейский календарь не покрывает {y} год — '
+                            f'маршрут Е не торгуется до продления таблицы')
+        out.extend(pd.Timestamp(x) for x in HOLIDAYS_EU[y])
+    return tuple(out)
+
 DUR_MIN, DUR_MAX = 3.0, 12.0
 YIELD_MIN, YIELD_MAX = 0.0005, 0.25
 
@@ -303,7 +323,11 @@ def build_market(ib, today, book, *, route='F', roll_today=None, roll_passed=Non
         # ТОЧНАЯ ПРЕДЫДУЩАЯ СЕССИЯ И ДЛЯ ФОНДОВ (десятый круг, №6): равенство дат двух
         # одинаково отставших источников проходило раньше. Календарь берём CME-шный:
         # праздник LSE/EBS при открытых США даст отказ дня — консервативно и вслух.
-        _exp_e = prev_session(d0, hol)
+        try:
+            _hol_eu = eu_holidays(d0.year, d0.year + 1)
+        except FeedError:
+            _hol_eu = eu_holidays(d0.year)
+        _exp_e = prev_session(d0, _hol_eu)
         pe, de, pe_t, _ = closes(ib, contract_of(ib, 'CSPX', reg), d0, expected_prev=_exp_e)
         pb, db, pb_t, _ = closes(ib, contract_of(ib, 'CBU0', reg), d0, expected_prev=_exp_e)
         if de != db:
@@ -430,7 +454,8 @@ def closing_values(ib, route, book):
     if d1 != d2:
         raise FeedError(f'даты закрытий не совпадают: ES {d1:%d.%m.%Y}, TNX {d2:%d.%m.%Y}')
     dref = dref_from_yield((y_t / 10.0) / 100.0)
-    return es_to_unit(es_t), dref, None, dict(es_close=(es_t, str(d1.date())),
+    return spy_t, dref, None, dict(spy_close=(spy_t, str(d_spy.date())),
+                                   es_close=(es_t, str(d1.date())),
                                          yield_10y_pct=y_t / 10.0, dref=dref, series=ser)
 
 

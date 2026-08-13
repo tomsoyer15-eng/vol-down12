@@ -122,7 +122,11 @@ miss = DL.step(DL.Book(d_fix=dref[-2], n_e=260, n_b=101, unit_is_mes=True, prev_
                DL.Market(date=pd.Timestamp('2026-09-10'), px_eq_prev=spy[-2], dref_prev=dref[-2],
                dref_today=dref[-1], px_eq_today=spy[-1], roll_today=False, st_eq=True, st_bd=True),
                10_000_000.0, check_guards=False)
-chk('ролл: пропущенная сессия ролла обнаруживается', any('поставки' in r for r in miss.refusals))
+# Норма ужесточена десятым-одиннадцатым кругами: пропущенный ролл не «обнаруживается
+# отказом в поставочной зоне», а НАВЁРСТЫВАЕТСЯ немедленно по сроку серии.
+chk('ролл: пропущенная сессия ролла НАВЁРСТЫВАЕТСЯ',
+    miss.book_after.ser_a == 'Z26' and any('пропущен' in r for r in miss.reasons)
+    and not miss.refusals, f'серия {miss.book_after.ser_a}')
 
 # отказ §8 обязан пропускать снижение риска и блокировать наращивание
 big = DL.Book(d_fix=dref[-2], n_e=260, n_b=101, unit_is_mes=True, prev_st_eq=True,

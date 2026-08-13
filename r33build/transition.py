@@ -573,6 +573,15 @@ def hand_over_book(broker, from_route, to_route):
     _ST2.save(_ST2.book_path(to_route), _bk, to_route, int(_prev_sess or 0) + 1,
               note=f'книга принята от перехода {from_route}->{to_route}, '
                    f'сессия {_today} закрыта для торговли до замыкания')
+    # ФАЙЛ МАРШРУТА (одиннадцатый круг, №4): автопилот читает route.txt, и без этой записи
+    # после Ф->Е он продолжал бы вызывать сессии маршрута Ф — комментарий в автопилоте
+    # обещал запись, которой не существовало.
+    _rt = _ST2.lock_dir() / 'route.txt'
+    _fd, _tmp = __import__('tempfile').mkstemp(dir=str(_rt.parent))
+    with _os2.fdopen(_fd, 'w', encoding='utf-8') as _f:
+        _f.write(to_route)
+        _f.flush(); _os2.fsync(_f.fileno())
+    _os2.replace(_tmp, _rt)
     return _bk
 
 
@@ -615,6 +624,18 @@ def _run_lots(broker, plan, st, state_path, lim, unp, dst_bought, fail, _M=None,
             if sum(abs(v) for v in unp.values()) > lim + TOL:      # СТРОГО в пределах утверждённого лимита
                 fail('|непарная дельта| выше утверждённого лимита')
             want = max(0, int(round(unp[lot['leg']]/lot['dprice'])))   # покупка кроет НАКОПЛЕННЫЙ остаток ноги
+            if want == 0:
+                # НУЛЕВАЯ ЗАЯВКА НЕ ПОДАЁТСЯ (одиннадцатый круг, №9): остаток меньше
+                # половины зерна цели копится до следующего шага; живой адаптер нулевую
+                # заявку отверг бы, и уже проданный источник повисал бы в MIXED.
+                st['log'].append(('buy_skip_zero', lot['dst'], 0)); _atomic(state_path, st)
+                if sold == 0:
+                    noop += 1
+                    if noop >= 2: fail('нулевой прогресс два шага подряд')
+                    continue
+                noop = 0
+                remaining -= sold if sold > 0 else 0
+                continue
             oid2, f2 = broker.buy_units(lot['dst'], want)
             st['order_ids'].append(oid2)
             try:

@@ -124,45 +124,51 @@ def _levels_path(live):
     return live.with_name('signals_levels.csv')
 
 
-def _verify_levels(sym, live, me):
-    """УРОВНИ, А НЕ ТОЛЬКО БИТЫ (десятый круг, №9). Пересчёт дивидендов поставщиком может
-    сдвинуть весь 13-месячный уровень, сохранить прежние 12 битов и перевернуть новый
-    пограничный месяц. Сайдкар хранит месячные закрытия; новые обязаны совпасть со старыми
-    с точностью LEVEL_TOL после снятия ОДНОГО общего множителя (перепривязка adjusted-ряда
-    к новой дате легальна и меняет все уровни пропорционально)."""
+def _check_levels(sym, live, me):
+    """ПРОВЕРКА уровней БЕЗ записи (одиннадцатый круг, №10). Прежняя редакция сразу
+    перезаписывала сайдкар — ДО сверки битов второй ноги и до публикации ряда: при сбое
+    дальше по циклу текущие уровни поставщика становились новой базой доверия, и повторный
+    запуск сравнивал источник с ним самим."""
     import pandas as pd
     lp = _levels_path(live)
-    old = {}
-    if lp.exists():
-        df = pd.read_csv(lp, parse_dates=[0], index_col=0)
-        if sym in df.columns:
-            old = df[sym].dropna().to_dict()
+    if not lp.exists():
+        return
+    df = pd.read_csv(lp, parse_dates=[0], index_col=0)
+    if sym not in df.columns:
+        return
+    old = df[sym].dropna().to_dict()
     common = [d for d in me.index if d in old]
-    if common:
-        ratios = [me.loc[d] / old[d] for d in common]
-        k = sorted(ratios)[len(ratios) // 2]
-        bad = [f'{d:%Y-%m}: {me.loc[d]/old[d]/k-1:+.3%}' for d in common
-               if abs(me.loc[d] / old[d] / k - 1) > LEVEL_TOL]
-        if bad:
-            raise SignalError(f'{sym}: УРОВНИ ряда разошлись с записанными сверх общего '
-                              f'множителя — {bad[:4]}; поставщик пересчитал историю, сигнал '
-                              f'пограничного месяца недостоверен')
-    # запись/обновление сайдкара — всегда, атомарно
+    if not common:
+        return
+    ratios = [me.loc[d] / old[d] for d in common]
+    k = sorted(ratios)[len(ratios) // 2]
+    bad = [f'{d:%Y-%m}: {me.loc[d]/old[d]/k-1:+.3%}' for d in common
+           if abs(me.loc[d] / old[d] / k - 1) > LEVEL_TOL]
+    if bad:
+        raise SignalError(f'{sym}: УРОВНИ ряда разошлись с записанными сверх общего '
+                          f'множителя — {bad[:4]}; поставщик пересчитал историю, сигнал '
+                          f'пограничного месяца недостоверен')
+
+
+def _commit_levels(live, pending):
+    """Фиксация сайдкара — ТОЛЬКО после успешного обновления обеих ног и публикации ряда."""
+    import pandas as pd
     import tempfile
+    lp = _levels_path(live)
     rows = {}
     if lp.exists():
         df = pd.read_csv(lp, parse_dates=[0], index_col=0)
         rows = {d: dict(r) for d, r in df.iterrows()}
-    for d, v in me.items():
-        rows.setdefault(d, {})[sym] = float(v)
+    for sym, me in pending.items():
+        for d, v in me.items():
+            rows.setdefault(d, {})[sym] = float(v)
     cols = sorted({c for r in rows.values() for c in r})
     fd, tmp = tempfile.mkstemp(dir=str(lp.parent), suffix='.tmp')
     with os.fdopen(fd, 'w', encoding='utf-8') as f:
         f.write(',' + ','.join(cols) + '\n')
         for d in sorted(rows):
             f.write(f'{d:%Y-%m-%d},' + ','.join(
-                ('' if cols_c not in rows[d] else f'{rows[d][cols_c]:.6f}')
-                for cols_c in cols) + '\n')
+                ('' if c not in rows[d] else f'{rows[d][c]:.6f}') for c in cols) + '\n')
         f.flush(); os.fsync(f.fileno())
     os.replace(tmp, lp)
 
@@ -187,9 +193,11 @@ def _update_locked(ib, LIVE, pd):
     ref = pd.read_csv(LIVE, parse_dates=[0], index_col=0).sort_index()
 
     fresh = {}
+    pending_levels = {}
     for col, sym, primary in LEGS:
         me = monthly_adjusted(ib, sym, primary)
-        _verify_levels(sym, LIVE, me)      # уровни против сайдкара (десятый круг, №9)
+        _check_levels(sym, LIVE, me)       # только ПРОВЕРКА (одиннадцатый круг, №10)
+        pending_levels[sym] = me
         st = states(me)
         _verify_overlap(sym, col, ref, st)
         fresh[col] = st
@@ -198,6 +206,7 @@ def _update_locked(ib, LIVE, pd):
                         - set(ref.index))
     new_months = [d for d in new_months if d > ref.index[-1]]
     if not new_months:
+        _commit_levels(LIVE, pending_levels)
         return []
     # ПОЛНАЯ АТОМАРНАЯ ПЕРЕЗАПИСЬ (№18): временный файл, fsync, os.replace — читатель видит
     # либо старый файл целиком, либо новый целиком, и никогда полстроки.
@@ -213,6 +222,7 @@ def _update_locked(ib, LIVE, pd):
             f.write(f'{d:%Y-%m-%d},{int(r.iloc[0])},{int(r.iloc[1])}\n')
         f.flush(); os.fsync(f.fileno())
     os.replace(tmp, LIVE)
+    _commit_levels(LIVE, pending_levels)
     return [(f'{d:%Y-%m-%d}', int(fresh['leg_eq'].loc[d]), int(fresh['leg_bond'].loc[d]))
             for d in new_months]
 

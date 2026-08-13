@@ -129,14 +129,31 @@ def holidays_for(*years):
     return tuple(out)
 
 
+def roll_deadline(tag, holidays=()):
+    """День ролла ЦИКЛА ЭТОЙ СЕРИИ: за 3 сессии до конца месяца, предшествующего поставке."""
+    m, y = tag_month(tag)
+    rm, ry = (m - 1, y) if m > 1 else (12, y - 1)
+    return roll_date(ry, rm, holidays)
+
+
 def missed_roll_check(b, m):
-    """ОБЕ НОГИ (десятый круг, №4): книга из одного ZN (ser_a=None) или с разъехавшимися
-    ногами прежде не навёрстывала пропущенный ролл и доезжала до поставочной зоны."""
-    if not getattr(m, 'roll_passed', False):
-        return False
-    ft = first_tag(m.date)
-    return ((b.ser_a is not None and b.ser_a == ft)
-            or (b.ser_b is not None and b.ser_b == ft))
+    """Пропущенный ролл: СРОК удерживаемой серии прошёл, а серия всё ещё в книге.
+
+    Десятый круг (№4): смотрим ОБЕ ноги. Одиннадцатый (№3): сравнение с first_tag работало
+    только ВНУТРИ месяца ролла — простой до сентября оставлял U26 в книге без навёрстывания
+    (first_tag уже Z26, roll_passed вне августа ложен), и дело кончалось поздним отказом в
+    поставочной зоне. Теперь признак — по КАЛЕНДАРНОМУ СРОКУ самой серии: он не зависит от
+    того, в каком месяце нас включили."""
+    hol = getattr(m, 'holidays', ()) or ()
+    for held in (b.ser_a, b.ser_b):
+        if held is None:
+            continue
+        try:
+            if m.date > roll_deadline(held, hol):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def target_tag(held, dte, roll_today, roll_passed=False):

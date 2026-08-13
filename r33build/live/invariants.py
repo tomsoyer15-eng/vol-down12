@@ -1190,21 +1190,29 @@ def _r5(r):
 @rinv('замыкание снимает предварительность и ставит плечо закрытия ПО SPY',
       needs=lambda r: r['case'] == 'замыкание')
 def _r6(r):
-    """Плечо закрытия обязано считаться от SPY, а не от ES/10 (десятый круг, №1): базис
-    до 2% ложно включал или пропускал кап. Бары стенда различимы, ожидание — от SPY."""
+    """Плечо закрытия обязано считаться от SPY (десятый круг, №1). Первая редакция этого
+    утверждения сравнивала ПОЛНОЕ плечо с вкладом одной ноги А и выбирала просто больший из
+    кандидатов — оно проходило и при фактическом ES/10 (одиннадцатый круг, №2). Теперь
+    считаются ОБА полных плеча (SPY и ES/10, включая ногу Б по dref закрытия), и сохранённое
+    обязано совпасть со SPY-вариантом с точностью до округления, а варианты — различаться.
+    """
     if r['raised'] or r['provisional'] is not False or r['placed'] != 0:
         return False
-    spy_t = 776.0 * 1.002
-    es10_t = 7747.5 * 1.002 / 10.0
     import sim_v13 as S
     b = r['saved']
-    u_b = (S.ZN_MODEL_PX_EQ * S.CTD_RATIO * b.d_fix * 1e-4) / (7.9 * 1e-4)
-    # точный u_b зависит от dref закрытия; сверяем ОТНОСИТЕЛЬНО: плечо с SPY против ES/10
-    lev_spy = (b.n_e * (S.ES_MULT / 10) * spy_t) / 1_000_000.0
-    lev_es = (b.n_e * (S.ES_MULT / 10) * es10_t) / 1_000_000.0
-    da, de = abs(r['lev'] - lev_spy), abs(r['lev'] - lev_es)
-    # нога Б добавляет одинаковый вклад в оба варианта — сравнение по ноге А корректно
-    return da < de
+    nav = 1_000_000.0
+    # сегодняшние закрытия стенда: prev * 1.01 (см. ветку 'замыкание' в _session_run)
+    spy_t = 776.0 * 1.01
+    es10_t = 7747.5 * 1.01 / 10.0
+    y_t = 46.84 * 1.01 / 10.0 / 100.0
+    dref_t = float(S.dur(y_t))
+    u_b = (S.ZN_MODEL_PX_EQ * S.CTD_RATIO * b.d_fix * 1e-4) / (dref_t * 1e-4)
+    leg_b = b.n_b * u_b
+    lev_spy = (b.n_e * (S.ES_MULT / 10) * spy_t + leg_b) / nav
+    lev_es = (b.n_e * (S.ES_MULT / 10) * es10_t + leg_b) / nav
+    if abs(lev_spy - lev_es) < 1e-6:
+        return False                      # бары неразличимы — утверждение было бы пустым
+    return abs(r['lev'] - lev_spy) < 1e-9
 
 
 @rinv('тонкий живой запас О-3-Е сокращает книгу маршрута Е',
@@ -1688,6 +1696,8 @@ def _session_route_switch():
             _b, _s, out['route_saved'] = ST.load(ST.book_path('E'), DL.BookE)
         except Exception:
             out['route_saved'] = None
+        rt = ST.lock_dir() / 'route.txt'
+        out['route_file'] = rt.read_text(encoding='utf-8').strip() if rt.exists() else None
     finally:
         pd.Timestamp.now = real_now
         (ib_insync.Index, FD.registry, FD.signal_state, FD.exchange_today,
@@ -1706,8 +1716,9 @@ def _r17(r):
     """Штатного продолжения после перехода прежде не существовало: запуск на старом маршруте
     останавливался на расхождении, на новом — падал при чтении чужого формата или читал
     книгу по другому пути. Проверяется вся связка целиком."""
+    # route.txt обязан быть написан ПЕРЕХОДОМ (одиннадцатый круг, №4).
     return (r['f_ok'] and r['handed'] is not None and r.get('same_day_refused')
-            and r['e_ok'] and r['route_saved'] == 'E')
+            and r['e_ok'] and r['route_saved'] == 'E' and r.get('route_file') == 'E')
 
 
 @rinv('после перехода книга состоит ТОЛЬКО из долей фондов',
@@ -1799,7 +1810,8 @@ def tinv(name, needs=None):
 
 TR_CASES = ('план целых фьючерсов', 'план дробных долей фонда', 'дублированный источник',
             'дробный фьючерс в плане', 'исполнение в лимите', 'дробное исполнение фьючерса',
-            'повторный запуск после обрыва', 'ИСПОЛНЕНИЕ дробного источника')
+            'повторный запуск после обрыва', 'ИСПОЛНЕНИЕ дробного источника',
+            'источник мельче зерна цели')
 
 
 class _Unp(dict):
@@ -1870,8 +1882,13 @@ def _tr_run(case):
             # ПОСЛЕДНИЙ оказывается дробным (5+5+5+5+0,5). Если весь остаток уходит одной
             # заявкой, опасное место — округление хвоста вверх — не исполняется вовсе, и
             # проверка ничего не доказывает.
-            legs = ({'Б': dict(src=[('CBU0', 20.5, 5.0)], dst=('CSPX', 6.0, 'ETF'))}
-                    if frac_case else legs_fut)
+            if case == 'источник мельче зерна цели':
+                # остаток продажи меньше половины зерна цели: want=0, покупка не подаётся
+                legs = {'Б': dict(src=[('CBU0', 30, 5.0)], dst=('ZN', ZN_U, 'FUT'))}
+            elif frac_case:
+                legs = {'Б': dict(src=[('CBU0', 20.5, 5.0)], dst=('CSPX', 6.0, 'ETF'))}
+            else:
+                legs = legs_fut
             lots = TRN.plan_lots(legs, 10e6)
             lim = TRN.unpaired_limit(legs, 10e6)
             frac = 'ZN' if case == 'дробное исполнение фьючерса' else None
@@ -1952,6 +1969,17 @@ def _t8(r):
     if r['raised']:
         return False
     return r.get('sold') is not None and abs(r['sold'] - 20.5) < 1e-9
+
+
+@tinv('нулевая покупка не подаётся брокеру',
+      needs=lambda r: r['case'] == 'источник мельче зерна цели')
+def _t9(r):
+    """Живой адаптер отверг бы нулевую заявку, и уже проданный источник повисал бы в MIXED
+    (одиннадцатый круг, №9): остаток обязан копиться, а не превращаться в buy(0)."""
+    if r['raised']:
+        return False
+    return (not any(k == 'buy' and q == 0 for k, i, q in (r['log'] or []))
+            and any(k == 'buy_skip_zero' for k, i, q in (r['log'] or [])))
 
 
 @tinv('повторный запуск не переисполняет завершённые лоты',

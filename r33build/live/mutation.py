@@ -685,8 +685,8 @@ def _signal_mutations():
 
     def levels_off():
         """Сверка уровней отключена: неоднородный пересчёт истории поставщиком проходит."""
-        orig = SU._verify_levels
-        return orig, (lambda sym, live, me: None), '_verify_levels'
+        orig = SU._check_levels
+        return orig, (lambda sym, live, me: None), '_check_levels'
 
     return [('сверка уровней отключена', levels_off),
             ('сверка перекрытия отключена', overlap_off),

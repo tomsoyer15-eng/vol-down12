@@ -45,17 +45,43 @@ chicago() { TZ=America/Chicago date "+$1"; }
 is_trade_day() {
     local dow; dow=$(chicago %u)                       # 6,7 — выходные
     [ "$dow" -ge 6 ] && return 1
-    "$PY" - <<PYEOF
+    "$PY" - "$(route)" <<'PYEOF'
 import sys
-sys.path.insert(0, '$LIVE'); sys.path.insert(0, '$ROOT/r33build')
-import pandas as pd, daily as DL
-d = pd.Timestamp('$(chicago %F)')
-sys.exit(1 if d.normalize() in set(DL.holidays_for(d.year)) else 0)
+sys.path.insert(0, '/home/alex/claude-projects/vol-down12/r33build/live')
+sys.path.insert(0, '/home/alex/claude-projects/vol-down12/r33build')
+import pandas as pd, daily as DL, feed as FD, subprocess
+d = pd.Timestamp(subprocess.run(['date', '+%F'], env={'TZ': 'America/Chicago'},
+                                capture_output=True, text=True).stdout.strip())
+route = sys.argv[1] if len(sys.argv) > 1 else 'F'
+try:
+    hol = (FD.eu_holidays(d.year) if route == 'E' else DL.holidays_for(d.year))
+except Exception:
+    sys.exit(2)          # непокрытый год: НЕ «выходной», а тревога у вызывающего
+sys.exit(1 if d.normalize() in set(hol) else 0)
 PYEOF
 }
 
 ensure_gw() {
-    if exec 3<>/dev/tcp/127.0.0.1/4002 2>/dev/null; then exec 3<&-; rm -f "$ST/gw-fails"; return 0; fi
+    if exec 3<>/dev/tcp/127.0.0.1/4002 2>/dev/null; then
+        exec 3<&-
+        # ПОРТ — ТОЛЬКО ПОВОД ПОЖАТЬ РУКУ (одиннадцатый круг, №7): полуживой шлюз с
+        # открытым сокетом прежде допускался к торговле в обход заявленной проверки API.
+        if "$PY" - <<'HS0'
+import sys
+sys.path.insert(0, '/home/alex/claude-projects/vol-down12/r33build/live')
+import tz
+from ib_insync import IB
+ib = IB()
+try:
+    ib.connect('127.0.0.1', 4002, clientId=97, timeout=15)
+    ok = bool(ib.managedAccounts())
+    ib.disconnect()
+    sys.exit(0 if ok else 1)
+except Exception:
+    sys.exit(1)
+HS0
+        then rm -f "$ST/gw-fails"; return 0; fi
+    fi
     log "шлюз не отвечает — запускаю"
     [ -f "$ENVF" ] || { log "ТРЕВОГА: нет $ENVF — запускать шлюз нечем"; return 1; }
     set -a; . "$ENVF"; set +a
@@ -124,7 +150,13 @@ tick() {
     local day hm
     day=$(chicago %F); hm=$(chicago %H%M)
     ls "$ST"/ALARM-*.txt >/dev/null 2>&1 && return 0     # тревога: стоим до ручного разбора
-    is_trade_day || return 0
+    is_trade_day; _td=$?
+    if [ "$_td" -eq 2 ]; then
+        echo "календарь маршрута $(route) не покрывает текущий год" > "$ST/ALARM-calendar.txt"
+        log "ТРЕВОГА: календарь не покрыт — автопилот остановлен"
+        return 0
+    fi
+    [ "$_td" -eq 0 ] || return 0
     if [ "$hm" -ge "$(trade_till)" ] && [ ! -e "$ST/traded-$day" ] && [ ! -e "$ST/ALARM-missed-$day.txt" ]; then
         # ДЕНЬ ПРОПУЩЕН: все тики до конца окна потеряны (машина спала). Торговать в 16:05
         # и тут же замыкать — значит оставить рыночные GTC на ночь; вместо этого тревога.
@@ -149,7 +181,7 @@ tick() {
         fi
         run_trade "$day"
     fi
-    if [ "$hm" -ge 1605 ] 2>/dev/null && [ -e "$ST/traded-$day" ] && [ ! -e "$ST/closed-$day" ]; then
+    if [ "$hm" -ge "$(close_after)" ] && [ -e "$ST/traded-$day" ] && [ ! -e "$ST/closed-$day" ]; then
         ensure_gw && run_close "$day"
     fi
     find "$ST" -maxdepth 1 -name 'traded-*' -mtime +14 -delete 2>/dev/null
