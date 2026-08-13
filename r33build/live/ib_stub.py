@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""Подставной интерфейс ib_insync: живой адаптер под теми же проверками, что расчётчик.
+
+ЗАЧЕМ. Шестая рецензия указала на измеренную дыру: перебор состояний и мутации гоняли
+только daily.py через FakeBroker, а live/ib_broker.py — код, который РЕАЛЬНО ходит на биржу
+— не проверялся ничем. Поэтому несовместимость контракта отмены, усечение дробных долей,
+сопоставление отчётов об исполнении, устаревший NLV и подмена контракта имели гарантированно
+нулевую наблюдаемость: заявление «все мутации ловятся» относилось к чистому расчётчику и
+ничего не говорило о денежно опасной границе с IBKR.
+
+ЧТО ИМЕННО ВОСПРОИЗВОДИТСЯ. Не «брокер вообще», а конкретные наблюдённые повадки IBKR:
+  'cancelled_but_filled' — статус Cancelled при СОСТОЯВШЕМСЯ исполнении (наблюдено 12.08.2026);
+  'stale_positions'      — позиции отстают на один запрос (из-за этого сверка при
+                           восстановлении читала ноль и объявляла книгу восстановленной);
+  'foreign_fill'         — в отчётах лежит чужое исполнение с тем же orderId, но другим
+                           permId: проверка, что сопоставление идёт не по номеру заявки;
+  'late_fills'           — отчёт о сделке приходит ТОЛЬКО по reqExecutions: проверка,
+                           что исход определяется барьером, а не длиной паузы;
+  'other_account'        — на другом managed account лежит позиция по тому же контракту;
+  'stale_twice'          — позиции устарели УСТОЙЧИВО: два подряд снимка совпадают и оба лгут.
+                           Совпадение снимков не барьер, и подстановка обязана это показывать,
+                           иначе проверка воспроизводит алгоритм, а не поведение биржи;
+  'fill_after_end'       — исполнение приходит ПОСЛЕ конца выгрузки (execDetailsEnd): барьер
+                           завершился, а сделка ещё не была известна брокеру;
+  'partial', 'reject', 'disconnect', 'stale_nlv', 'wrong_contract'.
+
+Подстановка НЕ моделирует биржу и не претендует на это. Она задаёт ровно те исходы, на
+которых адаптер обязан вести себя определённым образом, и позволяет их перебирать.
+"""
+import csv
+import itertools
+from pathlib import Path
+from typing import NamedTuple
+
+# ФИКСТУРА РЕЕСТРА. Проверки адаптера НЕ ДОЛЖНЫ зависеть от instruments_live.csv: тот файл
+# принадлежит конкретному счёту, меняется каждый квартал вместе с con_id и в пакет не входит.
+# Первая же сборка это и показала — распакованный архив провалил проверки, работавшие в
+# рабочем каталоге. Здесь набор фиксирован и самодостаточен.
+FIXTURE_ROWS = [
+    dict(instrument='ESU26', sec_type='FUT', pair_group='EQ', exchange='CME', currency='USD',
+         con_id='900001', local_symbol='ESU6', expiry='20260918', multiplier='50'),
+    dict(instrument='MESU26', sec_type='FUT', pair_group='EQ', exchange='CME', currency='USD',
+         con_id='900002', local_symbol='MESU6', expiry='20260918', multiplier='5'),
+    dict(instrument='ZNU26', sec_type='FUT', pair_group='BOND', exchange='CBOT', currency='USD',
+         con_id='900003', local_symbol='ZNU6', expiry='20260921', multiplier='1000'),
+    # У IBKR фонды — 'STK': литерал 'ETF' в фикстуре скрывал от стендов дефект №14.
+    dict(instrument='CSPX', sec_type='STK', pair_group='EQ', exchange='SMART', currency='USD',
+         con_id='900004', local_symbol='CSPX', expiry='', multiplier=''),
+    dict(instrument='CBU0', sec_type='STK', pair_group='BOND', exchange='SMART', currency='USD',
+         con_id='900005', local_symbol='CSBGU0', expiry='', multiplier=''),
+]
+FIXTURE_COLS = list(FIXTURE_ROWS[0])
+
+
+def fixture_registry(dirpath):
+    """Записать фикстуру реестра во временный каталог и вернуть путь."""
+    p = Path(dirpath) / 'instruments_fixture.csv'
+    with open(p, 'w', newline='', encoding='utf-8') as f:
+        w = csv.DictWriter(f, fieldnames=FIXTURE_COLS)
+        w.writeheader()
+        for r in FIXTURE_ROWS:
+            w.writerow(r)
+    return p
+
+
+class _OrderStatus:
+    def __init__(self):
+        self.status = 'PendingSubmit'; self.filled = 0.0; self.avgFillPrice = 0.0
+
+
+class _Trade:
+    def __init__(self, contract, order):
+        self.contract = contract; self.order = order
+        self.orderStatus = _OrderStatus(); self.log = []
+
+
+class _Exec:
+    def __init__(self, orderId, permId, shares, side, acct):
+        self.orderId = orderId; self.permId = permId; self.shares = shares
+        self.side = side; self.acctNumber = acct; self.price = 100.0
+
+
+class _Commission:
+    def __init__(self, c): self.commission = c
+
+
+class _Fill:
+    def __init__(self, contract, execution, commission=2.0):
+        self.contract = contract; self.execution = execution
+        self.commissionReport = _Commission(commission)
+
+
+class _Bar(NamedTuple):
+    """Именованный кортеж, а не свободный объект: util.df собирает кадр из записей."""
+    date: object
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    average: float
+    barCount: int
+
+
+class _Pos:
+    def __init__(self, contract, position, account='DU000001'):
+        self.contract = contract; self.position = position; self.account = account
+
+
+class _Val:
+    def __init__(self, tag, value, currency='USD'):
+        self.tag = tag; self.value = value; self.currency = currency
+
+
+class StubIB:
+    """Минимальный ib_insync, достаточный для IBBroker и только для него."""
+
+    def __init__(self, rows, behaviour='normal', positions=None, nlv=1_000_000.0,
+                 account='DU000001'):
+        self.rows = {int(r['con_id']): r for r in rows}
+        self.behaviour = behaviour
+        self._pos = dict(positions or {})          # con_id -> количество
+        self._nlv = float(nlv)
+        self._acct = account
+        self._trades = []
+        self._fills = []
+        self._ids = itertools.count(1)
+        self._perm = itertools.count(1000)
+        self._pos_reads = 0
+        self._shown = dict(self._pos)              # что «видно» снаружи
+
+    # --- инфраструктура ---
+    def managedAccounts(self): return [self._acct]
+    def isConnected(self): return self.behaviour != 'disconnect_link'
+    def sleep(self, s): pass
+    def waitOnUpdate(self, timeout=None): pass
+    def reqAllOpenOrders(self): pass
+    def reqAccountUpdates(self, acct=None): pass
+    def orders(self): return [t.order for t in self._trades]
+
+    def reqExecutions(self, execFilter=None):
+        # 'fill_after_end': ПЕРВЫЙ барьер завершается БЕЗ отчёта — сделка ещё не известна
+        # брокеру. Отчёт появляется только на следующем запросе, то есть уже после того,
+        # как контур счёл исход определённым.
+        if self.behaviour == 'fill_after_end':
+            self._exec_calls = getattr(self, '_exec_calls', 0) + 1
+            if self._exec_calls <= 1:
+                return list(self._fills)
+        """Барьер отчётов об исполнении: возвращает всё, что известно брокеру.
+
+        При 'late_fills' отчёт о СОСТОЯВШЕЙСЯ сделке доходит ТОЛЬКО по этому запросу — так
+        проверяется, что исход заявки определяется барьером, а не тем, что успело
+        разнестись за паузу. Без запроса сделки как будто нет, хотя позиция уже изменилась.
+        """
+        self._fills.extend(getattr(self, '_pending', []))
+        self._pending = []
+        return list(self._fills)
+
+    STALE_READS = {'stale_positions': 1, 'stale_twice': 3}
+
+    def reqPositions(self, *a, **k):
+        # ПОЗИЦИИ ОТСТАЮТ. 'stale_positions' — на один запрос; 'stale_twice' — на три, то
+        # есть ДВА ПОДРЯД снимка совпадают и оба устарели. Второй случай показывает предел
+        # возможного: на уровне адаптера устойчиво устаревшая картина неотличима от верной,
+        # и доказывать надо не её распознавание, а то, что расхождение поймает следующая
+        # сессия и остановится.
+        self._pos_reads += 1
+        if self._pos_reads > self.STALE_READS.get(self.behaviour, 0):
+            self._shown = dict(self._pos)
+        return self.positions()
+
+    def positions(self, account=None):
+        """Позиции СВОЕГО счёта плюс, при 'other_account', чужого. Прежняя подстановка
+        моделировала ровно один счёт и потому по построению не могла показать смешение."""
+        out = [_Pos(self._contract_of(cid), q, self._acct)
+               for cid, q in self._shown.items() if q]
+        if self.behaviour == 'other_account':
+            cid = next(iter(self.rows))
+            out.append(_Pos(self._contract_of(cid), 26.0, 'DU999999'))
+        return out
+
+    def accountValues(self, account=None):
+        nlv = self._nlv * (0.5 if self.behaviour == 'stale_nlv' else 1.0)
+        return [_Val('NetLiquidation', f'{nlv:.2f}')]
+
+    def accountSummary(self, account=None):
+        """Одноразовая сводка. Адаптер берёт NLV именно так: подписка reqAccountUpdates на
+        бумажном шлюзе не возвращается вовсе и вешала сессию до тайм-аута. Отдаются и теги
+        запаса О-3-Е; при 'thin_cushion' запас 1,20 — ниже порога 1,40."""
+        out = self.accountValues(account)
+        ewl = self._nlv
+        maint = (self._nlv / 1.2) if self.behaviour == 'thin_cushion' else 0.0
+        out.append(_Val('EquityWithLoanValue', f'{ewl:.2f}'))
+        out.append(_Val('MaintMarginReq', f'{maint:.2f}'))
+        return out
+
+    def fills(self): return list(self._fills)
+    def openTrades(self):
+        return [t for t in self._trades if t.orderStatus.status in ('PendingSubmit', 'Submitted')]
+
+    # --- контракты ---
+    def _contract_of(self, cid):
+        from ib_insync import Contract
+        r = self.rows.get(cid, {})
+        return Contract(conId=cid, secType=r.get('sec_type', 'FUT'),
+                        symbol=r.get('instrument', ''), localSymbol=r.get('local_symbol', ''),
+                        exchange=r.get('exchange', ''), currency=r.get('currency', 'USD'),
+                        lastTradeDateOrContractMonth=str(r.get('expiry', '')),
+                        multiplier=str(r.get('multiplier', '')))
+
+    AUX = {'SPY': 900010, 'IEF': 900011}     # инструменты сигналов и цены ноги А
+
+    def qualifyContracts(self, *cs):
+        for c in cs:
+            if not getattr(c, 'conId', 0) and getattr(c, 'symbol', '') in self.AUX:
+                # Запрос по символу (Stock('SPY'...)): стендам нужен тот же путь, что бою.
+                c.conId = self.AUX[c.symbol]
+                self.rows.setdefault(c.conId, dict(
+                    instrument=c.symbol, sec_type='STK', exchange='SMART', currency='USD',
+                    con_id=str(c.conId), local_symbol=c.symbol, expiry='', multiplier=''))
+            r = self.rows.get(c.conId)
+            if r is None:
+                c.conId = 0; continue
+            c.secType = r.get('sec_type', 'FUT')
+            c.symbol = r.get('instrument', '')
+            c.localSymbol = r.get('local_symbol', '')
+            c.exchange = r.get('exchange', '')
+            c.currency = r.get('currency', 'USD')
+            c.lastTradeDateOrContractMonth = str(r.get('expiry', ''))
+            c.multiplier = str(r.get('multiplier', ''))
+            if self.behaviour == 'wrong_contract':
+                # con_id указывает на ДРУГУЮ поставку: адаптер обязан отказать, а не подать.
+                c.lastTradeDateOrContractMonth = '20991231'
+                c.localSymbol = 'ЧУЖОЙ'
+        return list(cs)
+
+    # --- история ---
+    def set_bars(self, bars):
+        """bars: con_id -> [(дата, закрытие), ...]. Сборщик входов проверяет ДАТЫ баров,
+        и без подстановки истории эта проверка не исполнялась ни разу."""
+        self._bars = dict(bars)
+
+    def reqHistoricalData(self, contract, endDateTime='', durationStr='', barSizeSetting='',
+                          whatToShow='', useRTH=True, **kw):
+        import pandas as pd
+        rows = getattr(self, '_bars', {}).get(contract.conId, [])
+        out = []
+        for d, c in rows:
+            v = float(c)
+            out.append(_Bar(pd.Timestamp(d).date(), v, v, v, v, 0.0, v, 1))
+        return out
+
+    # --- заявки ---
+    def placeOrder(self, contract, order):
+        tr = _Trade(contract, order)
+        order.orderId = next(self._ids)
+        order.permId = next(self._perm)
+        self._trades.append(tr)
+        want = float(order.totalQuantity) * (1 if order.action == 'BUY' else -1)
+        b = self.behaviour
+        if b == 'reject':
+            tr.orderStatus.status = 'Inactive'; return tr
+        if b == 'disconnect':
+            tr.orderStatus.status = 'Submitted'; return tr
+        done = want
+        if b == 'partial':
+            done = want * 0.5
+        if b == 'foreign_fill':
+            # Чужое исполнение с ТЕМ ЖЕ номером заявки, но другим permId и контрактом.
+            self._fills.append(_Fill(self._contract_of(next(iter(self.rows))),
+                                     _Exec(order.orderId, 999999, 77.0, 'BOT', self._acct)))
+        self._pos[contract.conId] = self._pos.get(contract.conId, 0) + done
+        f = _Fill(contract, _Exec(order.orderId, order.permId, abs(done),
+                                  'BOT' if done > 0 else 'SLD', self._acct))
+        if b in ('late_fills', 'late_cancelled', 'fill_after_end'):
+            self._pending = getattr(self, '_pending', []) + [f]
+        else:
+            self._fills.append(f)
+        tr.orderStatus.avgFillPrice = 100.0
+        if b == 'late_cancelled':
+            # ХУДШИЙ НАБЛЮДЁННЫЙ СЛУЧАЙ ЦЕЛИКОМ: статус «отменена», собственный счётчик
+            # заявки НУЛЕВОЙ, позиция изменена, а единственное свидетельство — отчёт о
+            # сделке, доходящий только по reqExecutions. Запасной путь «взять filled из
+            # статуса» здесь бесполезен, и исход определяет ровно барьер выгрузки.
+            tr.orderStatus.filled = 0.0
+            tr.orderStatus.status = 'Cancelled'
+        else:
+            tr.orderStatus.filled = abs(done)
+            tr.orderStatus.status = 'Cancelled' if b == 'cancelled_but_filled' else 'Filled'
+        return tr
+
+    def cancelOrder(self, order):
+        for t in self._trades:
+            if t.order.orderId == order.orderId and t.orderStatus.status in ('PendingSubmit',
+                                                                            'Submitted'):
+                t.orderStatus.status = 'Cancelled'

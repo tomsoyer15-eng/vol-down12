@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Доказательство эквивалентности боевого контура симулятору.
+
+Боевой контур daily.step() написан НЕЗАВИСИМО от sim164: другая структура, капитал
+подаётся извне, состояние переносимо через перезапуск. Совпадение поэтому не
+предполагается, а проверяется: контур прогоняется сессия за сессией по всей истории,
+рыночный P&L добавляется снаружи ровно по формуле §2, и полученный NAV сравнивается с
+NAV симулятора.
+
+Сверяются не только итоговые цифры, но и ПОЗИЦИИ на каждой сессии: два кода могут дать
+одинаковый NAV разными книгами, и это было бы совпадением, а не эквивалентностью.
+"""
+import sys
+from pathlib import Path
+import numpy as np, pandas as pd
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'live'))
+import sim_v13 as S
+from sim_v164 import sim164
+import daily as DL
+
+
+def replay(d, band=None, cap=2.0, spread_pp=0.5, cap0=10_000_000.0):
+    days, re, rb, rfv, spy_close, dref, st_eq, st_bd = d
+    st_eq = S.strict_states(st_eq, days); st_bd = S.strict_states(st_bd, days)
+    sd = spread_pp / 100 / 252
+    rolls = S.roll_days_calendar(days)
+    book = DL.Book(d_fix=dref[0])
+    e = cap0
+    nav = np.empty(len(days)); pos = np.empty((len(days), 2), dtype=np.int64)
+    for i, dte in enumerate(days):
+        j = max(i - 1, 0)
+        m = DL.Market(date=dte, px_eq_prev=spy_close[j], dref_prev=dref[j],
+                      dref_today=dref[i], px_eq_today=spy_close[i],
+                      roll_today=(dte in rolls), st_eq=bool(st_eq[i]), st_bd=bool(st_bd[i]))
+        dec = DL.step(book, m, e, band=band, cap=cap, check_guards=False)
+        book = dec.book_after
+        e = dec.capital_after_costs
+        pos[i] = (book.n_e, book.n_b)
+        if i == 0:
+            nav[i] = e                       # first_day='fixed', как в ред. 4
+        else:
+            e = (e * (1 + rfv[i])
+                 + dec.exposure['А'] * (re[i] - rfv[i] - sd)
+                 + dec.exposure['Б'] * (rb[i] - rfv[i] - sd))
+            nav[i] = e
+        # замыкание сессии по факту закрытия — в бою здесь читается NLV брокера
+        book = DL.close_out(book, spy_close[i], dref[i], nav[i])
+    return pd.Series(nav, index=days), pos
+
+
+def positions_of_sim(d, band=None, cap=2.0):
+    """NAV И РЯД ПОЗИЦИЙ симулятора. Одинаковый NAV при разных книгах в принципе возможен,
+    поэтому сверять только NAV недостаточно: sim164 отдаёт книгу на конец каждой сессии."""
+    rec = []
+    r, nav, st = sim164(*d, cap=cap, first_day='fixed', band=band, record=rec)
+    return nav, st, np.array(rec, dtype=np.int64)
+
+
+def replay_e(d, band=None, cap=2.0, cap0=10_000_000.0):
+    """Прогон контура маршрута Е против sim_etf. О-3-Е отключается: в бэктесте его нет,
+    и сверяется именно арифметика книги, а не поведение критерия."""
+    days, re, rb, rfv, spy_close, dref, st_eq, st_bd = d
+    st_eq = S.strict_states(st_eq, days); st_bd = S.strict_states(st_bd, days)
+    pb = 100.0 * np.cumprod(1.0 + np.asarray(rb))
+    book = DL.BookE(); e = cap0
+    nav = np.empty(len(days)); pos = np.empty((len(days), 2), dtype=np.int64)
+    for i, dte in enumerate(days):
+        j = max(i - 1, 0)
+        m = DL.MarketE(date=dte, px_eq_prev=spy_close[j], px_bd_prev=pb[j],
+                       px_eq_today=spy_close[i], px_bd_today=pb[i],
+                       st_eq=bool(st_eq[i]), st_bd=bool(st_bd[i]))
+        dec = DL.step_e(book, m, e, band=band, cap=cap, check_o3e=False)
+        book = dec.book_after
+        e = dec.capital_after_costs
+        c = dec.daily_costs
+        e -= (c['ter'] + c['drag'] + c['loan'])
+        pos[i] = (book.n_eq, book.n_bd)
+        P = dec.exposure['А'] + dec.exposure['Б']
+        if i == 0:
+            nav[i] = e
+        else:
+            cash = e - P
+            e = e + cash * rfv[i] + dec.exposure['А'] * re[i] + dec.exposure['Б'] * rb[i]
+            nav[i] = e
+        book = DL.close_out_e(book, spy_close[i], pb[i], nav[i])
+    return pd.Series(nav, index=days), pos
+
+
+if __name__ == '__main__':
+    ok = True
+    for nm, d in (('современное окно 2003–2026', S.build_modern()),
+                  ('склейка 1963–2026', S.build_splice())):
+        nav_live, pos = replay(d)
+        nav_sim, st, pos_sim = positions_of_sim(d)
+        same_idx = nav_live.index.equals(nav_sim.index)
+        close = np.allclose(nav_live.values, nav_sim.values, rtol=1e-12, atol=0.0)
+        rel = np.max(np.abs(nav_live.values / nav_sim.values - 1))
+        c_l, dd_l = S.met(nav_live.pct_change().fillna(0))
+        c_s, dd_s = S.met(nav_sim.pct_change().fillna(0))
+        print(f"\n=== {nm} ===")
+        print(f"  NAV: индексы {'совпали' if same_idx else 'РАЗОШЛИСЬ'}, "
+              f"максимальное относительное расхождение {rel:.2e} "
+              f"-> {'ЭКВИВАЛЕНТНО (1e-12)' if close else 'РАСХОЖДЕНИЕ'}")
+        print(f"  боевой контур: {c_l:.4f}% / {dd_l:.4f}%")
+        print(f"  симулятор:     {c_s:.4f}% / {dd_s:.4f}%")
+        same_pos = pos.shape == pos_sim.shape and bool((pos == pos_sim).all())
+        nbad = 0 if same_pos else int((pos != pos_sim).any(axis=1).sum())
+        print(f"  КНИГИ: {'совпали на каждой сессии' if same_pos else f'РАЗОШЛИСЬ на {nbad} сессиях'}"
+              f" ({len(pos):,} сессий)")
+        print(f"  сессий с заявкой: {int((np.diff(pos, axis=0) != 0).any(axis=1).sum()) + 1}")
+        ok &= bool(same_idx and close and same_pos)
+
+    # --- маршрут Е: собственный контур против sim_etf ---
+    from sim_etf import sim_etf as _se
+    de = S.build_modern()
+    nav_e, pos_e = replay_e(de)
+    r_s, nav_s, _st = _se(*de)
+    rel_e = np.max(np.abs(nav_e.values / nav_s.values - 1))
+    print(f"\n=== маршрут Е, современное окно ===")
+    print(f"  NAV: расхождение {rel_e:.2e} -> "
+          f"{'ЭКВИВАЛЕНТНО (1e-12)' if rel_e < 1e-12 else 'РАСХОЖДЕНИЕ'}")
+    print(f"  контур Е: {S.met(nav_e.pct_change().fillna(0))[0]:.4f}%, "
+          f"sim_etf: {S.met(nav_s.pct_change().fillna(0))[0]:.4f}%")
+    ok &= bool(rel_e < 1e-12)
+
+    # --- отказы §8 проверяются отдельно: в истории капитал 10 млн, они не срабатывают ---
+    print("\n=== отказы §8 (проверяются на подставленных величинах) ===")
+    d = S.build_modern()
+    m = DL.Market(date=d[0][-1], px_eq_prev=d[4][-2], dref_prev=d[5][-2], dref_today=d[5][-1],
+                  px_eq_today=d[4][-1], roll_today=False, st_eq=True, st_bd=True)
+    for capital, lbl in ((10_000_000.0, '10 млн'), (3_000_000.0, '3 млн (порог)'),
+                         (2_999_999.0, 'на доллар ниже порога'), (400_000.0, '400 тыс.')):
+        dec = DL.step(DL.Book(d_fix=d[5][-2]), m, capital)
+        print(f"  {lbl:<22} {'ОТКАЗ: ' + '; '.join(dec.refusals) if dec.refusals else 'заявка допускается'}")
+
+    print('\nИТОГ:', 'ЭКВИВАЛЕНТНОСТЬ ДОКАЗАНА' if ok else 'ЕСТЬ РАСХОЖДЕНИЯ')
+    sys.exit(0 if ok else 1)

@@ -1,0 +1,6 @@
+instrument,sec_type,pair_group,exchange,currency,con_id
+ES,FUT,EQ,CME,USD,TBD-live
+MES,FUT,EQ,CME,USD,TBD-live
+ZN,FUT,BOND,CBOT,USD,TBD-live
+CSPX,ETF,EQ,LSEETF,USD,TBD-live
+CBU0,ETF,BOND,LSEETF,USD,TBD-live

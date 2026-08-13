@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Был бы маржин-колл на нашей истории котировок?
+
+СРАЗУ ОБ ОГРАНИЧЕНИИ. Исторических требований SPAN у нас нет — их не публикуют рядами.
+Поэтому требование МОДЕЛИРУЕТСЯ: доля от номинала, откалиброванная по действующим
+величинам §7 (ES 34 800 $, MES 3 480 $, ZN 2 160 $), с надбавкой за качку. Надбавка —
+существенная часть ответа: биржи поднимают требования именно тогда, когда счёт падает,
+и постоянная ставка дала бы ложно спокойную картину.
+
+Три модели надбавки: постоянная ставка; ставка, растущая со скользящей качкой за 60 дней;
+ставка, реагирующая В ТОТ ЖЕ ДЕНЬ (окно 10 дней, включая сегодняшний). Третья — главная:
+шестидесятидневная поднимает требование через недели после обвала, то есть когда позиции
+уже нет, а биржи поднимают его в тот же вечер. Ставка вниз не опускается: снижают неохотно.
+Это допущения, а не измерения; выбраны в сторону КОНСЕРВАТИЗМА.
+
+Проверяются два порога: О-3 (запас ниже 2,0× — сокращение до L=1, то есть срабатывание
+собственного правила программы) и фактический маржин-колл (запас ниже 1,0×).
+"""
+import sys
+from pathlib import Path
+import numpy as np, pandas as pd
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'live'))
+import sim_v13 as S
+import replay_check as RC
+
+M_ES, M_MES, M_ZN = 34_800.0, 3_480.0, 2_160.0     # §7 v1.5.3.1, на контракт
+ZN_NOTIONAL = 112_000.0
+MAINT_E = 0.25                                      # маршрут Е: нормативное поддерживающее
+HOUSE_E = 0.35                                      # house-требование IBKR (худший случай §8а)
+
+
+def run(d, label):
+    days, re, rb, rfv, spy_close, dref = d[:6]
+    nav, pos = RC.replay(d)
+    n_e, n_b = pos[:, 0], pos[:, 1]
+    mes = days >= S.MES_START
+    mult = np.where(mes, S.ES_MULT / 10, S.ES_MULT)
+    m_per_e = np.where(mes, M_MES, M_ES)            # единица внутренней сетки
+
+    notional_a = n_e * mult * spy_close
+    notional_b = n_b * ZN_NOTIONAL
+    base_pct_a = m_per_e[-1] / (mult[-1] * spy_close[-1])
+    base_pct_b = M_ZN / ZN_NOTIONAL
+
+    # надбавка за качку: относительно сегодняшнего уровня, вниз не опускается
+    def vol(x, w):
+        return pd.Series(x, index=days).rolling(w).std().mul(np.sqrt(252)).bfill()
+
+    va, vb = vol(re, 60), vol(rb, 60)
+    ka = np.maximum(1.0, (va / va.iloc[-1]).values)
+    kb = np.maximum(1.0, (vb / vb.iloc[-1]).values)
+    # Немедленная реакция: короткое окно, ВКЛЮЧАЯ сегодняшний день. Скользящая за 60 дней
+    # поднимает требование через недели после обвала — то есть тогда, когда позиции уже нет;
+    # биржи поднимают его в тот же вечер, и именно этот случай опасен.
+    sa, sb_ = vol(re, 10), vol(rb, 10)
+    ja = np.maximum(1.0, (sa / va.iloc[-1]).values)
+    jb = np.maximum(1.0, (sb_ / vb.iloc[-1]).values)
+
+    out = {}
+    for nm, (fa, fb) in (('постоянная ставка', (np.ones(len(days)), np.ones(len(days)))),
+                         ('растёт с качкой (60 дн)', (ka, kb)),
+                         ('реагирует в тот же день', (ja, jb))):
+        req = notional_a * base_pct_a * fa + notional_b * base_pct_b * fb
+        cush = np.where(req > 0, nav.values / np.maximum(req, 1e-9), np.inf)
+        i = int(np.argmin(cush))
+        out[nm] = (cush.min(), days[i], (req / nav.values).max() * 100,
+                   int((cush < 2.0).sum()), int((cush < 1.0).sum()))
+        if 'тот же день' in nm:                       # что было в самые тяжёлые дни
+            ep = [('1987-10-15', '1987-10-30', 'обвал 1987'),
+                  ('2020-02-19', '2020-04-01', 'ковид 2020'),
+                  ('2008-09-15', '2008-11-30', 'осень 2008')]
+            out['_эпизоды'] = []
+            for a, b, lab in ep:
+                mm = (days >= a) & (days <= b)
+                if mm.sum() and np.isfinite(cush[mm]).any():
+                    out['_эпизоды'].append((lab, cush[mm].min(), (req[mm] / nav.values[mm]).max() * 100))
+    print(f"\n=== маршрут Ф, {label} ===")
+    print(f"{'модель требования':<26}{'мин. запас':>12}{'дата дна':>13}"
+          f"{'макс. маржа/NAV':>17}{'сессий <2,0×':>14}{'<1,0×':>8}")
+    for nm, v in out.items():
+        if nm.startswith('_'): continue
+        c, dt, mx, n2, n1 = v
+        print(f"{nm:<26}{c:>11.2f}×{dt.strftime('%d.%m.%Y'):>13}{mx:>16.1f}%{n2:>14}{n1:>8}")
+    if out.get('_эпизоды'):
+        print('   в тяжёлые эпизоды (ставка реагирует в тот же день):')
+        for lab, c, mx in out['_эпизоды']:
+            print(f"      {lab:<14} мин. запас {c:>6.2f}×, маржа/NAV до {mx:>5.1f}%")
+    return nav, pos, out
+
+
+def route_e(d):
+    """Маршрут Е: поддерживающее требование — доля СТОИМОСТИ позиции, поэтому запас
+    определяется прямо плечом: запас = 1/(треб. × плечо).
+
+    ИСПРАВЛЕНО. Прежняя редакция брала плечо из RC.replay(), то есть из воспроизведения
+    sim164 — ФЬЮЧЕРСНОГО маршрута Ф, и выдавала его за маршрут Е. Числа были
+    недействительны. Плечо берётся из sim_etf: доли CSPX/CBU0 и фактический дебет.
+    """
+    from sim_etf import sim_etf
+    days = d[0]
+    rec = []
+    sim_etf(*d, record=rec)
+    lev = np.array(rec)
+    days = days[-len(lev):] if len(lev) != len(days) else days
+    print("\n=== маршрут Е (ETF + займ), то же окно ===")
+    print(f"{'требование':<26}{'мин. запас':>12}{'дата дна':>13}{'сессий <1,40×':>16}{'<1,0×':>8}")
+    for pct, nm in ((MAINT_E, 'нормативное 25%'), (HOUSE_E, 'house IBKR 35%')):
+        with np.errstate(divide='ignore'):
+            cush = np.where(lev > 0, 1.0 / (pct * np.maximum(lev, 1e-12)), np.inf)
+        i = int(np.argmin(cush))
+        print(f"{nm:<26}{cush.min():>11.2f}×{days[i].strftime('%d.%m.%Y'):>13}"
+              f"{int((cush < 1.40).sum()):>16}{int((cush < 1.0).sum()):>8}")
+
+
+if __name__ == '__main__':
+    for d, lbl in ((S.build_modern(), 'современное окно 2003–2026'),
+                   (S.build_splice(), 'склейка 1963–2026')):
+        run(d, lbl)
+    route_e(S.build_splice())

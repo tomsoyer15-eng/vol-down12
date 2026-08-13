@@ -1,0 +1,961 @@
+# -*- coding: utf-8 -*-
+"""Самопроверка ADD-FUT v1.6.0 ред. 32. Запуск из корня замороженного пакета данных после
+его 10 PASS; файлы ред. 32 скопированы в корень. Корень доверия — SHA-256 ZIP.
+Маршрут Ф (sim_v164) не изменялся против замороженной ред. 4.1."""
+import tempfile as _tf0
+import os as _os1
+_TD = _tf0.mkdtemp(prefix='addfut-selfcheck-')     # ВСЕ фикстуры — в уникальном каталоге прогона:
+                                                   # параллельные запуски самопроверки не мешают друг другу
+
+def _JP(_name):
+    """Каждая фикстура — в своём подкаталоге: конфигурация развёртывания привязана к каталогу журнала."""
+    _d = _os1.path.join(_TD, _os1.path.splitext(_name)[0])
+    _os1.makedirs(_d, exist_ok=True)
+    return _os1.path.join(_d, _name)
+import sys, hashlib, os, csv
+import pandas as pd, numpy as np
+sys.path.insert(0, '.')
+import sim_v13 as S
+import shutil as _sh0
+from sim_v164 import sim164, map_mes
+from sim_etf import sim_etf
+import mr_engine as M
+M.set_state_dir_for_tests(os.path.join(_TD, 'install'))   # изоляция прогона: боевой ~/.add-fut не трогаем
+
+FAIL = []
+def chk(name, ok, msg=''):
+    print(('[PASS] ' if ok else '[FAIL] ') + name + (': ' + msg if msg else ''))
+    if not ok: FAIL.append(name)
+
+ALLOW = ['ADD-FUT-v1_6_0-r32.pdf', 'sim_v164.py', 'sim_etf.py', 'mr_engine.py', 'transition.py',
+         'mr_inputs_retro.csv', 'mr_tariff.csv', 'mr_state.csv', 'mr_journal.csv', 'selfcheck_v192.py',
+         'nav_v164_modern.csv', 'nav_v164_splice.csv', 'nav_etf_modern.csv', 'instruments.csv', 'README-192.md']
+
+try:
+    entries = [(h, fn.strip()) for h, fn in
+               (line.strip().split(maxsplit=1) for line in open('MANIFEST-192.txt', encoding='utf-8') if line.strip())]
+    names = [fn for _, fn in entries]
+    chk('уровень 0а: манифест = зашитый список (15 записей)',
+        len(entries) == len(ALLOW) and sorted(names) == sorted(ALLOW) and len(set(names)) == len(names),
+        f'{len(entries)} записей')
+    bad = [fn for h, fn in entries if fn != 'selfcheck_v192.py'
+           and not (os.path.exists(fn) and hashlib.sha256(open(fn, 'rb').read()).hexdigest() == h)]
+    chk('уровень 0б: SHA-256 файлов пакета', not bad, ', '.join(bad) if bad else 'кроме selfcheck (внешняя проверка)')
+except Exception as ex:
+    chk('уровень 0: манифест', False, str(ex))
+if FAIL:
+    print('ИТОГ: ПРОВАЛ НА УРОВНЕ 0'); sys.exit(1)
+
+dm = S.build_modern(); ds = S.build_splice()
+
+for nm, d, ref in [('соврем.', dm, 'data/nav_v13_modern.csv'), ('склейка', ds, 'data/nav_v13_splice.csv')]:
+    r, nav, st = sim164(*d, cap=None, first_day='legacy')
+    et = pd.read_csv(ref, parse_dates=[0], index_col=0)['nav']
+    chk(f'Ф: регрессия к замороженному NAV ({nm}), 1e-12',
+        et.index.equals(nav.index) and np.allclose(et.values, nav.values, rtol=1e-12, atol=0))
+r, navm, st = sim164(*dm, cap=2.0, first_day='fixed'); c, dd = S.met(r)
+chk('Ф соврем. (замороженная 4.1)', abs(c-9.85) <= 0.01 and st['cap_events'] == 415
+    and abs(st['max_close_lev']-2.0495) <= 0.0005 and st['days_close_above'] == 387 and st['viol_after_costs'] == 0,
+    f'{c:.2f}%/{dd:.2f}%')
+for sp, cexp in [(0.81, 9.35), (1.00, 9.05), (1.5, 8.21)]:
+    r2, _, _ = sim164(*dm, cap=2.0, first_day='fixed', spread_pp=sp); c2, _ = S.met(r2)
+    chk(f'Ф чувствительность: спред {sp}', abs(c2-cexp) <= 0.01, f'{c2:.2f}%')
+r, navs, st = sim164(*ds, cap=2.0, first_day='fixed'); c, dd = S.met(r)
+chk('Ф склейка (замороженная 4.1)', abs(c-11.39) <= 0.01 and st['cap_events'] == 1645
+    and abs(st['max_close_lev']-2.0974) <= 0.0005 and st['days_close_above'] == 1543 and st['viol_after_costs'] == 0,
+    f'{c:.2f}%/{dd:.2f}%')
+for f, nav in [('nav_v164_modern.csv', navm), ('nav_v164_splice.csv', navs)]:
+    et = pd.read_csv(f, parse_dates=[0], index_col=0)['nav']
+    chk(f'Ф NAV = эталон {f} (1e-12)', et.index.equals(nav.index) and np.allclose(et.values, nav.values, rtol=1e-12, atol=0))
+
+r, nave, st = sim_etf(*dm); c, dd = S.met(r)
+chk('Е 10 млн (физ., норматив; буфер 5%, полная лестница)', abs(c-9.89) <= 0.01 and abs(dd+22.30) <= 0.05, f'{c:.2f}%/{dd:.2f}%')
+chk('Е: кап и инвариант', st['cap_events'] == 390 and st['days_close_above'] == 322
+    and abs(st['max_close_lev']-2.0452) <= 0.0005 and st['viol_after_costs'] == 0,
+    f"{st['cap_events']}/{st['days_close_above']}/{st['max_close_lev']:.4f}/0")
+chk('Е: издержки, п.п./год', abs(st['loan_pp_yr']-0.534) <= 0.02 and abs(st['ter_pp_yr']-0.11) <= 0.01
+    and abs(st['drag_pp_yr']-0.16) <= 0.01, f"займ {st['loan_pp_yr']:.3f} / TER {st['ter_pp_yr']:.2f} / drag {st['drag_pp_yr']:.2f}")
+chk('Е: контрольная прокси-метрика маржи', abs(st['min_ratio']-1.956) <= 0.005, f"{st['min_ratio']:.3f}")
+et = pd.read_csv('nav_etf_modern.csv', parse_dates=[0], index_col=0)['nav']
+chk('Е NAV = эталон (1e-12)', et.index.equals(nave.index) and np.allclose(et.values, nave.values, rtol=1e-12, atol=0))
+r2, nave2, _ = sim_etf(*dm)
+chk('Е: детерминизм', bool(np.array_equal(nave.values, nave2.values)))
+r1, _, st1 = sim_etf(*dm, cap0=1e6); c1, _ = S.met(r1)
+chk('Е масштаб пилота 1 млн', abs(c1-9.79) <= 0.02 and abs(st1['loan_pp_yr']-0.622) <= 0.03,
+    f"{c1:.2f}%, займ {st1['loan_pp_yr']:.3f}")
+
+import transition as T
+import shutil, json
+from datetime import date
+_, tiers = M.load_tariff('mr_tariff.csv', date(2026, 8, 8))
+chk('МР: точная Е(10 млн)', abs(M.eq_E(10e6, tiers)-0.8381) <= 0.001)
+chk('МР: точная Е(1 млн)', abs(M.eq_E(1e6, tiers)-1.0045) <= 0.001)
+shutil.copy('mr_journal.csv', _JP('sc_j.csv')); shutil.copy('mr_state.csv', _JP('sc_s.csv'))
+M.test_configure(_JP('sc_j.csv'))
+chk('МР: ретро = HOLD, маршрут Ф', M.run('mr_inputs_retro.csv', 'mr_tariff.csv', _JP('sc_s.csv'), _JP('sc_j.csv'),
+    '2026-08-08', 10e6, write=False) == M.HOLD)
+HDR = 'quarter_id,window_start,window_end,s_eq_pp,quote_base,basis_to_effr_pp,s_zn_pp,source_url,fix_date,status\n'
+U = 'https://x.example/a'
+W3, W4 = ('2025-11-25', '2026-02-25'), ('2026-02-25', '2026-05-26')
+SW = [f'A,{W3[0]},{W3[1]},1.6,EFFR,NA,0,{U},2026-03-01,OK', f'B,{W4[0]},{W4[1]},1.6,EFFR,NA,0,{U},2026-06-01,OK']
+def mk(rows, j=_JP('sc_j2.csv'), s=_JP('sc_s2.csv'), write=False, nlv=10e6, tariff='mr_tariff.csv'):
+    open(_JP('sc_i.csv'), 'w').write(HDR + '\n'.join(rows) + '\n')
+    if not os.path.exists(j): open(j, 'w').write('asof,event,detail\n')
+    M.test_configure(j)
+    return M.run(_JP('sc_i.csv'), tariff, s, j, '2026-08-08', nlv, write=write)
+for f in (_JP('sc_j2.csv'), _JP('sc_s2.csv')):
+    if os.path.exists(f): os.remove(f)
+chk('МР: старая пара при мёртвой зоне последних = HOLD', mk([
+    f'X,2025-05-27,2025-08-26,1.6,EFFR,NA,0,{U},2025-09-01,OK', f'Y,2025-08-26,2025-11-25,1.6,EFFR,NA,0,{U},2025-12-01,OK',
+    f'C,{W3[0]},{W3[1]},0.5,EFFR,NA,0,{U},2026-03-01,OK', f'D,{W4[0]},{W4[1]},0.5,EFFR,NA,0,{U},2026-06-01,OK']) == M.HOLD)
+chk('МР: NA/фиктивные/inf/будущее/NaN-NLV — INVALID',
+    mk([f'A,{W3[0]},{W3[1]},1.6,EFFR,NA,NA,{U},2026-03-01,OK', SW[1]]) == M.INVALID
+    and mk([f'A,{W3[0]},{W3[1]},1.6,EFFR,NA,0,https://,2026-03-01,OK', SW[1]]) == M.INVALID
+    and mk([f'A,{W3[0]},{W3[1]},inf,EFFR,NA,0,{U},2026-03-01,OK', SW[1]]) == M.INVALID
+    and mk(SW, nlv=float('nan')) == M.INVALID)
+open(_JP('sc_tf.csv'), 'w').write('as_of,tier_limit,spread_pct\n2026-08-08,1000000000,nan\n')
+chk('МР: NaN в тарифе — INVALID', mk(SW, tariff=_JP('sc_tf.csv')) == M.INVALID)
+c1 = mk(SW, write=True)
+chk('МР: двухфазность — сигнал не меняет маршрут', c1 == M.SWITCH_E
+    and open(_JP('sc_s2.csv')).read().splitlines()[-1].startswith('F,E,'))
+chk('МР: COMPLETE с чужим sid отклоняется',
+    M.confirm_transition(_JP('sc_j2.csv'), _JP('sc_s2.csv'), '2026-08-08', 'E', kind='complete', tid='t1', sid='alien') is False)
+_sid = open(_JP('sc_j2.csv')).read().strip().splitlines()[-1].split('|')[-1].strip('"')
+chk('МР: OPEN регистрирует tid; COMPLETE по своему sid+tid принимается',
+    M.confirm_transition(_JP('sc_j2.csv'), _JP('sc_s2.csv'), '2026-08-08', 'E', kind='open', tid='t1', sid=_sid) is True
+    and M.confirm_transition(_JP('sc_j2.csv'), _JP('sc_s2.csv'), '2026-08-08', 'E', kind='complete', tid='t9', sid=_sid) is False
+    and M.confirm_transition(_JP('sc_j2.csv'), _JP('sc_s2.csv'), '2026-08-08', 'E', kind='complete', tid='t1', sid=_sid) is True
+    and open(_JP('sc_s2.csv')).read().splitlines()[-1].startswith('E,,'))
+chk('МР: повторный COMPLETE без нового сигнала отклоняется',
+    M.confirm_transition(_JP('sc_j2.csv'), _JP('sc_s2.csv'), '2026-08-08', 'E', kind='complete', tid='t1', sid=_sid) is False)
+chk('МР: RESOLVED без открытого MIXED отклоняется',
+    M.confirm_transition(_JP('sc_j2.csv'), _JP('sc_s2.csv'), '2026-08-08', 'F', kind='resolved') is False)
+open(_JP('sc_jL2.csv'), 'w').write('asof,event,detail\n2026-01-01,SWITCH_SIGNAL,E|s1\n2026-01-01,TRANSITION_OPEN,E|s1|tidA\n2026-01-02,TRANSITION_COMPLETE,E|s1|tidA\n'
+    '2027-01-01,SWITCH_SIGNAL,F|s2\n2027-01-01,TRANSITION_OPEN,F|s2|tidB\n2027-01-02,TRANSITION_COMPLETE,F|s2|tidB\n'
+    '2031-01-01,SWITCH_SIGNAL,E|s3\n2031-01-01,TRANSITION_OPEN,E|s3|tidA\n2031-01-02,TRANSITION_COMPLETE,E|s3|tidA\n')
+M.test_configure(_JP('sc_jL2.csv'))
+chk('МР: легитимный повтор tid спустя 3+ года учитывается',
+    M.derive_state(_JP('sc_jL2.csv'), date(2031, 1, 3))[0] == 'E' and M.switches_3y(_JP('sc_jL2.csv'), date(2031, 1, 3)) == 1)
+open(_JP('sc_jMx.csv'), 'w').write('asof,event,detail\n2026-08-01,SWITCH_SIGNAL,E|s1\n2026-08-01,TRANSITION_OPEN,E|s1|t1\n2026-08-02,TRANSITION_MIXED,E|s1|t1\n2026-08-03,TRANSITION_RESOLVED,E|s1|t1\n')
+M.test_configure(_JP('sc_jMx.csv'))
+M.test_configure(_JP('sc_jMx.csv'))
+chk('МР: MIXED→RESOLVED меняет маршрут и входит в счётчик',
+    M.derive_state(_JP('sc_jMx.csv'), date(2026, 8, 8))[0] == 'E' and M.switches_3y(_JP('sc_jMx.csv'), date(2026, 8, 8)) == 1)
+open(_JP('sc_jL3.csv'), 'w').write('asof,event,detail\nBAD,TRANSITION_COMPLETE,E|s|t\n')
+M.test_configure(_JP('sc_jL3.csv'))
+try:
+    M.derive_state(_JP('sc_jL3.csv'), date(2026, 8, 8)); chk('МР: повреждённая строка журнала', False)
+except M.JournalCorrupt:
+    chk('МР: повреждённая строка журнала', True)
+open(_JP('sc_jL6.csv'), 'w').write('asof,event,detail\n2026-08-01,SWITCH_SIGNAL,E,EXTRA\n')
+M.test_configure(_JP('sc_jL6.csv'))
+try:
+    M.derive_state(_JP('sc_jL6.csv'), date(2026, 8, 8)); chk('МР: лишнее CSV-поле = порча', False)
+except M.JournalCorrupt:
+    chk('МР: лишнее CSV-поле = порча', True)
+open(_JP('sc_jL4.csv'), 'w').write('asof,event,detail\n')
+M.test_configure(_JP('sc_jL4.csv'))
+M.append_event(_JP('sc_jL4.csv'), '2026-08-08', 'REDUCE_SIGNAL', '20-дн >1,5, альтернатива недоступна')
+import csv as _csv
+chk('МР: запятые в detail экранируются',
+    list(_csv.DictReader(open(_JP('sc_jL4.csv'))))[0]['detail'] == '20-дн >1,5, альтернатива недоступна')
+open(_JP('sc_jAn.csv'), 'w').write('asof,event,detail\n2026-01-02,TRANSITION_COMPLETE,E|s0|orphan\n')
+M.test_configure(_JP('sc_jAn.csv'))
+open(_JP('sc_jV2.csv'), 'w').write('asof,event,detail\n2026-08-01,SWITCH_SIGNAL,E|s1\n2026-08-01,TRANSITION_OPEN,E|s1|T1\n2026-08-02,TRANSITION_MIXED,E|s1|T1\n2026-08-03,TRANSITION_RESOLVED,F|sX|TX\n')
+M.test_configure(_JP('sc_jV2.csv'))
+M.test_configure(_JP('sc_jV2.csv'))
+_v2 = M.derive_state(_JP('sc_jV2.csv'), date(2026, 8, 8))
+chk('МР: чужой RESOLVED не закрывает MIXED (аномалия)', _v2[2] is True and len(_v2[3]) == 1)
+open(_JP('sc_jV3.csv'), 'w').write('asof,event,detail\n2026-08-01,TRANSITION_COMPLETED_X,E|s|t\n')
+M.test_configure(_JP('sc_jV3.csv'))
+try:
+    M.derive_state(_JP('sc_jV3.csv'), date(2026, 8, 8)); chk('МР: фиктивное имя события = порча', False)
+except M.JournalCorrupt:
+    chk('МР: фиктивное имя события = порча', True)
+open(_JP('sc_iSW.csv'), 'w').write(HDR + '\n'.join(SW) + '\n')
+M.test_configure(_JP('sc_jAn.csv'))
+chk('МР: аномалия журнала блокирует переключения (REVIEW)',
+    M.run(_JP('sc_iSW.csv'), 'mr_tariff.csv', _JP('sc_sAn.csv'), _JP('sc_jAn.csv'), '2026-08-08', 10e6, write=False) == M.REVIEW)
+open(_JP('sc_jG.csv'), 'w').write('asof,event,detail\n')
+M.test_configure(_JP('sc_jG.csv'))
+chk('МР: журнальное разрешение GRANULARITY_EXCEPTION находится по sid',
+    (M.grant_granularity(_JP('sc_jG.csv'), _JP('sc_sG.csv'), '2026-08-08', 'sX', 98560.0) or True)
+    and M.find_grant(_JP('sc_jG.csv'), '2026-08-08', 'sX') == 98560.0
+    and M.find_grant(_JP('sc_jG.csv'), '2026-08-08', 'sY') is None)
+
+# --- Контртесты вердиктов ред. 12-13 ---
+open(_JP('w1j.csv'), 'w').write('asof,event,detail\n2026-08-08,SWITCH_SIGNAL,E|s1\n')
+M.test_configure(_JP('w1j.csv'))
+chk('МР: MIXED без OPEN отклоняется', M.confirm_transition(_JP('w1j.csv'), _JP('w1s.csv'), '2026-08-08', 'E', kind='mixed', tid='T1', sid='s1') is False)
+chk('МР: OPEN эксклюзивен и идемпотентен',
+    M.confirm_transition(_JP('w1j.csv'), _JP('w1s.csv'), '2026-08-08', 'E', kind='open', tid='T1', sid='s1') is True
+    and M.confirm_transition(_JP('w1j.csv'), _JP('w1s.csv'), '2026-08-08', 'E', kind='open', tid='T1', sid='s1') is True
+    and open(_JP('w1j.csv')).read().count('TRANSITION_OPEN') == 1
+    and M.confirm_transition(_JP('w1j.csv'), _JP('w1s.csv'), '2026-08-08', 'E', kind='open', tid='T2', sid='s1') is False)
+chk('МР: MIXED/ABORT с чужим tid отклоняются',
+    M.confirm_transition(_JP('w1j.csv'), _JP('w1s.csv'), '2026-08-08', 'E', kind='mixed', tid='TX', sid='s1') is False
+    and M.confirm_transition(_JP('w1j.csv'), _JP('w1s.csv'), '2026-08-08', 'E', kind='abort', tid='TX', sid='s1') is False)
+M.confirm_transition(_JP('w1j.csv'), _JP('w1s.csv'), '2026-08-08', 'E', kind='mixed', tid='T1', sid='s1')
+chk('МР: COMPLETE после MIXED запрещён; RESOLVED с чужой привязкой/целью X отклоняется',
+    M.confirm_transition(_JP('w1j.csv'), _JP('w1s.csv'), '2026-08-08', 'E', kind='complete', tid='T1', sid='s1') is False
+    and M.confirm_transition(_JP('w1j.csv'), _JP('w1s.csv'), '2026-08-08', 'X', kind='resolved', tid='T1', sid='s1') is False
+    and M.confirm_transition(_JP('w1j.csv'), _JP('w1s.csv'), '2026-08-08', 'E', kind='resolved', tid='TX', sid='s1') is False
+    and M.derive_state(_JP('w1j.csv'), date(2026, 8, 8))[2] is True)
+open(_JP('w3j.csv'), 'w').write('asof,event,detail\n2026-08-08,GRANULARITY_EXCEPTION_FAKE,s1|98560\n')
+M.test_configure(_JP('w3j.csv'))
+try:
+    M.find_grant(_JP('w3j.csv'), '2026-08-08', 's1'); chk('МР: фиктивное событие гранта = порча', False)
+except M.JournalCorrupt:
+    chk('МР: фиктивное событие гранта = порча', True)
+open(_JP('w4j.csv'), 'w').write('asof,event,detail\n2026-08-08,GRANULARITY_EXCEPTION,s1|nan\n')
+M.test_configure(_JP('w4j.csv'))
+try:
+    M.find_grant(_JP('w4j.csv'), '2026-08-08', 's1'); chk('МР: nan в разрешении = порча', False)
+except M.JournalCorrupt:
+    chk('МР: nan в разрешении = порча', True)
+for f in (_JP('wpj.csv'), _JP('wps.csv')):
+    if os.path.exists(f): os.remove(f)
+open(_JP('wpi.csv'), 'w').write(HDR + '\n'.join(SW) + '\n')
+if not os.path.exists(_JP('wpj.csv')): open(_JP('wpj.csv'), 'w').write('asof,event,detail\n')
+M.test_configure(_JP('wpj.csv'))
+_c1 = M.run(_JP('wpi.csv'), 'mr_tariff.csv', _JP('wps.csv'), _JP('wpj.csv'), '2026-08-08', 10e6, write=True)
+_c2 = M.run(_JP('wpi.csv'), 'mr_tariff.csv', _JP('wps.csv'), _JP('wpj.csv'), '2026-08-08', 10e6, write=True)
+chk('МР: параллельный/повторный запуск не плодит сигналы (HOLD, сигнал один)',
+    _c1 == M.SWITCH_E and _c2 == M.HOLD and open(_JP('wpj.csv')).read().count('SWITCH_SIGNAL') == 1)
+
+# --- Исполнитель v6.1: журнал пишет сам, хук устранён ---
+class _B:
+    def __init__(s, preview=True, timeout=False, frac=False, netpos=None, cancelnone=False, oo=None):
+        s.p = preview; s.t = timeout; s.f = frac; s.np = netpos or {}
+        s.cn = cancelnone; s.oo = oo or []; s.n = 0; s.calls = []; s.u = 0.0; s.maxu = 0.0
+    def _px(s, i): return 98560.0 if i == 'ZN' else (5.0 if i == 'CBU0' else (700.0 if i == 'CSPX' else 38428.0))
+    def preview(s): return s.p
+    def sell_units(s, i, u):
+        s.n += 1; f = (u - 0.5 if s.f and u > 0 else u)
+        s.calls.append(('sell', i, u)); s.np[i] = s.np.get(i, 0) - int(f)
+        s.u += abs(f)*s._px(i); s.maxu = max(s.maxu, s.u)
+        return (f's{s.n}', f)
+    def buy_units(s, i, u):
+        s.n += 1; s.calls.append(('buy', i, u)); s.np[i] = s.np.get(i, 0) + u
+        s.u -= u*s._px(i)
+        return (f'b{s.n}', u)
+    def cancel_order(s, o): return None if s.cn else True
+    def open_orders(s): return list(s.oo)
+    def net_positions(s): return dict(s.np)
+    def minutes_since(s, k): return 99 if s.t else 0
+    def gross(s): return 1.99
+SP = _JP('sc_tr.json'); JX = _JP('sc_jx.csv'); SX = _JP('sc_sx.csv')
+def _cl():
+    for f in (SP, JX, SX):
+        if os.path.exists(f): os.remove(f)
+def _sig(target, grant=None, sid='s1', approve=True):
+    hist = ''
+    if target == 'F':
+        hist = ('2026-08-01,SWITCH_SIGNAL,E|s0\n2026-08-01,OWNER_APPROVE,E|s0\n'
+                '2026-08-01,TRANSITION_OPEN,E|s0|t0\n'
+                '2026-08-01,TRANSITION_COMPLETE,E|s0|t0\n')
+    ok = ('2026-08-08,OWNER_APPROVE,' + target + '|' + sid + '\n') if approve else ''
+    open(JX, 'w').write('asof,event,detail\n' + hist + '2026-08-08,SWITCH_SIGNAL,'
+                        + target + '|' + sid + '\n' + ok)
+    M.test_configure(JX)
+    if grant: M.grant_granularity(JX, SX, '2026-08-08', sid, grant)
+KW = dict(journal=JX, mr_state=SX, asof='2026-08-08')
+L1 = {'BOND': dict(src=[('ZN', 1, 98560.0)], dst=('CBU0', 5.0, 'ETF'))}
+_cl(); _sig('E', grant=98565.0); rr = []
+for _ in range(3):
+    try: rr.append(T.execute(_B(preview=False), SP, 1e6, L1, signal_id='s1', **KW)['postponed'])
+    except T.Incident: rr.append('INC')
+chk('Исполнитель: счётчик preview стоек', rr == [1, 2, 'INC'])
+_cl(); _sig('E', grant=98565.0)
+try: T.execute(_B(timeout=True, netpos={'ZN': 1, 'CBU0': 0}), SP, 1e6, L1, signal_id='s1', **KW)
+except T.Incident: pass
+_d = M.derive_state(JX, date(2026, 8, 8))
+chk('Исполнитель: тайм-аут после исполнений = MIXED', _d[0] == 'F' and _d[2])
+_cl(); _sig('E', grant=98565.0); inc = False
+try: T.execute(_B(frac=True, netpos={'ZN': 1, 'CBU0': 0}), SP, 1e6, L1, signal_id='s1', **KW)
+except T.Incident: inc = True
+chk('Исполнитель: дробный fill = инцидент + MIXED', inc and M.derive_state(JX, date(2026, 8, 8))[2])
+_cl(); _sig('E'); b0 = _B(netpos={'MES': 4}); inc = False
+try: T.execute(b0, SP, 1e6, {'EQ': dict(src=[('MES', 4, 38428.0)], dst=('CSPX', 700.0, 'ETF'))}, signal_id='s1')
+except T.Incident: inc = True
+chk('Исполнитель: без journal/mr_state = инцидент до ордеров (обходной хук устранён)', inc and len(b0.calls) == 0)
+_cl(); open(JX, 'w').write('asof,event,detail\n'); b1 = _B(netpos={'MES': 4}); inc = False
+try: T.execute(b1, SP, 1e6, {'EQ': dict(src=[('MES', 4, 38428.0)], dst=('CSPX', 700.0, 'ETF'))}, signal_id='s1', **KW)
+except T.Incident: inc = True
+chk('Исполнитель: журнал без сигнала = отказ open до ордеров', inc and len(b1.calls) == 0)
+_cl(); _sig('E'); L4 = {'EQ': dict(src=[('MES', 4, 38428.0)], dst=('CSPX', 700.0, 'ETF'))}
+_plan = T.plan_lots(L4, 1e6)
+json.dump(dict(tid=T.transition_id('s1', 'F', 'E', 1e6, _plan), postponed=0, done=[], executed_usd=1.0,
+               order_ids=[], snapshot={'MES': 4, 'CSPX': 0}, log=[], opened=True), open(SP, 'w'))
+b2 = _B(netpos={'MES': 4, 'CSPX': 0}, cancelnone=True, oo=['oX']); inc = False
+try: T.execute(b2, SP, 1e6, L4, signal_id='s1', resume=True, **KW)
+except T.Incident: inc = True
+chk('Исполнитель: cancel_order=None на resume = инцидент до новых заявок', inc and len(b2.calls) == 0)
+_cl(); _sig('E', grant=98565.0)
+L5 = {'BOND': dict(src=[('ZN', 2, 98560.0)], dst=('CBU0', 5.0, 'ETF'))}
+_plan = T.plan_lots(L5, 1e6)
+json.dump(dict(tid=T.transition_id('s1', 'F', 'E', 1e6, _plan), postponed=0, done=[], executed_usd=1.0,
+               order_ids=[], snapshot={'ZN': 2, 'CBU0': 0}, log=[], opened=True), open(SP, 'w'))
+b3 = _B(netpos={'ZN': 1, 'CBU0': 0}, preview=False)
+r3 = T.execute(b3, SP, 1e6, L5, signal_id='s1', resume=True, **KW)
+chk('Исполнитель: margin preview РАНЬШЕ восстановительных ордеров', r3['status'] == 'POSTPONED' and len(b3.calls) == 0)
+r3b = T.execute(_B(netpos={'ZN': 1, 'CBU0': 0}), SP, 1e6, L5, signal_id='s1', resume=True, **KW)
+chk('Исполнитель: восстановление после preview завершается', r3b['status'] == 'COMPLETE')
+_cl(); _sig('F', sid='s1')
+b9 = _B(netpos={'CBU0': 197120, 'ZN': 0})
+r9 = T.execute(b9, SP, 10e6, {'BOND': dict(src=[('CBU0', 197120, 5.0)], dst=('ZN', 98560.0, 'FUT'))},
+               signal_id='s1', from_route='E', to_route='F', **KW)
+chk('Исполнитель: полный Е→Ф на 10 млн в пределах owner-cap', r9['status'] == 'COMPLETE' and b9.maxu <= 100_000.0 + 1e-6)
+_cl(); _sig('E', grant=38780.0)
+b4 = _B(netpos={'MES': 29, 'CSPX': 0})
+r4 = T.execute(b4, SP, 1e6, {'EQ': dict(src=[('MES', 29, 38428.0)], dst=('CSPX', 700.0, 'ETF'))}, signal_id='s1', **KW)
+_cspx = b4.np['CSPX']
+os.remove(SP)
+M.append_event(JX, '2026-08-08', 'SWITCH_SIGNAL', 'F|s2')
+M.append_event(JX, '2026-08-08', 'OWNER_APPROVE', 'F|s2'); M.grant_granularity(JX, SX, '2026-08-08', 's2', 38780.0)
+b4b = _B(netpos={'CSPX': _cspx, 'MES': 0})
+r4b = T.execute(b4b, SP, 1e6, {'EQ': dict(src=[('CSPX', _cspx, 700.0)], dst=('MES', 38428.0, 'FUT'))},
+                signal_id='s2', from_route='E', to_route='F', **KW)
+chk('Исполнитель: round-trip автоматичен (хвост кванта в пределах лимита)',
+    r4['status'] == 'COMPLETE' and r4b['status'] == 'COMPLETE' and b4b.np['MES'] == 29 and b4b.np['CSPX'] == 0
+    and M.derive_state(JX, date(2026, 8, 8))[0] == 'F')
+import subprocess, sys
+import shutil as _sh
+_CLIJ = _JP('cli_journal.csv')
+_sh.copy('mr_journal.csv', _CLIJ)
+_CLIHOME = os.path.join(_TD, 'cli_home'); os.makedirs(_CLIHOME, exist_ok=True)
+_CLIENV = dict(os.environ); _CLIENV['HOME'] = _CLIHOME       # боевой ~/.add-fut не затрагивается
+_REALDIR_BEFORE = None   # боевой каталог установки самопроверкой не читается и не пишется
+_rno = subprocess.run(['python3', 'mr_engine.py', '--journal', _CLIJ, '--asof', '2026-08-08',
+                       '--nlv', '10000000', '--dry-run'], capture_output=True, text=True, env=_CLIENV)
+chk('МР: CLI без конфигурации развёртывания отказывается работать', _rno.returncode != 0)
+_rpv = subprocess.run(['python3', 'mr_engine.py', '--provision-journal', _CLIJ],
+                      capture_output=True, text=True, env=_CLIENV)
+chk('МР: провизия командой --provision-journal (отдельная команда, без --asof/--nlv)',
+    _rpv.returncode == 0 and os.path.exists(os.path.join(_CLIHOME, '.add-fut',
+                                                         'deploy.' + M.STRATEGY_ID + '.' + M.ACCOUNT_ID)))
+_r = subprocess.run(['python3', 'mr_engine.py', '--journal', _CLIJ, '--asof', '2026-08-08',
+                     '--nlv', '10000000', '--dry-run'], capture_output=True, text=True, env=_CLIENV)
+chk('МР: документированный CLI жив (DECISION= в выводе)', 'DECISION=' in _r.stdout and _r.returncode == 0)
+chk('Самопроверка: боевой каталог установки не используется (CLI-тесты в изолированном HOME)',
+    os.environ.get('HOME') != _CLIHOME and M._STATE['dir'].startswith(_TD))
+open(_JP('y2j.csv'), 'w').write('asof,event,detail\n2026-08-08,SWITCH_SIGNAL,E|s1|EXTRA\n')
+M.test_configure(_JP('y2j.csv'))
+try:
+    M.derive_state(_JP('y2j.csv'), date(2026, 8, 8)); chk('МР: лишний компонент detail = порча', False)
+except M.JournalCorrupt:
+    chk('МР: лишний компонент detail = порча', True)
+_cl(); _sig('E'); M.grant_granularity(JX, SX, '2026-08-08', 's1', 38428.0)
+_L = {'EQ': dict(src=[('MES', 29, 38428.0)], dst=('CSPX', 700.0, 'ETF'))}
+inc = False
+try: T.execute(_B(netpos={'MES': 29}), SP, 1e6, _L, signal_id='s1', **KW)
+except T.Incident: inc = True
+chk('Исполнитель: грант без зазора округления недостаточен = инцидент', inc)
+_cl(); _sig('E'); M.grant_granularity(JX, SX, '2026-08-08', 's1', 38780.0)
+_b = _B(netpos={'MES': 29, 'CSPX': 0})
+_r3 = T.execute(_b, SP, 1e6, _L, signal_id='s1', **KW)
+chk('Исполнитель: абсолютный грант держится строго', _r3['status'] == 'COMPLETE' and _b.maxu <= 38780.0 + 1e-6)
+class _BX(_B):
+    def sell_units(s, i, u):
+        oid, f = super().sell_units(i, u)
+        raise RuntimeError('TWS disconnect')
+_cl(); _sig('E'); M.grant_granularity(JX, SX, '2026-08-08', 's1', 98565.0)
+inc = False
+try: T.execute(_BX(netpos={'ZN': 1, 'CBU0': 0}), SP, 1e6, L1, signal_id='s1', **KW)
+except T.Incident: inc = True
+chk('Исполнитель: исключение адаптера после продажи = инцидент + MIXED',
+    inc and M.derive_state(JX, date(2026, 8, 8))[2])
+_cl(); _sig('E'); M.grant_granularity(JX, SX, '2026-08-08', 's1', 98565.0)
+inc = False
+for _ in range(3):
+    try: T.execute(_B(preview=False), SP, 1e6, L1, signal_id='s1', **KW)
+    except T.Incident: inc = True
+chk('Исполнитель: третий отказ preview журналируется (ABORT до OPEN, pending снят)',
+    inc and 'TRANSITION_ABORT' in open(JX).read() and M.derive_state(JX, date(2026, 8, 8))[1] is None)
+_cl(); _sig('E')
+inc = False
+try: T.execute(_B(), SP, float('nan'), L1, signal_id='s1', **KW)
+except T.Incident: inc = True
+chk('Исполнитель: capital=NaN = инцидент до OPEN', inc and 'TRANSITION_OPEN' not in open(JX).read())
+ETFc = lambda n, p: (n, p, 'ETF'); FUTc = lambda n, p: (n, p, 'FUT')
+_cl(); _sig('F')
+_LEF = {'EQ': dict(src=[('CSPX', 54896, 700.0)], dst=FUTc('MES', 38428.0)),
+        'BOND': dict(src=[('CBU0', 1971200, 5.0)], dst=FUTc('ZN', 98560.0))}
+_bz = _B(netpos={'CSPX': 54896, 'CBU0': 1971200, 'MES': 0, 'ZN': 0})
+_rz = T.execute(_bz, SP, 10e6, _LEF, signal_id='s1', from_route='E', to_route='F', **KW)
+chk('Исполнитель: порядок ног канонический — EQ→BOND на входе, лимит держится',
+    _rz['status'] == 'COMPLETE' and _bz.maxu <= 100_000.0 + 1e-6 and _bz.calls[0][1] == 'CBU0')
+_cl(); _sig('E', grant=98565.0)
+_plz = T.plan_lots(L1, 1e6)
+json.dump(dict(tid=T.transition_id('s1', 'F', 'E', 1e6, _plz), postponed=1, done=[], executed_usd=0.0,
+               order_ids=[], snapshot={'ZN': 1, 'CBU0': 0}, log=[], opened=True), open(SP, 'w'))
+_bz2 = _B(netpos={'ZN': 1, 'CBU0': 0}); inc = False
+try: T.execute(_bz2, SP, 1e6, L1, signal_id='s1', **KW)
+except T.Incident: inc = True
+chk('Исполнитель: открытый переход без resume = инцидент до заявок', inc and len(_bz2.calls) == 0)
+open(_JP('z3j.csv'), 'w').write('asof,event,detail\n2026-08-08,SWITCH_SIGNAL,E|s1\n')
+M.test_configure(_JP('z3j.csv'))
+chk('МР: pre-OPEN ABORT отклоняется всегда (строгая привязка к OPEN, ред. 32)',
+    M.confirm_transition(_JP('z3j.csv'), _JP('z3s.csv'), '2026-08-08', 'E', kind='abort', tid='', sid='s1') is False
+    and M.confirm_transition(_JP('z3j.csv'), _JP('z3s.csv'), '2026-08-08', 'E', kind='abort', tid='T1', sid='s1') is False)
+open(_JP('z4j.csv'), 'w').write('asof,event,detail,extra\n2026-08-08,SWITCH_SIGNAL,E|s1,x\n')
+try:
+    M.test_configure(_JP('z4j.csv'))
+    M.derive_state(_JP('z4j.csv'), date(2026, 8, 8)); chk('МР: объявленный лишний столбец = порча', False)
+except M.JournalCorrupt:
+    chk('МР: объявленный лишний столбец = порча (отсекается уже на провизии схемы)', True)
+for _npos in (0, 3):
+    _cl(); _sig('E', grant=38780.0)
+    _b5 = _B(netpos={'MES': _npos, 'CSPX': 0}); inc = False
+    try: T.execute(_b5, SP, 1e6, {'EQ': dict(src=[('MES', 2, 38428.0)], dst=ETFc('CSPX', 700.0))}, signal_id='s1', **KW)
+    except T.Incident: inc = True
+    chk(f'Исполнитель: книга MES={_npos} против плана 2 = инцидент до заявок', inc and len(_b5.calls) == 0)
+_cl(); _sig('E'); inc = False
+try: T.execute(_B(netpos={'CSPX': 110}), SP, 1e6, {'EQ': dict(src=[('CSPX', 110, 700.0)], dst=FUTc('MES', 38428.0))},
+               signal_id='s1', to_route='E', **KW)
+except T.Incident: inc = True
+chk('Исполнитель: класс цели привязан к маршруту (FUT при SWITCH_E = инцидент)', inc)
+# --- Контртесты вердикта ред. 16 ---
+_cl(); open(JX, 'w').write('asof,event,detail\n2026-08-08,SWITCH_SIGNAL,E|s1\n2026-08-08,OWNER_APPROVE,E|s1\n')
+inc = False
+try: T.execute(_B(netpos={'CSPX': 110}), SP, 1e6, {'EQ': dict(src=[('CSPX', 110, 700.0)], dst=('MES', 38428.0, 'ETF'))},
+               signal_id='s1', from_route='E', to_route='E', **KW)
+except T.Incident: inc = True
+chk('Исполнитель: ложная метка класса против реестра = инцидент', inc)
+_cl(); _sig('E', grant=38780.0)
+inc = False; _bA = _B(netpos={'MES': 2, 'ZN': 1, 'CSPX': 0})
+try: T.execute(_bA, SP, 1e6, {'EQ': dict(src=[('MES', 2, 38428.0)], dst=ETFc('CSPX', 700.0))}, signal_id='s1', **KW)
+except T.Incident: inc = True
+chk('Исполнитель: позиция класса источника вне плана (ZN) = инцидент до заявок', inc and len(_bA.calls) == 0)
+_cl(); open(JX, 'w').write('asof,event,detail\n2026-08-08,SWITCH_SIGNAL,E|s1\n2026-08-08,OWNER_APPROVE,E|s1\n')
+inc = False
+try: T.execute(_B(netpos={'CBU0': 19712}), SP, 1e6, {'BOND': dict(src=[('CBU0', 19712, 5.0)], dst=FUTc('ZN', 98560.0))},
+               signal_id='s1', from_route='E', to_route='F', **KW)
+except T.Incident: inc = True
+chk('Исполнитель: from_route не совпадает с маршрутом журнала = инцидент', inc)
+import fcntl as _f
+_cl(); _sig('E', grant=98565.0)
+_plL = T.plan_lots(L1, 1e6); _tidL = T.transition_id('s1', 'F', 'E', 1e6, _plL)
+_lf = open(JX, 'r+'); _f.flock(_lf, _f.LOCK_EX)
+inc = False; _bL = _B(netpos={'ZN': 1, 'CBU0': 0})
+try: T.execute(_bL, SP, 1e6, L1, signal_id='s1', **KW)
+except T.Incident: inc = True
+_f.flock(_lf, _f.LOCK_UN); _lf.close()
+chk('Исполнитель: журнал заблокирован извне = инцидент, заявок ноль', inc and len(_bL.calls) == 0)
+_cl(); open(JX, 'w').write('asof,event,detail\n2026-08-08,SWITCH_SIGNAL,E|s1\n2026-08-08,OWNER_APPROVE,E|s1\n')
+chk('МР: произвольный pre-OPEN ABORT отклоняется (строгая привязка к OPEN)',
+    M.confirm_transition(JX, SX, '2026-08-08', 'E', kind='abort', tid='RANDOM', sid='s1') is False)
+M.grant_granularity(JX, SX, '2026-08-08', 's1', 98565.0)
+inc = False
+for _ in range(3):
+    try: T.execute(_B(preview=False), SP, 1e6, L1, signal_id='s1', **KW)
+    except T.Incident: inc = True
+chk('Исполнитель: третий отказ preview = честная пара OPEN+ABORT, pending снят',
+    inc and 'TRANSITION_OPEN' in open(JX).read() and 'TRANSITION_ABORT' in open(JX).read()
+    and M.derive_state(JX, date(2026, 8, 8))[1] is None)
+chk('Реестр: пять инструментов с sec_type/pair_group',
+    len(T.load_registry('instruments.csv')) == 5 and T.load_registry('instruments.csv')['MES']['sec_type'] == 'FUT')
+
+# --- Ред. 31: подпись заказчика как условие открытия перехода ---
+_cl(); _sig('E', grant=98565.0, approve=False)          # сигнал есть, одобрения нет
+_bNA = _B(netpos={'ZN': 1, 'CBU0': 0}); inc = False
+try: T.execute(_bNA, SP, 1e6, L1, signal_id='s1', **KW)
+except T.Incident as _ex: inc = 'OWNER_APPROVE' in str(_ex)
+chk('Ред.31: SWITCH_SIGNAL без OWNER_APPROVE = отказ, заявок ноль и журнал не тронут',
+    inc and len(_bNA.calls) == 0 and 'TRANSITION_OPEN' not in open(JX).read())
+
+_cl(); _sig('E', grant=98565.0, approve=False)          # одобрение на ЧУЖУЮ цель не годится
+M.append_event(JX, '2026-08-08', 'OWNER_APPROVE', 'F|s1')
+inc = False
+try: T.execute(_B(netpos={'ZN': 1, 'CBU0': 0}), SP, 1e6, L1, signal_id='s1', **KW)
+except T.Incident: inc = True
+chk('Ред.31: одобрение на другую цель не разрешает переход', inc)
+
+_cl(); _sig('E', grant=98565.0, approve=False)          # одобрение на ЧУЖОЙ сигнал не годится
+M.append_event(JX, '2026-08-08', 'OWNER_APPROVE', 'E|sОТHER')
+inc = False
+try: T.execute(_B(netpos={'ZN': 1, 'CBU0': 0}), SP, 1e6, L1, signal_id='s1', **KW)
+except T.Incident: inc = True
+chk('Ред.31: одобрение на другой sid не переносится', inc)
+
+_cl(); _sig('E', grant=98565.0)                          # штатный путь с подписью — переход открывается
+_bOK = _B(netpos={'ZN': 1, 'CBU0': 0}); _rOK = T.execute(_bOK, SP, 1e6, L1, signal_id='s1', **KW)
+chk('Ред.31: с OWNER_APPROVE переход открывается штатно',
+    'TRANSITION_OPEN' in open(JX).read() and M.find_approval(JX, '2026-08-08', 's1', 'E') is True)
+
+chk('Ред.31: OWNER_APPROVE в словаре событий и не ломает разбор журнала',
+    'OWNER_APPROVE' in M.KNOWN_EVENTS
+    and M.derive_state(JX, date(2026, 8, 8))[3] == [])
+
+# --- Ред. 32: маржа и число заявок по отображённой книге ---
+_reg = T.load_registry('instruments.csv')
+import sim_v164 as _S164
+chk('Ред.32: map_mes исполнителя совпадает с sim_v164 на всей сетке 0..999',
+    all(T.map_mes(n) == _S164.map_mes(n) for n in range(1000)))
+chk('Ред.32: отображение книги — целые ES плюс остаток MES',
+    T.mapped_book('MES', 264) == {'ES': 26, 'MES': 4} and T.mapped_book('MES', 20) == {'ES': 2}
+    and T.mapped_book('ZN', 101) == {'ZN': 101})
+
+# сверка с §7 v1.5.3.1: 26 ES + 101 ZN на 10 млн = ~1,12 млн = 11,2% капитала, запас 8,9x
+_mF = T.book_margin({'ES': 26, 'ZN': 101}, _reg)
+chk('Ред.32: маржа книги Ф сходится с §7 (26 ES + 101 ZN = $1,12 млн = 11,2%, запас 8,9x)',
+    abs(_mF - 1_122_960.0) < 1.0 and abs(_mF/10e6 - 0.1123) < 0.0005
+    and abs(10e6/_mF - 8.90) < 0.01)
+# сверка с §8: маршрут Е при номинале 2,0x = 25% позиций, запас 2,00x
+_mE = T.book_margin({'CSPX': 10_000, 'CBU0': 200_000}, _reg, {'CSPX': 1000.0, 'CBU0': 50.0})
+chk('Ред.32: маржа книги Е = 25% позиций, запас 2,00x при номинале 2,0x',
+    abs(_mE - 5_000_000.0) < 1.0 and abs(10e6/_mE - 2.00) < 1e-9)
+
+# запас ниже О-3-Е -> отказ ДО первой заявки
+_legsE = {'BOND': dict(src=[('ZN', 40, 98560.0)], dst=('CBU0', 5.0, 'ETF'))}
+_cl(); _sig('E', grant=98570.0)
+_bLow = _B(netpos={'ZN': 40, 'CBU0': 0}); inc = False
+try: T.execute(_bLow, SP, 1e6, _legsE, signal_id='s1', **KW)
+except T.Incident as _ex: inc = 'О-3-Е' in str(_ex)
+chk('Ред.32: запас целевой книги ниже О-3-Е = отказ, заявок ноль, TRANSITION_OPEN не записан',
+    inc and len(_bLow.calls) == 0 and 'TRANSITION_OPEN' not in open(JX).read())
+
+# лимит заявок Priority Customer
+chk('Ред.32: счётчик заявок = 2 на лот штатно и 3 с компенсациями',
+    T.plan_orders([0]*7) == (14, 21))
+inc = False
+try: T.preflight_margin_orders({'BOND': dict(src=[('ZN', 1, 98560.0)], dst=('CBU0', 5.0, 'ETF'))},
+                               [0]*200, 1e9, _reg, 'E')
+except T.Incident as _ex: inc = 'Priority Customer' in str(_ex)
+chk('Ред.32: превышение лимита 390 заявок в день = отказ', inc)
+
+# штатный путь: сводка попадает в состояние исполнителя
+_cl(); _sig('E', grant=98565.0)
+T.execute(_B(netpos={'ZN': 1, 'CBU0': 0}), SP, 1e6, L1, signal_id='s1', **KW)
+_pf = json.load(open(SP)).get('preflight', {})
+chk('Ред.32: сводка маржи и заявок сохраняется в состоянии перехода',
+    _pf.get('cushion', 0) > T.CUSHION_E and _pf.get('orders', 0) > 0
+    and _pf.get('margin_usd', 0) > 0)
+# --- Контртесты вердикта ред. 17 ---
+import hashlib as _hl
+open(_JP('fakereg.csv'), 'w').write('instrument,sec_type,pair_group,exchange,currency,con_id\nMES,ETF,EQ,CME,USD,x\nCSPX,FUT,EQ,LSEETF,USD,x\n')
+_cl(); open(JX, 'w').write('asof,event,detail\n2026-08-08,SWITCH_SIGNAL,E|s1\n2026-08-08,OWNER_APPROVE,E|s1\n')
+inc = False
+try: T.execute(_B(netpos={'CSPX': 110}), SP, 1e6, {'EQ': dict(src=[('CSPX', 110, 700.0)], dst=('MES', 38428.0, 'ETF'))},
+               signal_id='s1', from_route='E', to_route='E', registry=_JP('fakereg.csv'), **KW)
+except T.Incident: inc = True
+chk('Исполнитель: подменный реестр (SHA-пиновка) = инцидент', inc)
+chk('Реестр: SHA файла совпадает с пинованным в коде',
+    _hl.sha256(open('instruments.csv', 'rb').read()).hexdigest() == T.REGISTRY_SHA256)
+_cl(); _sig('E', grant=38780.0)
+for _nm, _np in [('неизвестный NQ в книге', {'MES': 2, 'NQ': 1, 'CSPX': 0}),
+                 ('предсуществующая цель CSPX', {'MES': 2, 'CSPX': 50})]:
+    _bB = _B(netpos=dict(_np)); inc = False
+    try: T.execute(_bB, SP, 1e6, {'EQ': dict(src=[('MES', 2, 38428.0)], dst=ETFc('CSPX', 700.0))}, signal_id='s1', **KW)
+    except T.Incident: inc = True
+    chk(f'Исполнитель: {_nm} = инцидент до заявок', inc and len(_bB.calls) == 0)
+inc = False
+try: T.plan_lots({'A': dict(src=[('MES', 2, 38428.0)], dst=ETFc('CSPX', 700.0)),
+                  'B': dict(src=[('MES', 2, 38428.0)], dst=ETFc('CBU0', 5.0))}, 1e6)
+except T.Incident: inc = True
+chk('Исполнитель: дублированный источник = инцидент', inc)
+inc = False
+try: T.plan_lots({'A': dict(src=[('MES', 2, -38428.0)], dst=ETFc('CSPX', 700.0))}, 1e6)
+except T.Incident: inc = True
+chk('Исполнитель: отрицательная/неконечная цена = инцидент', inc)
+_cl(); _sig('E', grant=98565.0)
+_plB = T.plan_lots(L1, 1e6); _tidB = T.transition_id('s1', 'F', 'E', 1e6, _plB)
+import fcntl as _f2
+_lfB = open(JX, 'r+'); _f2.flock(_lfB, _f2.LOCK_EX)
+inc = False; _bC = _B(netpos={'ZN': 1, 'CBU0': 0})
+try: T.execute(_bC, _JP('sc_other_state.json'), 1e6, L1, signal_id='s1', **KW)
+except T.Incident: inc = True
+_f2.flock(_lfB, _f2.LOCK_UN); _lfB.close()
+chk('Исполнитель: блокировка журнала действует при любом state_path = инцидент до заявок', inc and len(_bC.calls) == 0)
+_cl(); _sig('E', grant=98565.0)
+try: T.execute(_B(netpos={'ZN': 5, 'CBU0': 0}), SP, 1e6, L1, signal_id='s1', **KW)
+except T.Incident: pass
+_rB = T.execute(_B(netpos={'ZN': 1, 'CBU0': 0}), SP, 1e6, L1, signal_id='s1', **KW)
+chk('Исполнитель: finally освобождает lease, свежий заход пересоздаёт снапшот', _rB['status'] == 'COMPLETE')
+# --- Контртесты вердикта ред. 18 (TOCTOU) ---
+import builtins as _bi
+_cnt = {'n': 0}; _orig_open = _bi.open
+def _counting_open(path, *a, **k):
+    if str(path).endswith('instruments.csv'): _cnt['n'] += 1
+    return _orig_open(path, *a, **k)
+_bi.open = _counting_open
+try:
+    T.load_registry('instruments.csv')
+finally:
+    _bi.open = _orig_open
+chk('Реестр: хэш и разбор одного body — файл читается РОВНО один раз', _cnt['n'] == 1)
+_cl(); _sig('E', grant=98565.0)
+_plC = T.plan_lots(L1, 1e6); _tidC = T.transition_id('s1', 'F', 'E', 1e6, _plC)
+import fcntl as _f3
+_lfC = open(JX, 'r+'); _f3.flock(_lfC, _f3.LOCK_EX)
+for _lnm in (_JP('sc_alias_l.csv'), _JP('sc_alias_h.csv')):
+    if os.path.lexists(_lnm): os.remove(_lnm)
+os.symlink(os.path.abspath(JX), _JP('sc_alias_l.csv'))
+os.link(os.path.abspath(JX), _JP('sc_alias_h.csv'))
+_bS = _B(netpos={'ZN': 1, 'CBU0': 0}); inc = False
+try: T.execute(_bS, SP + 'sl', 1e6, L1, signal_id='s1', journal=_JP('sc_alias_l.csv'), mr_state=SX, asof='2026-08-08')
+except T.Incident: inc = True
+chk('Исполнитель: symlink-алиас журнала запрещён/делит lease — заявок ноль', inc and len(_bS.calls) == 0)
+_bH = _B(netpos={'ZN': 1, 'CBU0': 0}); inc = False
+try: T.execute(_bH, SP + 'hl', 1e6, L1, signal_id='s1', journal=_JP('sc_alias_h.csv'), mr_state=SX, asof='2026-08-08')
+except T.Incident: inc = True
+chk('Исполнитель: hardlink-алиас делит lease (device+inode) — заявок ноль', inc and len(_bH.calls) == 0)
+_cwd0 = os.getcwd(); os.chdir(os.path.dirname(os.path.abspath(JX)) or '/tmp')
+_bR = _B(netpos={'ZN': 1, 'CBU0': 0}); inc = False
+try: T.execute(_bR, SP + 'rl', 1e6, L1, signal_id='s1', journal='./' + os.path.basename(JX), mr_state=SX,
+               asof='2026-08-08', registry=os.path.join(_cwd0, 'instruments.csv'))
+except T.Incident: inc = True
+os.chdir(_cwd0)
+chk('Исполнитель: относительный путь делит lease с абсолютным — заявок ноль', inc and len(_bR.calls) == 0)
+_f3.flock(_lfC, _f3.LOCK_UN); _lfC.close()
+M.test_configure(JX)
+_ino0 = os.stat(JX).st_ino
+M.append_event(JX, '2026-08-08', 'REVIEW_SIGNAL', 'проба')
+chk('Замок: журнал дописывается НА МЕСТЕ, inode (объект блокировки) не меняется',
+    os.stat(JX).st_ino == _ino0)
+try:
+    M.derive_state(_JP('sc_alias_l.csv'), date(2026, 8, 8)); chk('МР: движок отвергает symlink-журнал', False)
+except M.JournalCorrupt:
+    chk('МР: движок отвергает symlink-журнал', True)
+# --- Контртесты вердикта ред. 21 (пин/конкурентность/печать) ---
+import threading as _th, io as _io, contextlib as _cl
+open(_JP('f1_j.csv'), 'w').write('asof,event,detail\n')
+M.test_configure(_JP('f1_j.csv'))
+open(_JP('f1_other.csv'), 'w').write('asof,event,detail\n')
+inc = False
+try: M.configure(_JP('f1_other.csv'))
+except M.JournalCorrupt: inc = True
+chk('МР: перепиновка в процессе запрещена', inc)
+if os.path.lexists(_JP('f1_hard.csv')): os.remove(_JP('f1_hard.csv'))
+os.link(_JP('f1_j.csv'), _JP('f1_hard.csv'))
+_code = ("import sys; sys.path.insert(0, %r)\n"
+         "import mr_engine as M\n"
+         "M.set_state_dir_for_tests(%r)\n"
+         "try:\n M.configure(%r); print('PASSED')\n"
+         "except M.JournalCorrupt: print('REJECTED')\n") % (os.getcwd(), os.path.join(_TD, 'install'), _JP('f1_hard.csv'))
+_rp = subprocess.run([sys.executable, '-c', _code], capture_output=True, text=True)
+chk('МР: НАСТОЯЩИЙ свежий процесс + hardlink отклоняется конфигурацией развёртывания',
+    _rp.stdout.strip() == 'REJECTED')
+_clean = _JP('clean_j.csv')
+open(_clean, 'w').write('asof,event,detail\n')
+_code2 = ("import sys; sys.path.insert(0, %r)\n"
+          "import mr_engine as M\n"
+          "M.set_state_dir_for_tests(%r)\n"
+          "try:\n M.configure(%r); print('PASSED')\n"
+          "except M.JournalCorrupt: print('REJECTED')\n") % (os.getcwd(), os.path.join(_TD, 'clean_install'), _clean)
+_rc = subprocess.run([sys.executable, '-c', _code2], capture_output=True, text=True)
+chk('МР: чистая установка без провизии — configure отказывает (конфигурация не самоназначается)',
+    _rc.stdout.strip() == 'REJECTED')
+M.configure(_JP('f1_j.csv'))
+_res = {'blocked': None, 'done': False}
+def _wr():
+    M.append_event(_JP('f1_j.csv'), '2026-08-08', 'REVIEW_SIGNAL', 'поток'); _res['done'] = True
+with M.hold_strategy_lock(_JP('f1_j.csv')):
+    _t = _th.Thread(target=_wr, daemon=True); _t.start(); _t.join(0.5)
+    _res['blocked'] = _t.is_alive()
+_t.join(3)
+chk('МР: чужой поток блокируется при удержании замка и дописывает после', _res['blocked'] and _res['done'])
+with M.hold_strategy_lock(_JP('f1_j.csv')):
+    _pid = os.fork()
+    if _pid == 0:
+        try:
+            with M.hold_strategy_lock(_JP('f1_j.csv')):
+                os._exit(7)
+        except RuntimeError:
+            os._exit(0)
+    _, _st = os.waitpid(_pid, 0)
+chk('МР: fork-потомок НЕ наследует владение замком (занято)', os.WEXITSTATUS(_st) == 0)
+open(_JP('f3_j.csv'), 'w').write('asof,event,detail\n2026-08-01,SWITCH_SIGNAL,E|s0\n'
+    '2026-08-01,TRANSITION_OPEN,E|s0|t0\n2026-08-01,TRANSITION_COMPLETE,E|s0|t0\n')
+M.test_configure(_JP('f3_j.csv'))
+open(_JP('f3_i.csv'), 'w').write(HDR + '\n'.join(SW) + '\n')
+_buf = _io.StringIO()
+with _cl.redirect_stdout(_buf):
+    _c3 = M.run(_JP('f3_i.csv'), 'mr_tariff.csv', _JP('f3_s.csv'), _JP('f3_j.csv'), '2026-08-08', 10e6, write=True)
+_out = _buf.getvalue()
+chk('МР: при параллельном COMPLETE печатается ТОЛЬКО итоговый DECISION=HOLD',
+    _c3 == M.HOLD and 'DECISION=SWITCH' not in _out and 'DECISION=HOLD' in _out)
+# --- Контртесты вердикта ред. 22: бюджет до и под замком, изоляция самопроверки ---
+import contextlib as _cx
+_HDR2 = HDR; _U2 = 'https://x.example/a'
+open(_JP('b1_i.csv'), 'w').write(_HDR2 + '\n'.join(SW) + '\n')
+_rows = ['asof,event,detail']
+for _k, _t in enumerate(['E', 'F']):
+    _rows += [f'2026-0{_k+1}-01,SWITCH_SIGNAL,{_t}|s{_k}', f'2026-0{_k+1}-01,TRANSITION_OPEN,{_t}|s{_k}|t{_k}',
+              f'2026-0{_k+1}-02,TRANSITION_COMPLETE,{_t}|s{_k}|t{_k}']
+open(_JP('b1_j.csv'), 'w').write('\n'.join(_rows) + '\n')
+M.test_configure(_JP('b1_j.csv'))
+_cb = M.run(_JP('b1_i.csv'), 'mr_tariff.csv', _JP('b1_s.csv'), _JP('b1_j.csv'), '2026-08-08', 10e6, write=True)
+chk('МР: бюджет — третье переключение при двух завершённых = REVIEW (до замка)',
+    _cb == M.REVIEW and open(_JP('b1_j.csv')).read().count('SWITCH_SIGNAL') == 2)
+chk('МР: budget_exhausted — единое правило (1 -> можно, 2 -> нельзя)',
+    M.budget_exhausted(2) and not M.budget_exhausted(1) and M.MAX_SWITCHES_3Y == 2)
+open(_JP('b2_j.csv'), 'w').write('asof,event,detail\n')
+M.test_configure(_JP('b2_j.csv'))
+open(_JP('b2_i.csv'), 'w').write(_HDR2 + '\n'.join(SW) + '\n')   # цель E, маршрут стартово F
+_orig_locked = M._locked
+@_cx.contextmanager
+def _racing(path):
+    if not getattr(_racing, 'fired', False):        # параллельный процесс между решением и захватом замка
+        _racing.fired = True
+        for _ev, _det in [('SWITCH_SIGNAL', 'E|sW'), ('TRANSITION_OPEN', 'E|sW|tW'), ('TRANSITION_COMPLETE', 'E|sW|tW'),
+                          ('SWITCH_SIGNAL', 'F|sX'), ('TRANSITION_OPEN', 'F|sX|tX'), ('TRANSITION_COMPLETE', 'F|sX|tX')]:
+            M._append_raw(M.canonical_journal(path), '2026-03-01', _ev, _det)
+    with _orig_locked(path):
+        yield
+M._locked = _racing
+_cr = M.run(_JP('b2_i.csv'), 'mr_tariff.csv', _JP('b2_s.csv'), _JP('b2_j.csv'), '2026-08-08', 10e6, write=True)
+M._locked = _orig_locked
+chk('МР: бюджет ПОД ЗАМКОМ — параллельные переходы (цель не достигнута) дают REVIEW без нового сигнала',
+    _cr == M.REVIEW and open(_JP('b2_j.csv')).read().count('SWITCH_SIGNAL,E') == 1)
+_stray = [f for f in os.listdir('.') if f.startswith('.journal.pin.') or f.startswith('.deploy.') and 'backup' not in f and f != os.path.basename(M.deploy_config_path())]
+chk('Самопроверка: фикстуры и журналы — только в каталоге прогона, посторонних артефактов нет', not _stray)
+# --- Контртесты вердикта ред. 23 ---
+_j1 = _JP('dep1_journal.csv')
+_j2dir = os.path.join(_TD, 'dep2')
+os.makedirs(_j2dir, exist_ok=True)
+open(_j1, 'w').write('asof,event,detail\n')
+inc = 0
+for _bad in (os.path.relpath(_j1), os.path.join(os.path.dirname(_j1), 'nope.csv')):
+    try: M.provision_journal_pin(_bad, force=True)
+    except M.JournalCorrupt: inc += 1
+open(os.path.join(os.path.dirname(_j1), 'bad.csv'), 'w').write('foo,bar\n')
+try: M.provision_journal_pin(os.path.join(os.path.dirname(_j1), 'bad.csv'), force=True)
+except M.JournalCorrupt: inc += 1
+chk('МР: провизия отклоняет относительный, несуществующий и файл с чужой схемой', inc == 3)
+M._clear_pin(); M.provision_journal_pin(_j1, force=True); M.configure(_j1)
+if os.path.lexists(_j2dir + '/hard.csv'): os.remove(_j2dir + '/hard.csv')
+os.link(_j1, _j2dir + '/hard.csv')
+_probe = ("import sys, fcntl\n"
+          "f = open(%r, 'r+')\n"
+          "try:\n fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); print('FREE')\n"
+          "except OSError: print('LOCKED')\n") % _j1
+with M.hold_strategy_lock(_j1):
+    _rl = subprocess.run([sys.executable, '-c', _probe], capture_output=True, text=True)
+chk('МР: единый замок стратегия+счёт по фиксированному пути занят для чужого процесса',
+    _rl.stdout.strip() == 'LOCKED')
+M.append_event(_j1, '2026-08-08', 'REVIEW_SIGNAL', 'до reprovision')
+M.provision_journal_pin(_j1, force=True)
+inc = False
+try: M.append_event(_j1, '2026-08-08', 'REVIEW_SIGNAL', 'после reprovision')
+except M.JournalCorrupt: inc = True
+M._clear_pin(); M.configure(_j1)
+M.append_event(_j1, '2026-08-08', 'REVIEW_SIGNAL', 'после перезапуска')
+chk('МР: --force-reprovision инвалидирует уже работающий процесс (эпоха), после переконфигурации пишет',
+    inc and open(_j1).read().count('после перезапуска') == 1)
+_jp = _JP('prio_j.csv'); open(_jp, 'w').write('asof,event,detail\n')
+M._PINNED['journal'] = None; M.test_configure(_jp)
+open(_JP('prio_i.csv'), 'w').write(HDR + '\n'.join(SW) + '\n')
+import contextlib as _cx2
+_ol = M._locked
+def _mk_race(events):
+    @_cx2.contextmanager
+    def _r(path):
+        if not getattr(_r, 'f', False):
+            _r.f = True
+            for _e, _d in events:
+                M._append_raw(M.canonical_journal(path), '2026-03-01', _e, _d)
+        with _ol(path):
+            yield
+    return _r
+M._locked = _mk_race([('SWITCH_SIGNAL', 'E|a'), ('TRANSITION_OPEN', 'E|a|ta'), ('TRANSITION_COMPLETE', 'E|a|ta'),
+                      ('SWITCH_SIGNAL', 'F|b'), ('TRANSITION_OPEN', 'F|b|tb'), ('TRANSITION_COMPLETE', 'F|b|tb'),
+                      ('SWITCH_SIGNAL', 'E|c'), ('TRANSITION_OPEN', 'E|c|tc'), ('TRANSITION_COMPLETE', 'E|c|tc')])
+_cp = M.run(_JP('prio_i.csv'), 'mr_tariff.csv', _JP('prio_s.csv'), _jp, '2026-08-08', 10e6, write=True)
+M._locked = _ol
+chk('МР: под замком цель достигнута И бюджет исчерпан -> HOLD (приоритет как до замка)', _cp == M.HOLD)
+_jc = _JP('cnt_j.csv'); open(_jc, 'w').write('asof,event,detail\n')
+M._PINNED['journal'] = None; M.test_configure(_jc)
+M._locked = _mk_race([('SWITCH_SIGNAL', 'F|z')])
+_cc = M.run(_JP('prio_i.csv'), 'mr_tariff.csv', _JP('cnt_s.csv'), _jc, '2026-08-08', 10e6, write=True)
+M._locked = _ol
+chk('МР: под замком встречный pending -> REVIEW (как до замка)', _cc == M.REVIEW)
+# --- Контртесты вердикта ред. 24: единый замок, единая конфигурация, долговечность ---
+_s1 = _JP('s1a_journal.csv'); _s2dir = os.path.join(_TD, 's1b'); os.makedirs(_s2dir, exist_ok=True)
+_s2 = os.path.join(_s2dir, 's1b_journal.csv')
+for _p in (_s1, _s2): open(_p, 'w').write('asof,event,detail\n')
+M._clear_pin(); M.provision_journal_pin(_s1, force=True); M.configure(_s1)
+M.append_event(_s1, '2026-08-08', 'REVIEW_SIGNAL', 'до')
+M.provision_journal_pin(_s2, force=True)
+inc = False
+try: M.append_event(_s1, '2026-08-08', 'REVIEW_SIGNAL', 'после')
+except M.JournalCorrupt: inc = True
+_side = [f for f in os.listdir(os.path.dirname(_s1)) + os.listdir(_s2dir) if f.startswith('.deploy')]
+chk('МР: конфигурация ЕДИНСТВЕННА — reprovision в другой каталог инвалидирует старый процесс',
+    inc and not _side and os.path.exists(M.deploy_config_path()))
+M._clear_pin(); M.configure(_s2)
+open(os.path.join(_s2dir, 'fresh.csv'), 'w').write('asof,event,detail\n')
+os.replace(os.path.join(_s2dir, 'fresh.csv'), _s2)          # прежний путь, НОВЫЙ inode
+inc = False
+try: M.append_event(_s2, '2026-08-08', 'REVIEW_SIGNAL', 'после подмены')
+except M.JournalCorrupt: inc = True
+_codeid = ("import sys; sys.path.insert(0, %r)\n"
+           "import mr_engine as M\n"
+           "M.set_state_dir_for_tests(%r)\n"
+           "try:\n M.configure(%r); print('CONFIGURED')\n"
+           "except M.JournalCorrupt: print('REJECTED')\n") % (os.getcwd(), os.path.join(_TD, 'install'), _s2)
+_rid = subprocess.run([sys.executable, '-c', _codeid], capture_output=True, text=True)
+chk('МР: подмена файла новым inode по прежнему пути инвалидирует процесс и свежий запуск',
+    inc and _rid.stdout.strip() == 'REJECTED')
+M._clear_pin(); M.provision_journal_pin(_s2, force=True); M.configure(_s2)
+import threading as _th2, time as _tm2
+def _holder():
+    with M.hold_strategy_lock(_s2):
+        _tm2.sleep(1.2)
+_thh = _th2.Thread(target=_holder); _thh.start(); _tm2.sleep(0.3)
+_codepv = ("import sys, time; sys.path.insert(0, %r)\n"
+           "import mr_engine as M\n"
+           "M.set_state_dir_for_tests(%r)\n"
+           "t0 = time.time(); M.provision_journal_pin(%r, force=True)\n"
+           "print('WAITED=%%.2f' %% (time.time() - t0))\n") % (os.getcwd(), os.path.join(_TD, 'install'), _s2)
+_rpv2 = subprocess.run([sys.executable, '-c', _codepv], capture_output=True, text=True)
+_thh.join()
+_waited = float(_rpv2.stdout.strip().split('=')[1]) if 'WAITED=' in _rpv2.stdout else -1.0
+chk('МР: смена журнала СЕРИАЛИЗУЕТСЯ с работающим исполнителем (провизия ждёт замок)', _waited >= 0.5)
+M._PINNED['journal'] = None; M.test_configure(_s2)
+_fs = {'n': 0}; _origfs = os.fsync
+os.fsync = lambda fd: (_fs.__setitem__('n', _fs['n'] + 1), _origfs(fd))[1]
+try:
+    M.append_event(_s2, '2026-08-08', 'REVIEW_SIGNAL', 'durable')
+    _n_journal = _fs['n']
+    M.provision_journal_pin(_s2, force=True)
+finally:
+    os.fsync = _origfs
+chk('МР: долговечность — fsync при записи журнала и конфигурации', _n_journal >= 1 and _fs['n'] > _n_journal)
+# --- Контртесты вердикта ред. 25 ---
+_copy_dir = os.path.join(_TD, 'codecopy'); os.makedirs(_copy_dir, exist_ok=True)
+_sh0.copy('mr_engine.py', _copy_dir)
+_code_paths = ("import sys; sys.path.insert(0, %r)\n"
+               "import mr_engine as M\n"
+               "print(M.lock_path()); print(M.deploy_config_path())\n")
+_p1 = subprocess.run([sys.executable, '-c', _code_paths % os.getcwd()], capture_output=True, text=True).stdout.strip().splitlines()
+_p2 = subprocess.run([sys.executable, '-c', _code_paths % _copy_dir], capture_output=True, text=True).stdout.strip().splitlines()
+chk('МР: две ФИЗИЧЕСКИЕ копии кода дают один и тот же замок и одну конфигурацию',
+    _p1 == _p2 and len(_p1) == 2 and os.path.isabs(_p1[0]) and _copy_dir not in _p1[0])
+_lkj = _JP('lockid_journal.csv'); open(_lkj, 'w').write('asof,event,detail\n')
+M._clear_pin(); M.provision_journal_pin(_lkj, force=True); M.configure(_lkj)
+_INSTB = os.path.join(_TD, 'installB')
+_pre = ("import sys; sys.path.insert(0, %r)\n"
+        "import mr_engine as M\n"
+        "M.set_state_dir_for_tests(%r); M.provision_journal_pin(%r, force=True)\n") % (os.getcwd(), _INSTB, _lkj)
+subprocess.run([sys.executable, '-c', _pre], capture_output=True, text=True)
+_probe_hold = ("import sys; sys.path.insert(0, %r)\n"
+               "import mr_engine as M\n"
+               "M.set_state_dir_for_tests(%r); M.configure(%r)\n"
+               "try:\n"
+               "    with M.hold_strategy_lock(%r): print('ACQUIRED')\n"
+               "except RuntimeError: print('DENIED')\n") % (os.getcwd(), _INSTB, _lkj, _lkj)
+with M.hold_strategy_lock(_lkj):                     # A держит журнал
+    _lp = M.lock_path()
+    open(_lp + '.new', 'w').write(''); os.replace(_lp + '.new', _lp)   # подмена служебного файла
+    _r2 = subprocess.run([sys.executable, '-c', _probe_hold], capture_output=True, text=True, timeout=60)
+chk('МР: другой каталог установки/HOME на ТОМ ЖЕ журнале не даёт второго владельца',
+    _r2.stdout.strip() == 'DENIED')
+_r2b = subprocess.run([sys.executable, '-c', _probe_hold], capture_output=True, text=True, timeout=60)
+chk('МР: после освобождения журнал доступен', _r2b.stdout.strip() == 'ACQUIRED')
+_lnk = _JP('symlink_probe.csv')
+if os.path.lexists(_lnk + '.link'): os.remove(_lnk + '.link')
+open(_lnk, 'w').write('asof,event,detail\n'); os.symlink(_lnk, _lnk + '.link')
+inc = False
+try: M._open_journal_verified(_lnk + '.link')
+except OSError: inc = True
+chk('МР: O_NOFOLLOW — symlink вместо журнала отклоняется на уровне открытия', inc)
+_swp = _JP('swap_journal.csv'); open(_swp, 'w').write('asof,event,detail\n')
+M._clear_pin(); M.provision_journal_pin(_swp, force=True); M.configure(_swp)
+open(_swp + '.att', 'w').write('asof,event,detail\n2026-01-01,SWITCH_SIGNAL,E|attacker\n')
+os.replace(_swp + '.att', _swp)                      # подмена ПОСЛЕ проверки личности
+inc = False
+try: M.journal_rows(_swp, date(2026, 8, 8))
+except M.JournalCorrupt: inc = True
+chk('МР: подмена журнала после проверки — чтение через проверенный fd отклонено', inc)
+_pj = _JP('provlock_journal.csv'); open(_pj, 'w').write('asof,event,detail\n')
+M._clear_pin(); M.provision_journal_pin(_pj, force=True); M.configure(_pj)
+import threading as _th3, time as _tm3
+def _hold2():
+    with M.hold_strategy_lock(_pj):
+        _tm3.sleep(1.0)
+_t3 = _th3.Thread(target=_hold2); _t3.start(); _tm3.sleep(0.2)
+open(_pj + '.repl', 'w').write('foo,bar\n')
+os.replace(_pj + '.repl', _pj)                     # подмена журнала во время ожидания провизии
+_codepv2 = ("import sys; sys.path.insert(0, %r)\n"
+            "import mr_engine as M\n"
+            "M.set_state_dir_for_tests(%r)\n"
+            "try:\n M.provision_journal_pin(%r, force=True); print('PROVISIONED')\n"
+            "except M.JournalCorrupt: print('REJECTED')\n") % (os.getcwd(), os.path.join(_TD, 'install'), _pj)
+_rpv3 = subprocess.run([sys.executable, '-c', _codepv2], capture_output=True, text=True)
+_t3.join()
+chk('МР: журнал проверяется ПОД замком — подмена во время ожидания провизии отклоняется',
+    _rpv3.stdout.strip() == 'REJECTED')
+_fs2 = {'n': 0}; _of2 = os.fsync
+os.fsync = lambda fd: (_fs2.__setitem__('n', _fs2['n'] + 1), _of2(fd))[1]
+try:
+    T._atomic(_JP('state_probe.json'), {'x': 1})
+finally:
+    os.fsync = _of2
+chk('Исполнитель: состояние пишется с fsync файла и каталога', _fs2['n'] >= 2)
+_tj = _JP('toctou_journal.csv'); open(_tj, 'w').write('asof,event,detail\n')
+M._clear_pin(); M.provision_journal_pin(_tj, force=True); M.configure(_tj)
+_bad_body = 'foo,bar\n'
+_orig_stat = os.stat
+def _racing_stat(p, *a, **k):
+    if isinstance(p, str) and p == _tj and not getattr(_racing_stat, 'fired', False):
+        _racing_stat.fired = True
+        open(_tj + '.x', 'w').write(_bad_body); os.replace(_tj + '.x', _tj)   # подмена внутри окна
+    return _orig_stat(p, *a, **k)
+os.stat = _racing_stat
+inc = False
+try:
+    M.provision_journal_pin(_tj, force=True)
+except M.JournalCorrupt:
+    inc = True
+finally:
+    os.stat = _orig_stat
+chk('МР: подмена журнала между чтением схемы и сверкой личности отклоняется (единый дескриптор)', inc)
+# --- Контртесты вердикта ред. 28: два замка, отсоединённый fd, сериализация смены журнала ---
+_dj = _JP('dual_journal.csv'); _dj2 = _JP('dual_journal2.csv')
+for _p in (_dj, _dj2): open(_p, 'w').write('asof,event,detail\n')
+M._clear_pin(); M.provision_journal_pin(_dj, force=True); M.configure(_dj)
+_probe_dual = ("import sys; sys.path.insert(0, %r)\n"
+               "import mr_engine as M\n"
+               "M.set_state_dir_for_tests(%r)\n"
+               "try:\n"
+               "    M.configure(%r)\n"
+               "    with M.hold_strategy_lock(%r): print('ACQUIRED')\n"
+               "except Exception as e: print(type(e).__name__)\n") % (os.getcwd(), os.path.join(_TD, 'install'), _dj, _dj)
+with M.hold_strategy_lock(_dj):
+    open(_dj + '.n', 'w').write('asof,event,detail\n'); os.replace(_dj + '.n', _dj)   # подмена inode журнала
+    _rd = subprocess.run([sys.executable, '-c', _probe_dual], capture_output=True, text=True, timeout=60)
+chk('МР: подмена inode журнала при удерживаемом замке не даёт второго владельца',
+    _rd.stdout.strip() in ('JournalCorrupt', 'DENIED') and _rd.stdout.strip() != 'ACQUIRED')
+M._clear_pin(); M.provision_journal_pin(_dj, force=True); M.configure(_dj)
+inc = False
+with M.hold_strategy_lock(_dj):
+    open(_dj + '.n2', 'w').write('asof,event,detail\n'); os.replace(_dj + '.n2', _dj)
+    try: M.append_event(_dj, '2026-08-08', 'REVIEW_SIGNAL', 'ghost')
+    except M.JournalCorrupt: inc = True
+chk('МР: запись через отсоединённый дескриптор запрещена (нормативный журнал не расходится)', inc)
+M._clear_pin(); M.provision_journal_pin(_dj, force=True); M.configure(_dj)
+import threading as _th4, time as _tm4
+def _hold4():
+    with M.hold_strategy_lock(_dj):
+        _tm4.sleep(1.0)
+_t4 = _th4.Thread(target=_hold4); _t4.start(); _tm4.sleep(0.2)
+_code4 = ("import sys, time; sys.path.insert(0, %r)\n"
+          "import mr_engine as M\n"
+          "M.set_state_dir_for_tests(%r)\n"
+          "t0 = time.time(); M.provision_journal_pin(%r, force=True)\n"
+          "print('WAITED=%%.2f' %% (time.time() - t0))\n") % (os.getcwd(), os.path.join(_TD, 'install'), _dj2)
+_r4 = subprocess.run([sys.executable, '-c', _code4], capture_output=True, text=True, timeout=90)
+_t4.join()
+_w4 = float(_r4.stdout.strip().split('=')[1]) if 'WAITED=' in _r4.stdout else -1.0
+chk('МР: смена журнала на ДРУГОЙ ждёт владельца старого журнала (сериализация)', _w4 >= 0.4)
+inc = False
+try: M.append_event(_dj, '2026-08-08', 'REVIEW_SIGNAL', 'old')
+except M.JournalCorrupt: inc = True
+chk('МР: после смены журнала старый процесс инвалидирован', inc)
+ok = all(map_mes(n)[0]*10 + map_mes(n)[1] == n and 0 <= map_mes(n)[1] <= 9 for n in [0, 1, 9, 10, 171, 1234])
+chk('execution-mapper map_mes', ok)
+
+
+print('ИТОГ: ' + ('ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' if not FAIL else 'ПРОВАЛ: ' + ', '.join(FAIL)))
+sys.exit(1 if FAIL else 0)
