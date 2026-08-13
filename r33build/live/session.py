@@ -116,8 +116,10 @@ def do_close(ib, route):
         if diff:
             raise Refused('замыкание отменено — книга расходится с брокером:\n  '
                           + '\n  '.join(diff))
-        nav = br.net_liquidation()
         px_eq, dref, px_bd, src = FD.closing_values(ib, route, book)
+        # NLV — ПОСЛЕ цен закрытия (тринадцатый круг, №3): триггер капа обязан делить цены
+        # и капитал ОДНОГО момента; ранний NAV с поздними ценами искажал prev_close_lev.
+        nav = br.net_liquidation()
         # ПОВТОРНАЯ СВЕРКА ПОСЛЕ ДОЛГИХ ЗАПРОСОВ (десятый круг, №11): поздний фил или новая
         # заявка в окне запросов цен не должны попадать в триггер капа незамеченными.
         diff2 = ST.reconcile(book, route, br.net_positions(), open_orders=br.open_orders())
@@ -176,8 +178,10 @@ def do_trade(ib, route, dry):
         # ЖИВОЙ ЗАПАС О-3-Е — ОТ БРОКЕРА (десятый круг, №2): расчётная прокси при капе 2,00
         # не опускается ниже порога, и аварийное сокращение было недостижимо в бою.
         kw['live_cushion'] = br.margin_cushion()
+    # NLV НЕ ПЕРЕДАЁТСЯ снаружи (тринадцатый круг, №2): между ранним чтением и заявками —
+    # серия долгих запросов; run_session сам читает NLV ПОД ЗАМКОМ прямо перед решением.
     dec, orders, diff = DL.run_session(
-        br, m, dirpath=str(state_dir()), route=route, capital=nlv, closing_nav=None,
+        br, m, dirpath=str(state_dir()), route=route, capital=None, closing_nav=None,
         journal_path=str(state_dir() / f'journal-{route}.csv'), dry_run=dry,
         paper=paper_mode(),
         ref_prices=refs, book_path=str(bp), series_a=src.get('series'), **kw)

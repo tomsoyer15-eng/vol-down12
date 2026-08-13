@@ -423,20 +423,27 @@ def closing_values(ib, route, book):
     """
     import pandas as pd
     now = pd.Timestamp.now(tz=EXCHANGE_TZ)
+    today = exchange_today()          # нужен воротам Е ДО остальной логики
     # ВОРОТА ПО МАРШРУТУ (двенадцатый круг, №3): Е замыкается ПОСЛЕ ЕВРОПЕЙСКОГО закрытия
     # (~10:30 Чикаго), а не после американского — прежнее безусловное «после 16:00» делало
     # заявленное окно Е технически недостижимым: первый же вызов в 10:40 падал, ставил
     # тревогу и оставлял маржинальную книгу без ежедневного управления.
     if route == 'E':
-        ok_time = now.hour > 10 or (now.hour == 10 and now.minute >= 35)
-        gate = '10:35'
+        # ОТ ФАКТИЧЕСКОГО ЕВРОПЕЙСКОГО ЗАКРЫТИЯ (тринадцатый круг, №4): фиксированные 10:35
+        # Чикаго ломаются в недели рассинхронизации DST (США уже перешли, Европа ещё нет —
+        # закрытие уезжает на час, и незавершённый бар шёл в триггер капа). Ворота — макс.
+        # из лондонского 16:35 и цюрихского 17:35, приведённых к Чикаго на СЕГОДНЯ.
+        _lon = pd.Timestamp(f'{today:%Y-%m-%d} 16:35', tz='Europe/London').tz_convert(EXCHANGE_TZ)
+        _zur = pd.Timestamp(f'{today:%Y-%m-%d} 17:35', tz='Europe/Zurich').tz_convert(EXCHANGE_TZ)
+        _gate_ts = max(_lon, _zur)
+        ok_time = now >= _gate_ts
+        gate = f'{_gate_ts:%H:%M} (европейское закрытие)'
     else:
         ok_time = now.hour >= CLOSE_AFTER_H
         gate = f'{CLOSE_AFTER_H}:00'
     if not ok_time:
         raise FeedError(f'сейчас {now:%H:%M} по бирже ({EXCHANGE_TZ}) — торги маршрута ещё '
                         f'идут; дневной бар существует, но НЕ ЗАВЕРШЁН. Замыкание после {gate}')
-    today = exchange_today()
     reg = registry()
     if route == 'E':
         _, _, pe_t, d1 = closes(ib, contract_of(ib, 'CSPX', reg), today)

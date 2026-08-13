@@ -25,7 +25,9 @@ def mismatches(c, row):
         bad.append(f"множитель {c.multiplier} вместо {row['multiplier']}")
     if row.get('primary_exchange'):
         got = c.primaryExchange or c.exchange
-        if got and got != row['primary_exchange']:
+        if not got:
+            bad.append(f"площадка биржей не подтверждена (ожидалась {row['primary_exchange']})")
+        elif got != row['primary_exchange']:
             bad.append(f"площадка {got} вместо {row['primary_exchange']}")
     if row.get('local_symbol') and c.localSymbol != row['local_symbol']:
         bad.append(f"биржевое имя {c.localSymbol} вместо {row['local_symbol']}")

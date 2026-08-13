@@ -53,16 +53,24 @@ def _live_margins():
     cand = _os.environ.get('ADDFUT_MARGINS')
     p = _P(cand) if cand else _P(__file__).resolve().parent / 'live' / 'margins_live.json'
     if not p.exists():
+        # Файла нет (свежая машина, стенды): константы — ЯВНЫЙ запасной путь, о нём говорит
+        # вызывающий в причинах. Битый или пустой файл — ДРУГОЕ: это сломанный замер.
         return {}
+    raw_text = p.read_text(encoding='utf-8')
     try:
-        raw = _json.loads(p.read_text(encoding='utf-8'))
+        raw = _json.loads(raw_text)
         out = {}
         for k, v in raw.items():
             root = k.rstrip('0123456789').rstrip('UZHM') or k
             out[root] = float(v.get('maint') or v.get('init'))
-        return out
-    except Exception:
-        return {}
+    except Exception as ex:
+        # ТРИНАДЦАТЫЙ КРУГ, №5: молча подменять живой замер константами нельзя — переход
+        # разрешался бы по фиктивному запасу при повышенном house-требовании.
+        raise Incident(f'{p}: файл живой маржи повреждён ({ex}) — переход запрещён до '
+                       f'починки замера')
+    if not out:
+        raise Incident(f'{p}: файл живой маржи пуст — переход запрещён до починки замера')
+    return out
 
 
 def book_margin(book, reg, prices=None):

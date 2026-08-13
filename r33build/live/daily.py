@@ -136,24 +136,22 @@ def roll_deadline(tag, holidays=()):
     return roll_date(ry, rm, holidays)
 
 
-def missed_roll_check(b, m):
-    """Пропущенный ролл: СРОК удерживаемой серии прошёл, а серия всё ещё в книге.
-
-    Десятый круг (№4): смотрим ОБЕ ноги. Одиннадцатый (№3): сравнение с first_tag работало
-    только ВНУТРИ месяца ролла — простой до сентября оставлял U26 в книге без навёрстывания
-    (first_tag уже Z26, roll_passed вне августа ложен), и дело кончалось поздним отказом в
-    поставочной зоне. Теперь признак — по КАЛЕНДАРНОМУ СРОКУ самой серии: он не зависит от
-    того, в каком месяце нас включили."""
+def leg_roll_overdue(held, m):
+    """Просрочен ли СРОК ролла ИМЕННО ЭТОЙ серии (тринадцатый круг, №1: срок — свойство
+    серии, а не книги; общий флаг роллил исправную ногу на квартал вперёд)."""
+    if held is None:
+        return False
     hol = getattr(m, 'holidays', ()) or ()
-    for held in (b.ser_a, b.ser_b):
-        if held is None:
-            continue
-        try:
-            if m.date > roll_deadline(held, hol):
-                return True
-        except Exception:
-            continue
-    return False
+    try:
+        return m.date > roll_deadline(held, hol)
+    except Exception:
+        return False
+
+
+def missed_roll_check(b, m):
+    """Хотя бы одна нога просрочена (для предусловий стендов; решение внутри step — по
+    каждой ноге отдельно)."""
+    return leg_roll_overdue(b.ser_a, m) or leg_roll_overdue(b.ser_b, m)
 
 
 def target_tag(held, dte, roll_today, roll_passed=False):
@@ -354,12 +352,17 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
     # пропущен (остановка машины), назавтра roll_today уже ложен, а прежний код держал
     # старую серию до месяца поставки и получал лишь отказ. Признак: ролл цикла пройден, а
     # удерживаемая серия всё ещё та, которую календарь велел покинуть.
-    missed_roll = (not roll_now) and missed_roll_check(b, m)
-    if missed_roll:
-        roll_now = True
+    # ПО КАЖДОЙ НОГЕ (тринадцатый круг, №1): просрочка ноги Б не повод роллить исправную
+    # ногу А на квартал вперёд — у каждой серии свой срок.
+    missed_a = (not roll_now) and leg_roll_overdue(b.ser_a, m)
+    missed_b = (not roll_now) and leg_roll_overdue(b.ser_b, m)
+    missed_roll = missed_a or missed_b
+    roll_a = roll_now or missed_a
+    roll_b = roll_now or missed_b
+    roll_any = roll_now or missed_roll
     eq_switch = (m.st_eq != b.prev_st_eq)
     bd_switch = (m.st_bd != b.prev_st_bd)
-    if roll_now or bd_switch:
+    if roll_any or bd_switch:
         b = replace(b, d_fix=m.dref_prev)
 
     u_e, u_b = units(b, m)
@@ -414,7 +417,7 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
             e -= S.COST * abs(new - n_e) * u_e
             d.reasons.append('смена состояния ноги А' if eq_switch else 'нога А вне полосы')
             n_e = new
-    if bd_switch or roll_now or abs(tgt_b - exp_b) > band * e:
+    if bd_switch or roll_b or abs(tgt_b - exp_b) > band * e:
         new = round(tgt_b / u_b)
         if new != n_b:
             e -= S.COST * abs(new - n_b) * u_b
@@ -426,7 +429,7 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
         def e_after(ne, nb):
             ea = e - S.COST * ((abs(ne - n0_e) - abs(n_e - n0_e)) * u_e +
                                (abs(nb - n0_b) - abs(n_b - n0_b)) * u_b)
-            if roll_now:
+            if roll_any:
                 ea -= S.ROLL_BP * (ne * u_e + nb * u_b)
             return ea
 
@@ -455,7 +458,7 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
     # ПО roll_now, А НЕ ПО КАЛЕНДАРНОМУ ФЛАГУ. Отложенный ролл (roll_pending) переносил
     # серию, но стоимость переноса НЕ списывалась: капитал и доступное плечо завышались,
     # и пограничная книга получала на контракт больше положенного.
-    if roll_now:
+    if roll_any:
         e -= S.ROLL_BP * (exp_e + exp_b)
 
     if n_e != n0_e:
@@ -468,8 +471,8 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
     # заявки знает лишь капитал после собственных расходов — рыночный P&L дня ещё не
     # случился. Замыкание сессии выполняет close_out() по факту закрытия.
     # --- серии: какую держим после этой сессии ---
-    tgt_a = target_tag(b.ser_a, m.date, roll_now, m.roll_passed)
-    tgt_b = target_tag(b.ser_b, m.date, roll_now, m.roll_passed)
+    tgt_a = target_tag(b.ser_a, m.date, roll_a, m.roll_passed)
+    tgt_b = target_tag(b.ser_b, m.date, roll_b, m.roll_passed)
     d.roll_pairs = []
     for leg, held, want, n_old, n_new in (('А', b.ser_a, tgt_a, n0_e, n_e),
                                           ('Б', b.ser_b, tgt_b, n0_b, n_b)):
@@ -481,7 +484,7 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
             d.refusals.append(f'нога {leg}: удерживается серия {held}, наступил её месяц '
                               f'поставки — сессия ролла пропущена, требуется ручной разбор (§1)')
 
-    es_after = pack_es(b.es_held, n_e, b.unit_is_mes, roll_now)
+    es_after = pack_es(b.es_held, n_e, b.unit_is_mes, roll_a)
     d.book_after = replace(b, n_e=n_e, n_b=n_b, prev_close_lev=float('nan'),
                            prev_st_eq=m.st_eq, prev_st_bd=m.st_bd,
                            ser_a=tgt_a, ser_b=tgt_b, es_held=es_after, roll_pending=False)
@@ -506,7 +509,7 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
             d.book_after = replace(b, n_e=fe, n_b=fb, prev_close_lev=float('nan'),
                                    prev_st_eq=m.st_eq, prev_st_bd=m.st_bd,
                                    ser_a=tgt_a, ser_b=tgt_b,
-                                   es_held=pack_es(b.es_held, fe, b.unit_is_mes, roll_now))
+                                   es_held=pack_es(b.es_held, fe, b.unit_is_mes, roll_a))
             d.roll_pairs = [p for p in d.roll_pairs
                             if (p['leg'] == 'А' and n0_e) or (p['leg'] == 'Б' and n0_b)]
             for p in d.roll_pairs:

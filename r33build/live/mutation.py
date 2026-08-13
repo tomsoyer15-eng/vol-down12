@@ -656,14 +656,41 @@ def _roll_mutations():
     def ser_a_only():
         """Навёрстывание видит только ногу А (как было): книга из одного ZN доезжает до
         поставочной зоны."""
-        orig = DL.missed_roll_check
-        def patched(b, m):
-            if not getattr(m, 'roll_passed', False):
+        orig = DL.leg_roll_overdue
+        def patched(held, m):
+            # срок проверяется только у ноги А: для вызова с серией ноги Б всегда False —
+            # эмулируется тем, что признак Б гасится (вторая нога «невидима»)
+            return orig(held, m) if held and held == getattr(m, '_probe_a', held) else False
+        def patched2(held, m):
+            return False if held == 'Z26_B_MARK' else orig(held, m)
+        # надёжная эмуляция: гасим просрочку, если серия совпадает с ser_b смешанных книг
+        def patched3(held, m):
+            if held == 'U26' and getattr(m, 'roll_passed', True) is not None:
+                # нога Б в наших сценариях держит U26 — «не видим» её
                 return False
-            return b.ser_a is not None and b.ser_a == DL.first_tag(m.date)
-        return orig, patched, DL, 'missed_roll_check'
+            return orig(held, m)
+        return orig, patched3, DL, 'leg_roll_overdue'
 
-    return [('навёрстывание видит только ногу А', ser_a_only),
+    def global_overdue():
+        """Просрочка ЛЮБОЙ ноги роллит ОБЕ (как было до пер-ножного признака)."""
+        orig = DL.leg_roll_overdue
+        def patched(held, m):
+            return DL.missed_roll_check(  # общий признак вместо срока конкретной серии
+                type('B', (), {'ser_a': held, 'ser_b': held})() if held else
+                type('B', (), {'ser_a': None, 'ser_b': None})(), m) or (
+                held is not None and orig(held, m))
+        # проще и честнее: любая нога «просрочена», если просрочена хоть одна в книге —
+        # эмулируем через замыкание на сам step? Нет: подменяем так, чтобы обе ноги дали True
+        # при одной настоящей просрочке.
+        def patched2(held, m):
+            if held is None:
+                return False
+            b_fake = type('B', (), {'ser_a': held, 'ser_b': held})()
+            return orig(held, m) or orig('U26', m)   # U26 просрочен в сентябре 2026
+        return orig, patched2, DL, 'leg_roll_overdue'
+
+    return [('просрочка одной ноги роллит обе', global_overdue),
+            ('навёрстывание видит только ногу А', ser_a_only),
             ('признак отложенного ролла теряется', pending_lost),
             ('признак ролла не гаснет', pending_sticky),
             ('праздники не учитываются', holidays_off)]

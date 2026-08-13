@@ -191,13 +191,23 @@ tick() {
 backup_state() {
     # РЕЗЕРВНАЯ КОПИЯ МАШИННОГО СОСТОЯНИЯ после каждого замыкания: книга, журнал §7, живой
     # ряд сигналов и уровни. СЕКРЕТЫ (ibgw.env) НЕ КОПИРУЮТСЯ. Храним 30 последних.
-    local day=$1 bdir=$HOME/.addfut-backups
+    # УНИКАЛЬНОЕ ИМЯ И АТОМАРНАЯ ПУБЛИКАЦИЯ (тринадцатый круг, №10): повторное событие
+    # той же даты (замыкание после перехода) не затирает предыдущий снимок, падение tar не
+    # оставляет усечённый архив под рабочим именем.
+    local day=$1 bdir=$HOME/.addfut-backups stamp
+    stamp=$(date -u +%H%M%S)
     mkdir -p "$bdir"
-    tar -czf "$bdir/addfut-$day.tgz" -C "$HOME" \
+    if tar -czf "$bdir/.addfut-$day-$stamp.tmp" -C "$HOME" \
         --exclude='.addfut/ibgw.env' --exclude='.addfut/zoneinfo' \
-        --exclude='.addfut/*.lock' .addfut 2>/dev/null \
-        && log "резервная копия состояния: addfut-$day.tgz"
-    ls -1t "$bdir"/addfut-*.tgz 2>/dev/null | tail -n +31 | xargs -r rm -f
+        --exclude='.addfut/*.lock' .addfut 2>/dev/null; then
+        mv "$bdir/.addfut-$day-$stamp.tmp" "$bdir/addfut-$day-$stamp.tgz"
+        log "резервная копия состояния: addfut-$day-$stamp.tgz"
+        /bin/bash /home/alex/claude-projects/vol-down12/tools/backup_push.sh
+    else
+        rm -f "$bdir/.addfut-$day-$stamp.tmp"
+        log "ТРЕВОГА: резервная копия $day не создана"
+    fi
+    ls -1t "$bdir"/addfut-*.tgz 2>/dev/null | tail -n +61 | xargs -r rm -f
 }
 
 status() {

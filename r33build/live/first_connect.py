@@ -128,7 +128,11 @@ def main():
                            ((getattr(x, 'value', ''), getattr(x, 'tag', ''))
                             for x in (getattr(d, 'secIdList', None) or []))
                            if tg == 'ISIN'), '')
-        if _isin_exch and _isin_exch != isin:
+        if not _isin_exch:
+            # ОТСУТСТВИЕ ПОДТВЕРЖДЕНИЯ — НЕ ПОДТВЕРЖДЕНИЕ (тринадцатый круг, №7).
+            raise SystemExit(f'{sym}: биржа не вернула ISIN — личность фонда не '
+                             f'подтверждена, реестр не пишется')
+        if _isin_exch != isin:
             raise SystemExit(f'{sym}: ISIN у биржи {_isin_exch}, ожидался {isin} — '
                              f'другая листинговая линия, реестр не пишется')
         # secType — КАК ЕГО ВИДИТ БИРЖА (у IBKR фонды — 'STK'); литерал 'ETF' в реестре
@@ -171,9 +175,12 @@ def main():
     pd.DataFrame(rows).to_csv(tmp, index=False)
     import os as _os
     _os.replace(tmp, out)
-    _mp = ROOT / 'live' / 'margins_live.json'
+    _mp = Path(os.environ.get('ADDFUT_MARGINS') or (ROOT / 'live' / 'margins_live.json'))
     if margins:
-        _mp.write_text(json.dumps(margins, ensure_ascii=False, indent=1), encoding='utf-8')
+        # атомарно и по тому же адресу, откуда читает переход (тринадцатый круг, №5)
+        _tmp = _mp.with_suffix('.json.tmp')
+        _tmp.write_text(json.dumps(margins, ensure_ascii=False, indent=1), encoding='utf-8')
+        os.replace(_tmp, _mp)
     else:
         # ПУСТОЙ ЗАМЕР НЕ ЗАТИРАЕТ ФАКТИЧЕСКИЙ (двенадцатый круг, №4): whatIf на бумажном
         # шлюзе маржи не возвращает, и прежде файл с живыми замерами обнулялся при каждой
