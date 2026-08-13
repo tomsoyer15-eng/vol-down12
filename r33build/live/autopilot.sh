@@ -113,6 +113,7 @@ run_close() {
     echo "$out" >> "$LOG"
     if [ $rc -eq 0 ] || echo "$out" | grep -q 'уже замкнута'; then
         touch "$ST/closed-$day"; log "замыкание $day: ок"
+        backup_state "$day"
     else
         echo "$out" > "$ST/ALARM-close-$day.txt"
         log "ТРЕВОГА замыкания $day (код $rc)"
@@ -153,6 +154,18 @@ tick() {
     fi
     find "$ST" -maxdepth 1 -name 'traded-*' -mtime +14 -delete 2>/dev/null
     find "$ST" -maxdepth 1 -name 'closed-*' -mtime +14 -delete 2>/dev/null
+}
+
+backup_state() {
+    # РЕЗЕРВНАЯ КОПИЯ МАШИННОГО СОСТОЯНИЯ после каждого замыкания: книга, журнал §7, живой
+    # ряд сигналов и уровни. СЕКРЕТЫ (ibgw.env) НЕ КОПИРУЮТСЯ. Храним 30 последних.
+    local day=$1 bdir=$HOME/.addfut-backups
+    mkdir -p "$bdir"
+    tar -czf "$bdir/addfut-$day.tgz" -C "$HOME" \
+        --exclude='.addfut/ibgw.env' --exclude='.addfut/zoneinfo' \
+        --exclude='.addfut/*.lock' .addfut 2>/dev/null \
+        && log "резервная копия состояния: addfut-$day.tgz"
+    ls -1t "$bdir"/addfut-*.tgz 2>/dev/null | tail -n +31 | xargs -r rm -f
 }
 
 status() {

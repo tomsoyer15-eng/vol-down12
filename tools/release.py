@@ -47,6 +47,16 @@ def main():
     print(f'распакованный архив: {tail[0] if tail else "нет вывода"}')
     if not ok:
         print((r.stdout or '')[-3000:]); sys.exit('ВЫПУСК НЕ СОСТОЯЛСЯ: архив не проходит selfcheck')
+    # ИСТОРИЯ ВЫПУСКОВ: архив прежде перезаписывался на месте, и предыдущий корень доверия
+    # исчезал физически. Каждый выпуск теперь остаётся датированной копией.
+    import datetime
+    rel = ROOT / 'releases'
+    rel.mkdir(exist_ok=True)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M%S')
+    keep = rel / f'paket-r33-{stamp}-{h[:8]}.zip'
+    shutil.copy2(Z, keep)
+    with open(rel / 'INDEX.txt', 'a', encoding='utf-8') as f:
+        f.write(f'{stamp}  {h}  {keep.name}\n')
     (ROOT / 'docs/r33-sha256.txt').write_text(
         f'Корень доверия ADD-FUT v1.6.0 ред. 33\n\nАрхив {Z.name}\nSHA-256  {h}\n\n'
         f'Внутри — MANIFEST-192.txt на {len(names)} файлов: код, нормативный текст и ИСХОДНЫЕ РЯДЫ.\n'
