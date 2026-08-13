@@ -93,21 +93,75 @@ def _verify_month_tail(sym, df, me):
 BORDER_TOL = 0.001     # |закрытие/SMA − 1| в этой зоне — решение в пределах шума источника
 
 
+DIV_YIELD_CAP = 0.06       # потолок ГОДОВОЙ дивидендной доходности SPY/IEF (история: SPY
+                           # 1,2-1,8%, IEF 3-4,5%; 6% — консервативный запас). Не параметр
+                           # стратегии, а физическая граница различимости: дивиденды окна
+                           # «конец месяца - сегодня» не могут превысить её pro rata.
+
+
+def _div_bound(d):
+    """Максимальная дивидендная поправка окна (d, сегодня]: один квартальный купон
+    (DIV_YIELD_CAP/4) плюс pro-rata хвост окна плюс допуск уровней."""
+    import feed as FD
+    days = max(0, int((FD.exchange_today() - d).days))
+    return DIV_YIELD_CAP / 4.0 + DIV_YIELD_CAP * days / 365.0 + LEVEL_TOL
+
+
 def _verify_border(sym, me):
     """ПОГРАНИЧНЫЙ НОВЫЙ МЕСЯЦ НЕ ДОВЕРЯЕТСЯ АВТОМАТИЧЕСКИ (тринадцатый круг, №8): самый
     свежий месяц отсутствует в сайдкаре и уровневой сверкой не покрыт; если его закрытие
-    стоит к SMA ближе допуска уровней, знак решения неотличим от погрешности поставщика.
-    Дописывание требует явного подтверждения оператора."""
+    стоит к SMA ближе зоны неопределённости, знак решения неотличим от погрешности
+    поставщика. ЗОНА РАСШИРЕНА до дивидендной границы окна (шестнадцатый круг, №3):
+    занижение свежего закрытия в пределах купона неотличимо от самого купона TRADES-сверкой,
+    и если такое искажение способно сменить знак — знак стоит внутри этой зоны, а тогда
+    дописывание требует явного подтверждения оператора."""
     import os as _os
     sma = me.rolling(SMA).mean()
     d = me.index[-1]
     if sma.isna().loc[d]:
         return
+    zone = max(BORDER_TOL, _div_bound(d))
     margin = abs(me.loc[d] / sma.loc[d] - 1.0)
-    if margin <= BORDER_TOL and _os.environ.get('ADDFUT_SIGNAL_CONFIRM') != '1':
+    if margin <= zone and _os.environ.get('ADDFUT_SIGNAL_CONFIRM') != '1':
         raise SignalError(f'{sym}: решение месяца {d:%Y-%m} пограничное '
-                          f'({margin:+.3%} к SMA при допуске уровней {BORDER_TOL:.1%}) — '
+                          f'({margin:+.3%} к SMA при зоне неопределённости {zone:.2%}) — '
                           f'автодописывание запрещено; подтвердить ADDFUT_SIGNAL_CONFIRM=1')
+
+
+def _verify_fresh(ib, sym, primary, me):
+    """СВЕЖИЙ МЕСЯЦ СВЕРЯЕТСЯ НЕЗАВИСИМЫМ СРЕЗОМ TRADES (шестнадцатый круг, №3): новейший
+    завершённый месяц отсутствует в сайдкаре ПО ПОСТРОЕНИЮ, и порча последнего закрытия
+    ADJUSTED_LAST проходила бы уровневую сверку молча. Последний бар скорректированного
+    ряда отличается от сырого TRADES только дивидендами, чьи экс-даты попали в окно
+    «конец месяца - сегодня»: скорректированное закрытие НЕ СМЕЕТ превышать сырое сверх
+    допуска уровней, а отставать — сверх дивидендной границы окна. Занижение в пределах
+    купона добирает расширенная пограничная зона _verify_border. Сплит в окне даст кратное
+    расхождение и честный отказ (SPY/IEF — событие редчайшее, разбор ручной)."""
+    import pandas as pd
+    from ib_insync import Stock, util
+    c = Stock(sym, 'SMART', 'USD', primaryExchange=primary)
+    ib.qualifyContracts(c)
+    if not getattr(c, 'conId', 0):
+        raise SignalError(f'{sym}: контракт для TRADES-сверки не подтверждён')
+    d = me.index[-1]
+    bars = ib.reqHistoricalData(c, endDateTime='', durationStr='3 M',
+                                barSizeSetting='1 day', whatToShow='TRADES', useRTH=True)
+    if not bars:
+        raise SignalError(f'{sym}: TRADES-история пуста — свежий месяц {d:%Y-%m} остался '
+                          f'без независимого подтверждения')
+    df = util.df(bars).set_index('date')['close']
+    df.index = pd.to_datetime(df.index)
+    mt = df.resample('ME').last().dropna()
+    if d not in mt.index:
+        raise SignalError(f'{sym}: в TRADES нет месяца {d:%Y-%m} — свежий месяц остался '
+                          f'без независимого подтверждения')
+    rel = float(mt.loc[d]) / float(me.loc[d]) - 1.0
+    bound = _div_bound(d)
+    if not (-LEVEL_TOL <= rel <= bound):
+        raise SignalError(f'{sym}: свежий месяц {d:%Y-%m} разошёлся с независимым '
+                          f'TRADES-закрытием ({rel:+.3%}; допустимо от {-LEVEL_TOL:.1%} '
+                          f'до +{bound:.2%} дивидендного окна) — последнее закрытие '
+                          f'источника недостоверно')
 
 
 def states(me):
@@ -239,6 +293,7 @@ def _update_locked(ib, LIVE, pd):
         me = monthly_adjusted(ib, sym, primary)
         _check_levels(sym, LIVE, me)       # только ПРОВЕРКА (одиннадцатый круг, №10)
         _verify_border(sym, me)            # пограничный свежий месяц (тринадцатый, №8)
+        _verify_fresh(ib, sym, primary, me)  # независимый срез TRADES (шестнадцатый, №3)
         pending_levels[sym] = me
         st = states(me)
         _verify_overlap(sym, col, ref, st)

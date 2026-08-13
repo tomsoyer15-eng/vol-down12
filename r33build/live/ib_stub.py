@@ -138,7 +138,11 @@ class StubIB:
     def isConnected(self): return self.behaviour != 'disconnect_link'
     def sleep(self, s): pass
     def waitOnUpdate(self, timeout=None): pass
-    def reqAllOpenOrders(self): pass
+    def reqAllOpenOrders(self):
+        # 'orders_req_fails': соединение живо, но КОНКРЕТНЫЙ запрос заявок падает —
+        # проверка API этот случай не исключает (шестнадцатый круг, №2).
+        if self.behaviour == 'orders_req_fails':
+            raise RuntimeError('запрос открытых заявок оборвался')
     def reqAccountUpdates(self, acct=None): pass
     def orders(self): return [t.order for t in self._trades]
 
@@ -255,15 +259,25 @@ class StubIB:
         return list(cs)
 
     # --- история ---
-    def set_bars(self, bars):
+    def set_bars(self, bars, what=None):
         """bars: con_id -> [(дата, закрытие), ...]. Сборщик входов проверяет ДАТЫ баров,
-        и без подстановки истории эта проверка не исполнялась ни разу."""
-        self._bars = dict(bars)
+        и без подстановки истории эта проверка не исполнялась ни разу.
+        what — необязательный срез источника ('TRADES', 'ADJUSTED_LAST'): сверка свежего
+        месяца (шестнадцатый круг, №3) читает ДВА среза; без отдельной подстановки TRADES
+        отдаются те же бары — штатный случай совпадения."""
+        if what is None:
+            self._bars = dict(bars)
+        else:
+            if not hasattr(self, '_bars_what'):
+                self._bars_what = {}
+            self._bars_what[what] = dict(bars)
 
     def reqHistoricalData(self, contract, endDateTime='', durationStr='', barSizeSetting='',
                           whatToShow='', useRTH=True, **kw):
         import pandas as pd
-        rows = getattr(self, '_bars', {}).get(contract.conId, [])
+        rows = getattr(self, '_bars_what', {}).get(whatToShow, {}).get(contract.conId)
+        if rows is None:
+            rows = getattr(self, '_bars', {}).get(contract.conId, [])
         out = []
         for d, c in rows:
             v = float(c)

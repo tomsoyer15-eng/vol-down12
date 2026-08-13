@@ -188,6 +188,12 @@ def main():
               f'margins_live.json сохранён прежним')
         margins = {}
     if margins:
+        # ПРИВЯЗКА ЗАМЕРА (шестнадцатый круг, №4): дата, счёт и серии — без них старый
+        # замер после квартальной смены реестра неотличим от живого.
+        import datetime as _dt
+        margins['_meta'] = dict(
+            date=_dt.datetime.now(_dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),
+            account=_acct, series=sorted(k for k in margins if k != '_meta'))
         # атомарно и по тому же адресу, откуда читает переход (тринадцатый круг, №5)
         _tmp = _mp.with_suffix('.json.tmp')
         _tmp.write_text(json.dumps(margins, ensure_ascii=False, indent=1), encoding='utf-8')

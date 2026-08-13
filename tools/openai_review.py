@@ -32,11 +32,12 @@ JOBS = ROOT / 'docs/openai-jobs.json'
 # Голой gpt-5.6 у ключа нет: семейство выдано вариантами luna/sol/terra.
 # Выбран sol (решение заказчика 11.08.2026); все три приняли reasoning.mode=pro и фон.
 MODEL = os.environ.get('OPENAI_REVIEW_MODEL', 'gpt-5.6-sol')
-# «Ультра» — команда заказчика: если он просит проверить «через ультра», запускать с
-# OPENAI_REVIEW_MODE=pro OPENAI_REVIEW_EFFORT=max (верхняя ступень API; effort 'ultra'
-# не существует). Умолчание остаётся прежним — medium.
+# РЕШЕНИЕ ЗАКАЗЧИКА 13.08.2026 (после пятнадцатого круга): умолчание — МАКСИМУМ
+# (mode=pro, effort=max — верхняя ступень API; effort 'ultra' не существует). Прежнее
+# правило «ультра только по разовой команде, умолчание medium» отменено; шестнадцатый круг
+# был последним, ушедшим в medium (запущен до решения).
 REASONING = {'mode': os.environ.get('OPENAI_REVIEW_MODE', 'pro'),
-             'effort': os.environ.get('OPENAI_REVIEW_EFFORT', 'medium')}
+             'effort': os.environ.get('OPENAI_REVIEW_EFFORT', 'max')}
 POLL_S = 5
 CHARS_PER_PART = 400_000          # бюджет части; в токенах примерно вчетверо меньше
 

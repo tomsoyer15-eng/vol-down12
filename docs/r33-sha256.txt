@@ -1,7 +1,7 @@
 Корень доверия ADD-FUT v1.6.0 ред. 33
 
 Архив paket-ADD-FUT-v1_6_0-r33.zip
-SHA-256  144eeac3aa059c69520a1b5f29b8d39253a5f356ec34ac3b3e7bde6efabac255
+SHA-256  4bb761c0534bd3481ff7cae7c358acb060cc99c3849bfb6d233f0d584b4bebcd
 
 Внутри — MANIFEST-192.txt на 53 файлов: код, нормативный текст и ИСХОДНЫЕ РЯДЫ.
 Проверка: распаковать в пустой каталог и выполнить  python selfcheck_v192.py

@@ -413,70 +413,84 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
         for n in globals().get('_PAPER_NOTES', []):
             d.reasons.append(n)
 
-    tgt_e = 1.0 * m.st_eq * e
-    tgt_b = 1.0 * m.st_bd * e
-    exp_e, exp_b = n_e * u_e, n_b * u_b
+    def _size(lim_e=None, lim_b=None):
+        """ОДИН проход размеров: полоса -> кап §1 -> стоимость ролла. lim_e/lim_b — потолки
+        количеств при запрете наращивания (шестнадцатый круг, №1); None — без ограничения.
+        Проход без потолков воспроизводит замороженную арифметику байт в байт — регрессия
+        1e-12 держится на нём."""
+        e = float(capital)
+        n_e, n_b = n0_e, n0_b
+        reasons = []
+        capf = dict(corr=False, before=None)
+        tgt_e = 1.0 * m.st_eq * e
+        tgt_b = 1.0 * m.st_bd * e
+        exp_e, exp_b = n_e * u_e, n_b * u_b
 
-    if eq_switch or abs(tgt_e - exp_e) > band * e:
-        new = round(tgt_e / u_e)
-        if new != n_e:
-            e -= S.COST * abs(new - n_e) * u_e
-            d.reasons.append('смена состояния ноги А' if eq_switch else 'нога А вне полосы')
-            n_e = new
-    if bd_switch or roll_b or abs(tgt_b - exp_b) > band * e:
-        new = round(tgt_b / u_b)
-        if new != n_b:
-            e -= S.COST * abs(new - n_b) * u_b
-            d.reasons.append('смена состояния ноги Б' if bd_switch else
-                             ('ролл' if m.roll_today else 'нога Б вне полосы'))
-            n_b = new
+        if eq_switch or abs(tgt_e - exp_e) > band * e:
+            new = round(tgt_e / u_e)
+            if lim_e is not None and new > lim_e:
+                new = lim_e
+            if new != n_e:
+                e -= S.COST * abs(new - n_e) * u_e
+                reasons.append('смена состояния ноги А' if eq_switch else 'нога А вне полосы')
+                n_e = new
+        if bd_switch or roll_b or abs(tgt_b - exp_b) > band * e:
+            new = round(tgt_b / u_b)
+            if lim_b is not None and new > lim_b:
+                new = lim_b
+            if new != n_b:
+                e -= S.COST * abs(new - n_b) * u_b
+                reasons.append('смена состояния ноги Б' if bd_switch else
+                               ('ролл' if m.roll_today else 'нога Б вне полосы'))
+                n_b = new
 
-    if cap is not None:
-        def e_after(ne, nb):
-            ea = e - S.COST * ((abs(ne - n0_e) - abs(n_e - n0_e)) * u_e +
-                               (abs(nb - n0_b) - abs(n_b - n0_b)) * u_b)
-            if roll_any:
-                # ПО РОЛЛЯЩИМСЯ НОГАМ (пятнадцатый круг, №2): просрочка одной ноги не
-                # списывает стоимость переноса с исправной.
-                ea -= S.ROLL_BP * ((ne * u_e if roll_a else 0.0) +
-                                   (nb * u_b if roll_b else 0.0))
-            return ea
+        if cap is not None:
+            def e_after(ne, nb):
+                ea = e - S.COST * ((abs(ne - n0_e) - abs(n_e - n0_e)) * u_e +
+                                   (abs(nb - n0_b) - abs(n_b - n0_b)) * u_b)
+                if roll_any:
+                    # ПО РОЛЛЯЩИМСЯ НОГАМ (пятнадцатый круг, №2): просрочка одной ноги не
+                    # списывает стоимость переноса с исправной.
+                    ea -= S.ROLL_BP * ((ne * u_e if roll_a else 0.0) +
+                                       (nb * u_b if roll_b else 0.0))
+                return ea
 
-        def breach(ne, nb):
-            return (ne * u_e + nb * u_b) > cap * e_after(ne, nb)
+            def breach(ne, nb):
+                return (ne * u_e + nb * u_b) > cap * e_after(ne, nb)
 
-        breach_at_open = b.prev_st_eq is not None and b.prev_close_lev > cap
-        if breach_at_open or breach(n_e, n_b):
-            pe0, pb0 = n_e, n_b
-            ne = min(n_e, math.floor(tgt_e / u_e)) if breach_at_open else math.floor(tgt_e / u_e)
-            nb = min(n_b, math.floor(tgt_b / u_b)) if breach_at_open else math.floor(tgt_b / u_b)
-            while breach(ne, nb) and (ne > 0 or nb > 0):
-                if ne > 0 and (u_e >= u_b or nb == 0):
-                    ne -= 1
-                else:
-                    nb -= 1
-            if (ne, nb) != (pe0, pb0):
-                e -= S.COST * ((abs(ne - n0_e) - abs(n_e - n0_e)) * u_e +
-                               (abs(nb - n0_b) - abs(n_b - n0_b)) * u_b)
-                d.cap_before = (pe0, pb0)
-                n_e, n_b = ne, nb
-                d.cap_correction = True
-                d.reasons.append('кап плеча §1')
+            breach_at_open = b.prev_st_eq is not None and b.prev_close_lev > cap
+            if breach_at_open or breach(n_e, n_b):
+                pe0, pb0 = n_e, n_b
+                ne = min(n_e, math.floor(tgt_e / u_e)) if breach_at_open else math.floor(tgt_e / u_e)
+                nb = min(n_b, math.floor(tgt_b / u_b)) if breach_at_open else math.floor(tgt_b / u_b)
+                if lim_e is not None and ne > lim_e:
+                    ne = lim_e
+                if lim_b is not None and nb > lim_b:
+                    nb = lim_b
+                while breach(ne, nb) and (ne > 0 or nb > 0):
+                    if ne > 0 and (u_e >= u_b or nb == 0):
+                        ne -= 1
+                    else:
+                        nb -= 1
+                if (ne, nb) != (pe0, pb0):
+                    e -= S.COST * ((abs(ne - n0_e) - abs(n_e - n0_e)) * u_e +
+                                   (abs(nb - n0_b) - abs(n_b - n0_b)) * u_b)
+                    capf = dict(corr=True, before=(pe0, pb0))
+                    n_e, n_b = ne, nb
+                    reasons.append('кап плеча §1')
 
-    exp_e, exp_b = n_e * u_e, n_b * u_b
-    # ПО roll_now, А НЕ ПО КАЛЕНДАРНОМУ ФЛАГУ. Отложенный ролл (roll_pending) переносил
-    # серию, но стоимость переноса НЕ списывалась: капитал и доступное плечо завышались,
-    # и пограничная книга получала на контракт больше положенного.
-    # И ПО КАЖДОЙ НОГЕ ОТДЕЛЬНО (пятнадцатый круг, №2): при просрочке одной лишь Б прежний
-    # код списывал ролл и с исправной А — фиктивно занижая капитал и цель. В квартальный
-    # ролл roll_a=roll_b=True, поэтому с замороженным движком расхождения нет.
-    if roll_any:
-        e -= S.ROLL_BP * ((exp_e if roll_a else 0.0) + (exp_b if roll_b else 0.0))
+        exp_e, exp_b = n_e * u_e, n_b * u_b
+        # ПО roll_now, А НЕ ПО КАЛЕНДАРНОМУ ФЛАГУ. Отложенный ролл (roll_pending) переносил
+        # серию, но стоимость переноса НЕ списывалась: капитал и доступное плечо завышались,
+        # и пограничная книга получала на контракт больше положенного.
+        # И ПО КАЖДОЙ НОГЕ ОТДЕЛЬНО (пятнадцатый круг, №2): при просрочке одной лишь Б
+        # прежний код списывал ролл и с исправной А — фиктивно занижая капитал и цель.
+        # В квартальный ролл roll_a=roll_b=True, поэтому с движком расхождения нет.
+        if roll_any:
+            e -= S.ROLL_BP * ((exp_e if roll_a else 0.0) + (exp_b if roll_b else 0.0))
+        return n_e, n_b, e, exp_e, exp_b, reasons, capf
 
-    if n_e != n0_e:
-        d.orders['А'] = n_e - n0_e
-    if n_b != n0_b:
-        d.orders['Б'] = n_b - n0_b
+    n_e, n_b, e, exp_e, exp_b, size_reasons, capf = _size()
 
     # Плечо закрытия ЗДЕСЬ НЕ СЧИТАЕТСЯ: §1 определяет триггер капа через плечо
     # ФАКТИЧЕСКОГО ЗАКРЫТИЯ, то есть от NAV на закрытии, а расчётчик в момент подачи
@@ -485,18 +499,47 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
     # --- серии: какую держим после этой сессии ---
     tgt_a = target_tag(b.ser_a, m.date, roll_a, m.roll_passed)
     tgt_b = target_tag(b.ser_b, m.date, roll_b, m.roll_passed)
-    d.roll_pairs = []
-    for leg, held, want, n_old, n_new in (('А', b.ser_a, tgt_a, n0_e, n_e),
-                                          ('Б', b.ser_b, tgt_b, n0_b, n_b)):
-        if held is not None and held != want and n_old:
-            d.roll_pairs.append(dict(leg=leg, close=(held, -n_old), open=(want, n_new)))
-            if 'ролл серии' not in d.reasons:
-                d.reasons.append('ролл серии')
+
+    def _series_pairs(fin_e, fin_b):
+        rp, rs = [], []
+        for leg, held, want, n_old, n_new in (('А', b.ser_a, tgt_a, n0_e, fin_e),
+                                              ('Б', b.ser_b, tgt_b, n0_b, fin_b)):
+            if held is not None and held != want and n_old:
+                rp.append(dict(leg=leg, close=(held, -n_old), open=(want, n_new)))
+                if 'ролл серии' not in rs:
+                    rs.append('ролл серии')
+        return rp, rs
+
+    # Поставочный отказ не зависит от количеств — считается РОВНО ОДИН РАЗ, до возможного
+    # пересчёта размеров.
+    for leg, held in (('А', b.ser_a), ('Б', b.ser_b)):
         _rolling_this_leg = roll_now or (missed_a if leg == 'А' else missed_b)
         if held is not None and delivery_risk(held, m.date) and not _rolling_this_leg:
             d.refusals.append(f'нога {leg}: удерживается серия {held}, наступил её месяц '
                               f'поставки — сессия ролла пропущена, требуется ручной разбор (§1)')
 
+    if d.refusals and (n_e > n0_e or n_b > n0_b):
+        # ОТКАЗ ЗАПРЕЩАЕТ НАРАЩИВАТЬ РИСК, А НЕ СНИЖАТЬ ЕГО: пропускаются перенос серии
+        # (экспозиция не растёт, а невыход означает поставку) и любое сокращение книги.
+        # РЕШЕНИЕ ПЕРЕСЧИТЫВАЕТСЯ С ПОТОЛКАМИ n0 (шестнадцатый круг, №1 и №6): прежний
+        # ПОЗДНИЙ фильтр откатывал запрещённое наращивание ПОСЛЕ кап-аллокатора, и срез
+        # исправной ноги, вызванный запрещённой, оставался — продажа без нормативной
+        # причины; капитал сохранял комиссии заявок, которые брокеру не уходили. Теперь
+        # запрет действует с первого шага размеров, и стоимость, плечо и кап считаются
+        # по исполняемой книге.
+        n_e, n_b, e, exp_e, exp_b, size_reasons, capf = _size(lim_e=n0_e, lim_b=n0_b)
+
+    d.reasons.extend(size_reasons)
+    if capf['corr']:
+        d.cap_before = capf['before']
+        d.cap_correction = True
+    d.roll_pairs, _rp_reasons = _series_pairs(n_e, n_b)
+    d.reasons.extend(_rp_reasons)
+
+    if n_e != n0_e:
+        d.orders['А'] = n_e - n0_e
+    if n_b != n0_b:
+        d.orders['Б'] = n_b - n0_b
     es_after = pack_es(b.es_held, n_e, b.unit_is_mes, roll_a)
     d.book_after = replace(b, n_e=n_e, n_b=n_b, prev_close_lev=float('nan'),
                            prev_st_eq=m.st_eq, prev_st_bd=m.st_bd,
@@ -505,30 +548,6 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
     d.exposure = {'А': exp_e, 'Б': exp_b}
     d.leverage = (exp_e + exp_b) / e if e else 0.0
     if d.refusals:
-        # ОТКАЗ ЗАПРЕЩАЕТ НАРАЩИВАТЬ РИСК, А НЕ СНИЖАТЬ ЕГО. Прежняя редакция отменяла все
-        # заявки без разбора, и падение счёта ниже порога §8 в кризис одновременно включало
-        # запрет и замораживало опасную позицию: не проходили ни закрытие ноги по сигналу,
-        # ни кап-коррекция, ни выход из поставочной серии. Пропускаются: перенос серии
-        # (экспозиция не растёт, а невыход означает поставку) и любое сокращение книги.
-        keep_e = abs(n_e) <= abs(n0_e)
-        keep_b = abs(n_b) <= abs(n0_b)
-        if not (keep_e and keep_b):
-            fe = n_e if keep_e else n0_e
-            fb = n_b if keep_b else n0_b
-            d.orders = {k: v for k, v in (('А', fe - n0_e), ('Б', fb - n0_b)) if v}
-            # УПАКОВКА И ПЕРЕНОСЫ ПЕРЕСЧИТЫВАЮТСЯ ИЗ ФИНАЛЬНЫХ КОЛИЧЕСТВ. Прежде фильтр
-            # менял книгу, но оставлял roll_pairs и es_held от дофильтровочного решения,
-            # и брокеру уходило открытие новой серии на большее количество.
-            d.book_after = replace(b, n_e=fe, n_b=fb, prev_close_lev=float('nan'),
-                                   prev_st_eq=m.st_eq, prev_st_bd=m.st_bd,
-                                   ser_a=tgt_a, ser_b=tgt_b,
-                                   es_held=pack_es(b.es_held, fe, b.unit_is_mes, roll_a))
-            d.roll_pairs = [p for p in d.roll_pairs
-                            if (p['leg'] == 'А' and n0_e) or (p['leg'] == 'Б' and n0_b)]
-            for p in d.roll_pairs:
-                p['open'] = (p['open'][0], fe if p['leg'] == 'А' else fb)
-            d.exposure = {'А': fe * u_e, 'Б': fb * u_b}
-            d.leverage = (d.exposure['А'] + d.exposure['Б']) / e if e else 0.0
         d.reasons.append('ЧАСТИЧНОЕ ИСПОЛНЕНИЕ ПРИ ОТКАЗЕ §8: пропущены только '
                          'сокращение риска и перенос серии')
     return d
@@ -803,7 +822,16 @@ def close_out_e(book, px_eq_close, px_bd_close, nav_close):
 # ============================================================================
 
 class RollGap(RuntimeError):
-    """Книга осталась без требуемой экспозиции после переноса серии."""
+    """Книга осталась без требуемой экспозиции после переноса серии.
+
+    provable — ДОКАЗУЕМО ли восстановление (шестнадцатый круг, №5): True только когда исход
+    исходной заявки ИЗВЕСТЕН (терминальный отчёт) и снимок позиций совпал с целью. После
+    НЕИЗВЕСТНОГО исхода совпадение снимков ничего не доказывает (stale_twice,
+    fill_after_end) — такой ролл не переносится автоматически, только О-5."""
+
+    def __init__(self, msg, provable=False):
+        super().__init__(msg)
+        self.provable = provable
 
 
 def _filled(rec, want):
@@ -882,14 +910,24 @@ def execute_roll(broker, orders, book_before=None, route='F', ref_prices=None):
     opens = [(i, q) for i, q in orders if q > 0]
     placed = []
 
-    def bail(msg):
+    def bail(msg, known=True):
         if book_before is None:
             raise RollGap(f'{msg}; исходная книга не передана — восстановление невозможно, '
                           f'требуется ручной разбор (О-5)')
-        ok, have, stuck = restore_to(broker, book_before, route)
-        if ok:
+        try:
+            ok, have, stuck = restore_to(broker, book_before, route)
+        except Exception as ex2:
+            raise RollGap(f'{msg}; восстановление НЕ ВЫПОЛНЕНО ({ex2}) — требуется ручной '
+                          f'разбор (О-5)')
+        if ok and known:
             raise RollGap(f'{msg}; книга приведена к исходной ПО ДОСТУПНЫМ ДАННЫМ (подтверждение — сверкой следующей сессии), ролл переносится '
-                          f'на следующую сессию')
+                          f'на следующую сессию', provable=True)
+        if ok:
+            # ИСХОД НЕИЗВЕСТЕН (шестнадцатый круг, №5): снимок совпал, но поздний отчёт
+            # ещё возможен — «восстановлено» недоказуемо, автоперенос ролла запрещён.
+            raise RollGap(f'{msg}; книга ПО СНИМКУ соответствует исходной, но исход заявки '
+                          f'НЕИЗВЕСТЕН — поздние отчёты возможны, восстановление '
+                          f'недоказуемо; требуется ручной разбор (О-5)')
         raise RollGap(f'{msg}; ВОССТАНОВИТЬ НЕ УДАЛОСЬ: у брокера {have}, неснятых заявок '
                       f'{len(stuck)} — требуется ручной разбор (О-5)')
 
@@ -897,7 +935,8 @@ def execute_roll(broker, orders, book_before=None, route='F', ref_prices=None):
         try:
             rec = broker.place(inst, qty, (ref_prices or {}).get(inst))
         except Exception as ex:
-            bail(f'{inst} {qty:+d}: {ex} (статус заявки НЕИЗВЕСТЕН, повтор не выполняется)')
+            bail(f'{inst} {qty:+d}: {ex} (статус заявки НЕИЗВЕСТЕН, повтор не выполняется)',
+                 known=False)
         placed.append(rec)
         if not _filled(rec, qty):
             bail(f'{inst}: заявка {qty:+d}, исполнено {rec.get("filled")}')
@@ -1031,7 +1070,10 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                 except RollGap as gap:
                     # ОТКАЧЕННЫЙ РОЛЛ ДОЛЖЕН ПОВТОРИТЬСЯ. День ролла один; без отметки
                     # перенос не состоялся бы никогда, и книга дожила бы до поставки.
-                    if 'приведена к исходной' in str(gap):
+                    # ТОЛЬКО ДОКАЗУЕМОЕ восстановление (шестнадцатый круг, №5): признак —
+                    # структурный provable, а не подстрока сообщения; неизвестный исход
+                    # не переносится автоматически — О-5 без записи состояния.
+                    if getattr(gap, 'provable', False):
                         ST.save(bp, replace(book, roll_pending=True), route, sess + 1,
                                 note=f'ролл отложен: {gap}')
                     raise
@@ -1045,34 +1087,53 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                         # сверка такие строки отбрасывает, и наблюдения не копятся вовсе.
                         rec = broker.place(inst, qty, (ref_prices or {}).get(inst))
                     except Exception as ex:
-                        ok_r, have_r, stuck_r = restore_to(broker, book, route)
+                        # ИСХОД НЕИЗВЕСТЕН (шестнадцатый круг, №5): совпавший снимок не
+                        # доказывает восстановление — поздний отчёт возможен; исход всегда
+                        # О-5, «сессия переносится» не заявляется.
+                        try:
+                            ok_r, have_r, stuck_r = restore_to(broker, book, route)
+                            note = ('книга ПО СНИМКУ соответствует исходной, но исход '
+                                    'заявки НЕИЗВЕСТЕН — поздние отчёты возможны, '
+                                    'восстановление недоказуемо; ручной разбор (О-5)'
+                                    if ok_r else
+                                    f'ВОССТАНОВИТЬ НЕ УДАЛОСЬ: у брокера {have_r}, '
+                                    f'неснятых заявок {len(stuck_r)} — ручной разбор (О-5)')
+                        except Exception as ex2:
+                            note = (f'восстановление НЕ ВЫПОЛНЕНО ({ex2}) — ручной '
+                                    f'разбор (О-5)')
                         raise RuntimeError(
                             f'{inst} {qty:+d}: {ex} (статус НЕИЗВЕСТЕН, повтор не '
-                            f'выполняется); ' + ('книга приведена к исходной ПО ДОСТУПНЫМ ДАННЫМ (подтверждение — сверкой следующей сессии), '
-                            'сессия переносится' if ok_r else
-                            f'ВОССТАНОВИТЬ НЕ УДАЛОСЬ: у брокера {have_r}, неснятых заявок '
-                            f'{len(stuck_r)} — ручной разбор (О-5)'))
+                            f'выполняется); {note}')
                     except BaseException as ex:
                         # ИСКЛЮЧЕНИЕ ПОСЛЕ ПЕРВОГО ИСПОЛНЕНИЯ — это рассинхронизация, а не
                         # просто ошибка: часть книги уже изменена. Отменяем всё живое и
                         # называем состояние прямо.
-                        for oid in getattr(broker, 'open_orders', lambda: [])():
-                            try:
-                                broker.cancel_order(oid)
-                            except Exception:
-                                pass
+                        try:
+                            for oid in getattr(broker, 'open_orders', lambda: [])():
+                                try:
+                                    broker.cancel_order(oid)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass          # аварийная уборка не смеет маскировать причину
                         raise RuntimeError(
                             f'{inst} {qty:+d}: {ex}; ранее исполнено {len(placed)} из '
                             f'{len(orders)} заявок — книга в промежуточном состоянии, '
                             f'состояние не сохранено, требуется ручной разбор (О-5)')
                     placed.append(rec)
                     if not _filled(rec, qty):
-                        ok_r, have_r, stuck_r = restore_to(broker, book, route)
+                        try:
+                            ok_r, have_r, stuck_r = restore_to(broker, book, route)
+                            note = ('книга приведена к исходной ПО ДОСТУПНЫМ ДАННЫМ (окончательное подтверждение — входной сверкой следующей сессии), сессия переносится'
+                                    if ok_r else
+                                    f'ВОССТАНОВИТЬ НЕ УДАЛОСЬ: у брокера {have_r} — '
+                                    f'ручной разбор (О-5)')
+                        except Exception as ex2:
+                            note = (f'восстановление НЕ ВЫПОЛНЕНО ({ex2}) — ручной '
+                                    f'разбор (О-5)')
                         raise RuntimeError(
-                            f'{inst}: заявка {qty:+d}, исполнено {rec.get("filled")}; ' +
-                            ('книга приведена к исходной ПО ДОСТУПНЫМ ДАННЫМ (окончательное подтверждение — входной сверкой следующей сессии), сессия переносится'
-                             if ok_r else f'ВОССТАНОВИТЬ НЕ УДАЛОСЬ: у брокера {have_r} — '
-                             f'ручной разбор (О-5)'))
+                            f'{inst}: заявка {qty:+d}, исполнено {rec.get("filled")}; '
+                            + note)
         if journal_path:
             fills = {r['instrument']: r for r in placed}
             for row in J.rows_from_decision(dec, nlv, orders, fills):

@@ -469,5 +469,29 @@
   "request_id": "req_4038a624fffa442eb54161771d36ec91",
   "finished": "2026-08-13T11:43:31+00:00",
   "seconds": 190.0
+ },
+ {
+  "created": "2026-08-13T12:23:12+00:00",
+  "label": "рецензия шестнадцатого круга",
+  "model": "gpt-5.6-sol",
+  "response_id": "resp_0553aae7dea4e07b006a7db72fc7ac819dab6bb92f2b0616ee",
+  "status": "completed",
+  "chars": 619757,
+  "fingerprint": "66272b154ae71514f944e7858f3f70e58cc27a3619162a5e49d46aa631ebdd5e",
+  "request_id": "req_34a80c3d28904363aaa7b358eb520f10",
+  "finished": "2026-08-13T12:26:58+00:00",
+  "seconds": 226.0
+ },
+ {
+  "created": "2026-08-13T12:58:51+00:00",
+  "label": "проба pro+max",
+  "model": "gpt-5.6-sol",
+  "response_id": "resp_03ace0024f41d7e7006a7dbf8b200481a2b7edbe3932e886e5",
+  "status": "completed",
+  "chars": 64,
+  "fingerprint": "c63a358937d79799c0205019aa8cb1062216a576983f5e4c4456616d18b17cef",
+  "request_id": "req_18334d5ad1ee40539ec022213180872d",
+  "finished": "2026-08-13T12:58:56+00:00",
+  "seconds": 5.3
  }
 ]

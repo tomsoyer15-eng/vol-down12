@@ -46,9 +46,15 @@ def mapped_book(instrument, units):
 def _live_margins():
     """Фактические маржи из margins_live.json (пишет first_connect по замеру постановкой
     контракта). Двенадцатый круг, №4: preflight считал по константам, и при повышенном
-    house-требовании переход разрешался по фиктивному запасу."""
+    house-требовании переход разрешался по фиктивному запасу.
+
+    ШЕСТНАДЦАТЫЙ КРУГ, №4: замер ПРИВЯЗАН к сериям живого реестра. Файл обязан нести _meta
+    (дата, счёт, серии), а маржой корня считаются только серии, присутствующие в ТЕКУЩЕМ
+    instruments_live.csv: после квартальной смены реестра старый замер ESU26 не смеет
+    выдаваться за живую маржу корня ES — у новой серии требование может быть выше."""
     import json as _json
     import os as _os
+    import csv as _csv
     from pathlib import Path as _P
     cand = _os.environ.get('ADDFUT_MARGINS')
     p = _P(cand) if cand else _P(__file__).resolve().parent / 'live' / 'margins_live.json'
@@ -59,20 +65,40 @@ def _live_margins():
     raw_text = p.read_text(encoding='utf-8')
     try:
         raw = _json.loads(raw_text)
-        out = {}
-        for k, v in raw.items():
-            root = k.rstrip('0123456789').rstrip('UZHM') or k
-            val = float(v.get('maint') or v.get('init'))
-            # НЕСКОЛЬКО СЕРИЙ ОДНОГО КОРНЯ — КОНСЕРВАТИВНЫЙ МАКСИМУМ (№8), а не последняя
-            # по порядку JSON: заниженная маржа разрешала бы переход без запаса.
-            out[root] = max(out.get(root, 0.0), val)
+        meta = raw.pop('_meta', None)
+        entries = {k: float(v.get('maint') or v.get('init')) for k, v in raw.items()}
     except Exception as ex:
         # ТРИНАДЦАТЫЙ КРУГ, №5: молча подменять живой замер константами нельзя — переход
         # разрешался бы по фиктивному запасу при повышенном house-требовании.
         raise Incident(f'{p}: файл живой маржи повреждён ({ex}) — переход запрещён до '
                        f'починки замера')
+    if meta is None:
+        raise Incident(f'{p}: замер без привязки (_meta с датой и сериями) — формат '
+                       f'устарел, перегенерировать first_connect')
+    rp = _os.environ.get('ADDFUT_REGISTRY')
+    rp = _P(rp) if rp else _P(__file__).resolve().parent / 'live' / 'instruments_live.csv'
+    try:
+        with open(rp, encoding='utf-8') as f:
+            valid = {r['instrument'] for r in _csv.DictReader(f)
+                     if (r.get('sec_type') or '') == 'FUT'}
+    except Exception as ex:
+        raise Incident(f'{rp}: живой реестр недоступен ({ex}) — привязка замера маржи '
+                       f'непроверяема, переход запрещён')
+    if not valid:
+        raise Incident(f'{rp}: в живом реестре нет фьючерсов — привязка замера маржи '
+                       f'непроверяема')
+    out = {}
+    for k, val in entries.items():
+        if k not in valid:
+            continue                      # замер прежней серии живым не считается
+        root = k.rstrip('0123456789').rstrip('UZHM') or k
+        # НЕСКОЛЬКО СЕРИЙ ОДНОГО КОРНЯ — КОНСЕРВАТИВНЫЙ МАКСИМУМ (№8), а не последняя
+        # по порядку JSON: заниженная маржа разрешала бы переход без запаса.
+        out[root] = max(out.get(root, 0.0), val)
     if not out:
-        raise Incident(f'{p}: файл живой маржи пуст — переход запрещён до починки замера')
+        raise Incident(f'{p}: ни одна серия замера {sorted(entries)} не совпала с живым '
+                       f'реестром — маржа устарела или файл пуст, перегенерировать '
+                       f'first_connect')
     return out
 
 
@@ -87,7 +113,16 @@ def book_margin(book, reg, prices=None):
             if instr not in FUT_MARGIN:
                 raise Incident(f'{instr}: нет модельного требования маржи')
             _lm = _live_margins()
-            total += abs(int(units)) * _lm.get(instr, FUT_MARGIN[instr])
+            if _lm:
+                # ПРИ СУЩЕСТВУЮЩЕМ ЗАМЕРЕ дыры не добираются константами (шестнадцатый
+                # круг, №4): молчаливый .get прятал неполноту — повышенное требование
+                # непокрытого корня не замечалось. Константы — только когда файла нет.
+                if instr not in _lm:
+                    raise Incident(f'{instr}: живой замер маржи не покрывает текущую '
+                                   f'серию корня — перегенерировать first_connect')
+                total += abs(int(units)) * _lm[instr]
+            else:
+                total += abs(int(units)) * FUT_MARGIN[instr]
         else:
             px = (prices or {}).get(instr)
             if px is None:

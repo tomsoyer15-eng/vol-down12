@@ -354,6 +354,26 @@ def _adapter_mutations():
             return r
         return orig, patched
 
+    def orders_req_swallow():
+        """Ошибка запроса заявок глотается (как было до шестнадцатого круга, №2): сверка
+        дубликатов идёт по заведомо неполному локальному кэшу."""
+        orig = B.IBBroker.open_orders
+
+        def patched(self):
+            try:
+                self.ib.reqAllOpenOrders()
+                self.ib.sleep(1.0)
+            except Exception:
+                pass
+            out = set()
+            for t in self.ib.openTrades():
+                acct = getattr(t.order, 'account', '') or ''
+                if self.account and acct and acct != self.account:
+                    continue
+                out.add(t.order.orderId)
+            return sorted(out)
+        return orig, patched
+
     def isin_empty_ok():
         """Пустой ISIN реестра пропускается (как было до пятнадцатого круга, №6): строка STK
         без ISIN означала «проверка не нужна», а не повреждённый реестр."""
@@ -377,6 +397,7 @@ def _adapter_mutations():
             ('барьер отчётов об исполнении снят', '_exec_barrier', no_exec_barrier),
             ('контракт без сверки личности', '_contract', no_identity_check),
             ('пустой ISIN реестра пропускается', 'verify_isin', isin_empty_ok),
+            ('ошибка запроса заявок глотается', 'open_orders', orders_req_swallow),
             ('Cancelled считается неисполнением', 'place', cancel_is_failure)]
 
 
@@ -577,11 +598,23 @@ def _run_mutations():
                 ST.book_path = real
         return orig, patched, TRN, 'hand_over_book'
 
+    def unknown_provable():
+        """Неизвестный исход объявляется доказуемо восстановленным (шестнадцатый круг, №5
+        наоборот): совпавший снимок засчитывается, ролл автопереносится, состояние пишется."""
+        import daily as DLm
+        orig = DLm.RollGap
+
+        class patched(orig):
+            def __init__(self, msg, provable=False):
+                super().__init__(msg, provable=True)
+        return orig, patched, DLm, 'RollGap'
+
     return [('книга после перехода пишется мимо контура', handover_wrong_path),
             ('входная сверка книги отключена', no_reconcile),
             ('наблюдение подаёт заявки', dry_trades),
             ('ориентиры не снимаются', no_refs),
             ('отказ по незамкнутой сессии снят', ignore_provisional),
+            ('неизвестный исход объявляется восстановленным', unknown_provable),
             ('маршрут игнорируется', force_route_f)]
 
 
@@ -630,10 +663,53 @@ def _transition_mutations():
         orig = TRN._frac
         return orig, (lambda instr: False), '_frac'
 
+    def margins_unbound():
+        """Привязка замера к реестру отключена (как было до шестнадцатого круга, №4):
+        файл читается без _meta и без сверки серий с живым реестром."""
+        orig = TRN._live_margins
+
+        def patched():
+            import json as _json
+            import os as _os
+            from pathlib import Path as _P
+            cand = _os.environ.get('ADDFUT_MARGINS')
+            p = _P(cand) if cand else (_P(TRN.__file__).resolve().parent / 'live'
+                                       / 'margins_live.json')
+            if not p.exists():
+                return {}
+            raw = _json.loads(p.read_text(encoding='utf-8'))
+            raw.pop('_meta', None)
+            out = {}
+            for k, v in raw.items():
+                root = k.rstrip('0123456789').rstrip('UZHM') or k
+                out[root] = max(out.get(root, 0.0), float(v.get('maint') or v.get('init')))
+            return out
+        return orig, patched, '_live_margins'
+
+    def margin_gap_constants():
+        """Дыры существующего замера добираются константами (как было): .get с запасным
+        значением прятал неполноту при, возможно, повышенном требовании."""
+        orig = TRN.book_margin
+
+        def patched(book, reg, prices=None):
+            total = 0.0
+            for instr, units in book.items():
+                if instr not in reg:
+                    raise TRN.Incident(f'{instr}: инструмента нет в реестре')
+                if reg[instr]['sec_type'] == 'FUT':
+                    lm = TRN._live_margins()
+                    total += abs(int(units)) * lm.get(instr, TRN.FUT_MARGIN[instr])
+                else:
+                    total += abs(int(units)) * float((prices or {})[instr]) * TRN.ETF_MAINT
+            return total
+        return orig, patched, 'book_margin'
+
     return [('дробность источника не признаётся', no_frac),
             ('лимит непарной дельты снят', limit_off),
             ('дробный остаток округляется вверх', round_up_tail),
             ('дробное исполнение фьючерса принимается', frac_fut_ok),
+            ('привязка замера маржи отключена', margins_unbound),
+            ('дыры замера добираются константами', margin_gap_constants),
             ('завершённые лоты исполняются повторно', replay_done)]
 
 
@@ -763,8 +839,32 @@ def _signal_mutations():
                 raise
         return orig, patched, '_check_levels'
 
+    def fresh_off():
+        """Сверка свежего месяца с TRADES отключена (как было до шестнадцатого круга, №3):
+        порча последнего закрытия скорректированного ряда проходит молча."""
+        orig = SU._verify_fresh
+        return orig, (lambda ib, sym, primary, me: None), '_verify_fresh'
+
+    def border_fixed():
+        """Пограничная зона НЕ расширена до дивидендной границы (как было): занижение
+        размером с купон, меняющее знак, дописывается без подтверждения."""
+        orig = SU._verify_border
+
+        def patched(sym, me):
+            import os as _os
+            sma = me.rolling(SU.SMA).mean()
+            d = me.index[-1]
+            if sma.isna().loc[d]:
+                return
+            margin = abs(me.loc[d] / sma.loc[d] - 1.0)
+            if margin <= SU.BORDER_TOL and _os.environ.get('ADDFUT_SIGNAL_CONFIRM') != '1':
+                raise SU.SignalError(f'{sym}: решение месяца {d:%Y-%m} пограничное')
+        return orig, patched, '_verify_border'
+
     return [('сверка уровней отключена', levels_off),
             ('частичный сайдкар принимается', partial_ok),
+            ('сверка свежего месяца отключена', fresh_off),
+            ('пограничная зона не расширена', border_fixed),
             ('сверка перекрытия отключена', overlap_off),
             ('потерянный хвост месяца принимается', tail_off)]
 
@@ -974,6 +1074,56 @@ def _clean_baseline(label, run):
     return []
 
 
+def run_refusal_mutations():
+    """Отказ §8 с ростом (шестнадцатый круг, №1/№6): пара к пересчёту под запретом."""
+    import daily as DLm
+    import invariants as I
+    miss = _clean_baseline('отказ с ростом', lambda: I.run_refusal())
+    if miss:
+        return miss
+    print(f"\n{'мутация отказа с ростом':<40}{'поймана':>9}  какими утверждениями")
+
+    def old_late_filter():
+        """Поздний фильтр вместо пересчёта (как было): решение считается БЕЗ запрета,
+        рост откатывается после капа — срез исправной ноги и комиссии неподанных заявок
+        остаются в решении."""
+        orig = DLm.step
+
+        def patched(book, m, capital, **kw):
+            d = orig(book, m, capital, **kw)
+            if not d.refusals:
+                return d
+            kw2 = dict(kw)
+            kw2['check_guards'] = False
+            u = orig(book, m, capital, **kw2)
+            n0e, n0b = book.n_e, book.n_b
+            ne, nb = u.book_after.n_e, u.book_after.n_b
+            keep_e, keep_b = abs(ne) <= abs(n0e), abs(nb) <= abs(n0b)
+            if keep_e and keep_b:
+                return d
+            fe = ne if keep_e else n0e
+            fb = nb if keep_b else n0b
+            import dataclasses as dc
+            u.refusals = list(d.refusals)
+            u.orders = {k: v for k, v in (('А', fe - n0e), ('Б', fb - n0b)) if v}
+            u.book_after = dc.replace(u.book_after, n_e=fe, n_b=fb)
+            return u
+        return orig, patched
+
+    miss = []
+    for label, make in (('поздний фильтр вместо пересчёта', old_late_filter),):
+        orig, patched = make()
+        DLm.step = patched
+        try:
+            _, bad = I.run_refusal()
+        finally:
+            DLm.step = orig
+        print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
+        if not bad:
+            miss.append(label)
+    return miss
+
+
 def run_adapter_mutations():
     import ib_broker as B
     import invariants as I
@@ -1040,7 +1190,8 @@ if __name__ == '__main__':
     miss_a = (run_adapter_mutations() + run_intent_mutations()
               + run_session_mutations() + run_feed_mutations()
               + run_run_mutations() + run_transition_mutations()
-              + run_roll_mutations() + run_signal_mutations())
+              + run_roll_mutations() + run_signal_mutations()
+              + run_refusal_mutations())
     if miss_a:
         print(f"\nМУТАЦИИ АДАПТЕРА, КОТОРЫХ НЕ ПОЙМАЛ НИКТО ({len(miss_a)}):")
         for m_ in miss_a:

@@ -393,8 +393,10 @@ def _s2c(res):
     # ровно тот случай, который сессия объявила бы благополучно закрытым.
     # ПРИ ЖИВОЙ ЗАЯВКЕ ЛЮБОЕ заявление о приведении книги ложно — с оговоркой или без:
     # заявка исполнится позже и книгу изменит. Оговорка «подтверждение сверкой» не
-    # индульгенция (двенадцатый круг: ослабленный вариант пропускал мутацию).
-    if 'приведена к исходной' in msg:
+    # индульгенция (двенадцатый круг: ослабленный вариант пропускал мутацию). И «по
+    # снимку соответствует исходной» (шестнадцатый круг, №5) — то же заявление: ok=True
+    # достижим только при подтверждённо снятых заявках, живая заявка рядом с ним = ложь.
+    if 'приведена к исходной' in msg or 'соответствует исходной' in msg:
         return False
     return any(k in msg for k in ('заяв', 'О-5', 'ручной разбор'))
 
@@ -578,6 +580,20 @@ def _a12(beh):
     return sorted(stuck) == [502, 503] and {502, 503} <= still
 
 
+@ainv('сбой запроса заявок — отказ, а не пустой список',
+      needs=lambda b: b == 'orders_req_fails')
+def _a13(beh):
+    """Шестнадцатый круг, №2: соединение живо, а reqAllOpenOrders падает; проглоченная
+    ошибка оставляла слепой локальный кэш — сверка разрешала дубль живой заявки."""
+    import ib_broker as IBB
+    br, ib, rows = _adapter(beh)
+    try:
+        br.open_orders()
+        return False
+    except IBB.BrokerError:
+        return True
+
+
 @ainv('фонд без ISIN в реестре отвергается ДО торговли',
       needs=lambda b: b == 'normal')
 def _a12(beh):
@@ -629,7 +645,7 @@ def _a7(beh):
 ADAPTER_CASES = ('normal', 'partial', 'reject', 'disconnect', 'cancelled_but_filled',
                  'stale_positions', 'foreign_fill', 'wrong_contract', 'late_fills',
                  'late_cancelled', 'other_account', 'fill_after_end',
-                 'stale_twice', 'foreign_orders')
+                 'stale_twice', 'foreign_orders', 'orders_req_fails')
 
 
 def run_adapter():
@@ -1039,7 +1055,8 @@ RUN_CASES = ('наблюдение', 'торговля', 'незамкнутая
              'замыкание повторное', 'замыкание за чужую дату', 'три сессии подряд',
              'позднее исполнение после сессии', 'гонка при замыкании',
              'смена маршрута в связке с торговлей', 'замок между процессами',
-             'маршрут Е при тонком запасе', 'отказ дня по §8')
+             'маршрут Е при тонком запасе', 'отказ дня по §8',
+             'ролл: исход заявки неизвестен')
 
 
 def _session_run(case):
@@ -1089,6 +1106,7 @@ def _session_run(case):
     keep = (ib_insync.Index, FD.registry, FD.signal_state, FD.exchange_today,
             os.environ.get('ADDFUT_DIR'), os.environ.get('ADDFUT_BOOK_PATH'),
             os.environ.get('ADDFUT_LOCK_DIR'), os.environ.get('ADDFUT_REGISTRY'))
+    book_bytes0 = None
     try:
         ib_insync.Index = Idx
         FD.registry = lambda: {r['instrument']: r for r in
@@ -1129,6 +1147,19 @@ def _session_run(case):
             ib._shown = dict(ib._pos)
         if case == 'отказ дня по §8':
             ib._nlv = 400_000.0    # ниже механического пола: решение отвергает день
+        if case == 'ролл: исход заявки неизвестен':
+            # Отложенный ролл; первая же заявка обрывается с НЕИЗВЕСТНЫМ статусом
+            # (шестнадцатый круг, №5): состояние не смеет записаться, а исход не смеет
+            # называться восстановлением — только О-5.
+            ib.behaviour = 'disconnect'
+            b0 = DL.Book(d_fix=7.9, n_e=26, n_b=10, unit_is_mes=True, prev_st_eq=True,
+                         prev_st_bd=True, ser_a='U26', ser_b='U26', es_held=2,
+                         last_session='2026-08-11', close_provisional=False,
+                         prev_close_lev=1.5, roll_pending=True)
+            ST.save(bp, b0, route, 2)
+            ib._pos = {es: 2, 900002: 6, zn: 10}
+            ib._shown = dict(ib._pos)
+            book_bytes0 = bp.read_bytes()
         if case == 'посторонняя позиция':
             ib._pos = {777777: 5}; ib._shown = dict(ib._pos)
             ib.rows[777777] = dict(instrument='ЧУЖОЙ', sec_type='FUT', exchange='CME',
@@ -1157,6 +1188,11 @@ def _session_run(case):
                 os.environ[k] = v
     out['placed'] = len(ib._trades)
     out['positions'] = {k: v for k, v in ib._pos.items() if v}
+    if book_bytes0 is not None:
+        try:
+            out['book_same'] = (bp.read_bytes() == book_bytes0)
+        except Exception:
+            out['book_same'] = False
     try:
         sv, _, _ = ST.load(bp, cls)
     except Exception:
@@ -1189,6 +1225,17 @@ def _r3(r):
         return False
     rows = list(csv.DictReader(open(r['journal'], encoding='utf-8')))
     return bool(rows) and all(x['px_order'] not in ('', None) for x in rows)
+
+
+@rinv('неизвестный исход ролла: состояние не пишется, «восстановлено» не объявляется',
+      needs=lambda r: r['case'] == 'ролл: исход заявки неизвестен')
+def _r_unknown(r):
+    """Шестнадцатый круг, №5: после неизвестного статуса совпавший снимок позиций ничего
+    не доказывает (stale_twice, fill_after_end) — автоперенос ролла и слово «приведена»
+    запрещены, книга на диске остаётся нетронутой, исход О-5."""
+    return (r['raised'] and 'НЕИЗВЕСТЕН' in r['error']
+            and 'недоказуемо' in r['error'] and 'переносится' not in r['error']
+            and r.get('book_same') is True)
 
 
 @rinv('незамкнутая предыдущая сессия останавливает торговлю',
@@ -1829,7 +1876,9 @@ def tinv(name, needs=None):
 TR_CASES = ('план целых фьючерсов', 'план дробных долей фонда', 'дублированный источник',
             'дробный фьючерс в плане', 'исполнение в лимите', 'дробное исполнение фьючерса',
             'повторный запуск после обрыва', 'ИСПОЛНЕНИЕ дробного источника',
-            'источник мельче зерна цели')
+            'источник мельче зерна цели', 'битый замер маржи', 'замер без привязки',
+            'замер прежней серии', 'замер не покрывает корень', 'замер отсутствует',
+            'живой замер покрывает')
 
 
 class _Unp(dict):
@@ -1883,7 +1932,49 @@ def _tr_run(case):
     legs_bad = {'Б': dict(src=[('ZN', 10.5, ZN_U)], dst=('CBU0', 5.0, 'ETF'))}
 
     try:
-        if case == 'план целых фьючерсов':
+        if 'замер' in case:
+            # МАРЖА ПЕРЕХОДА (шестнадцатый круг, №4; закрыт и старый пробел: у защит
+            # двенадцатого-тринадцатого кругов не было ни одного стенда). Замер обязан
+            # нести _meta и относиться к сериям ТЕКУЩЕГО живого реестра; дыры существующего
+            # замера не добираются константами.
+            import os as _os
+            import json as _json
+            td = Path(tempfile.mkdtemp(prefix='addfut-mrg-'))
+            mp, rp = td / 'margins.json', td / 'reg.csv'
+            rp.write_text(
+                'instrument,sec_type,pair_group,exchange,currency,con_id,local_symbol,'
+                'expiry,multiplier,primary_exchange,isin\n'
+                'ESU26,FUT,EQ,CME,USD,1,ESU6,20260918,50,,\n'
+                'ZNU26,FUT,BOND,CBOT,USD,2,ZNU6,20260921,1000,,\n', encoding='utf-8')
+            if case == 'битый замер маржи':
+                mp.write_text('{оборвано', encoding='utf-8')
+            elif case == 'замер без привязки':
+                mp.write_text(_json.dumps({'ESU26': {'maint': 40000.0},
+                                           'ZNU26': {'maint': 2500.0}}), encoding='utf-8')
+            elif case == 'замер прежней серии':
+                mp.write_text(_json.dumps({'_meta': {'date': 'x', 'series': ['ESZ25']},
+                                           'ESZ25': {'maint': 30000.0}}), encoding='utf-8')
+            elif case == 'замер не покрывает корень':
+                mp.write_text(_json.dumps({'_meta': {'date': 'x', 'series': ['ZNU26']},
+                                           'ZNU26': {'maint': 2500.0}}), encoding='utf-8')
+            elif case == 'живой замер покрывает':
+                mp.write_text(_json.dumps({'_meta': {'date': 'x',
+                                                     'series': ['ESU26', 'ZNU26']},
+                                           'ESU26': {'maint': 40000.0},
+                                           'ZNU26': {'maint': 2500.0}}), encoding='utf-8')
+            keepm = _os.environ.get('ADDFUT_MARGINS')
+            keepr = _os.environ.get('ADDFUT_REGISTRY')
+            _os.environ['ADDFUT_MARGINS'] = str(mp)
+            _os.environ['ADDFUT_REGISTRY'] = str(rp)
+            try:
+                reg = {'ES': dict(sec_type='FUT'), 'ZN': dict(sec_type='FUT')}
+                out['margin'] = TRN.book_margin({'ES': 1, 'ZN': 2}, reg)
+            finally:
+                for k, v in (('ADDFUT_MARGINS', keepm), ('ADDFUT_REGISTRY', keepr)):
+                    _os.environ.pop(k, None)
+                    if v is not None:
+                        _os.environ[k] = v
+        elif case == 'план целых фьючерсов':
             out['lots'] = TRN.plan_lots(legs_fut, 10e6)
         elif case == 'план дробных долей фонда':
             out['lots'] = TRN.plan_lots(legs_frac, 10e6)
@@ -2006,6 +2097,48 @@ def _t7(r):
     """Состояние пишется атомарно после каждого шага именно ради этого: обрыв посреди
     перехода не должен приводить к ДВОЙНОЙ продаже при возобновлении."""
     return not r['raised'] and r['second_calls'] == []
+
+
+@tinv('битый замер маржи — отказ перехода',
+      needs=lambda r: r['case'] == 'битый замер маржи')
+def _t_m1(r):
+    """Тринадцатый круг, №5 — впервые ПОД СТЕНДОМ: молчаливые константы вместо живого
+    замера разрешали переход по фиктивному запасу."""
+    return r['raised'] and 'повреждён' in r['error']
+
+
+@tinv('замер без привязки — отказ перехода',
+      needs=lambda r: r['case'] == 'замер без привязки')
+def _t_m2(r):
+    """Шестнадцатый круг, №4: файл без _meta (дата, серии) неотличим от устаревшего."""
+    return r['raised'] and 'без привязки' in r['error']
+
+
+@tinv('замер прежней серии живым не считается',
+      needs=lambda r: r['case'] == 'замер прежней серии')
+def _t_m3(r):
+    """Шестнадцатый круг, №4: после смены реестра старый ESZ25 не смеет выдавать свою
+    маржу за маржу корня ES — у новой серии требование может быть выше."""
+    return r['raised'] and 'не совпала' in r['error']
+
+
+@tinv('дыра существующего замера не добирается константами',
+      needs=lambda r: r['case'] == 'замер не покрывает корень')
+def _t_m4(r):
+    """Шестнадцатый круг, №4: молчаливый .get(root, КОНСТАНТА) прятал неполноту замера."""
+    return r['raised'] and 'не покрывает' in r['error']
+
+
+@tinv('без файла замера — явные константы',
+      needs=lambda r: r['case'] == 'замер отсутствует')
+def _t_m5(r):
+    return not r['raised'] and r.get('margin') == 34_800.0 + 2 * 2_160.0
+
+
+@tinv('живой замер используется вместо констант',
+      needs=lambda r: r['case'] == 'живой замер покрывает')
+def _t_m6(r):
+    return not r['raised'] and r.get('margin') == 40_000.0 + 2 * 2_500.0
 
 
 def run_transition():
@@ -2189,6 +2322,79 @@ def run_roll():
     return cov, bad
 
 
+# ---------------------------------------------------------------- отказ §8 с ростом
+# ШЕСТНАДЦАТЫЙ КРУГ, №1/№6: системный перебор держит prev_st_* = True и не видит ВКЛЮЧЕНИЯ
+# ноги под отказом. Точечный сценарий рецензента: счёт ниже порога, Б ровно на 1x, сигнал
+# включает А; прежний ПОЗДНИЙ фильтр оставлял кап-срез исправной Б (продажа без нормативной
+# причины) и капитал с комиссиями неподанных заявок.
+REF8 = []
+
+
+def r8inv(name, needs=None):
+    def deco(fn):
+        REF8.append((name, fn, needs)); return fn
+    return deco
+
+
+REF8_CASES = ('включение А запрещено порогом §8',)
+
+
+def _ref8_run(case):
+    out = dict(case=case, raised=False, error='', dec=None)
+    try:
+        b = DL.Book(d_fix=8.0, n_e=0, n_b=10, unit_is_mes=True, prev_st_eq=False,
+                    prev_st_bd=True, ser_a=None, ser_b='U26', es_held=0)
+        m = DL.Market(date=pd.Timestamp('2026-08-12'), px_eq_prev=600.0, dref_prev=8.0,
+                      dref_today=8.0, px_eq_today=600.0, roll_today=False, st_eq=True,
+                      st_bd=True, roll_passed=False)
+        out['dec'] = DL.step(b, m, 985_600.0)
+    except Exception as ex:
+        out['raised'] = True; out['error'] = f'{type(ex).__name__}: {ex}'
+    return out
+
+
+@r8inv('запрет роста действует с первого шага: исправная нога не режется',
+       needs=lambda r: r['case'] == 'включение А запрещено порогом §8')
+def _f81(r):
+    """Кап-срез, вызванный ЗАПРЕЩЁННОЙ ногой, не смеет пережить запрет: без включения А
+    книга 10 ZN на капе 2,00 законна и не трогается."""
+    d = r['dec']
+    return (not r['raised'] and d is not None and d.refusals
+            and d.orders == {} and d.book_after.n_e == 0 and d.book_after.n_b == 10
+            and not d.cap_correction)
+
+
+@r8inv('капитал при отказе не несёт комиссий неподанных заявок',
+       needs=lambda r: r['case'] == 'включение А запрещено порогом §8')
+def _f82(r):
+    """№6: расходы решения обязаны соответствовать ЗАЯВКАМ, ушедшим брокеру; здесь их нет —
+    капитал равен входному до последнего цента."""
+    d = r['dec']
+    return (not r['raised'] and d is not None
+            and abs(d.capital_after_costs - 985_600.0) < 1e-9)
+
+
+def run_refusal():
+    cov, bad = {}, {}
+    for case in REF8_CASES:
+        r = _ref8_run(case)
+        for name, fn, needs in REF8:
+            if needs is not None and not needs(r):
+                continue
+            cov[name] = cov.get(name, 0) + 1
+            try:
+                ok = fn(r)
+            except Exception as ex:
+                ok = False; name = f'{name} [исключение: {type(ex).__name__}]'
+            if not ok:
+                d = r['dec']
+                bad.setdefault(name, []).append(
+                    f"{case}: заявки {getattr(d, 'orders', None)} книга "
+                    f"{getattr(getattr(d, 'book_after', None), 'n_b', None)} "
+                    f"капитал {getattr(d, 'capital_after_costs', None)} {r['error'][:60]}")
+    return cov, bad
+
+
 # ---------------------------------------------------------------- обновлятор сигналов
 # Девятая рецензия, №28: signal_update не исполнялся ни одним стендом. Здесь проверяется
 # МЕХАНИКА (замок, атомарная публикация, сверка перекрытия, отказ на потерянном хвосте
@@ -2206,7 +2412,9 @@ def sginv(name, needs=None):
 SIG_CASES = ('дописывается новый месяц', 'источник разошёлся с историей',
              'хвост месяца потерян', 'новых месяцев нет', 'уровни пересчитаны поставщиком',
              'сайдкар уровней отсутствует', 'сайдкар без столбца ноги',
-             'сайдкар без общих месяцев')
+             'сайдкар без общих месяцев', 'свежее закрытие завышено поставщиком',
+             'свежее закрытие занижено за купонным потолком',
+             'дивидендное окно в допуске', 'свежий знак в дивидендной зоне')
 
 
 def _sig_run(case):
@@ -2227,6 +2435,33 @@ def _sig_run(case):
     if case == 'хвост месяца потерян':
         # последний бар июля отодвинут с последней сессии (31.07) на середину месяца
         bars[spy_id][-1] = ('2026-07-15', bars[spy_id][-1][1])
+    # СВЕЖИЙ МЕСЯЦ ПОД НЕЗАВИСИМЫМ СРЕЗОМ TRADES (шестнадцатый круг, №3): скорректированный
+    # ряд портится ТОЛЬКО в последней точке — все прежние сверки (сайдкар, перекрытие) её
+    # не видят по построению.
+    if case == 'свежее закрытие завышено поставщиком':
+        raw = list(bars[spy_id])
+        d_last, px_last = bars[spy_id][-1]
+        bars[spy_id][-1] = (d_last, px_last * 1.01)
+        ib.set_bars({spy_id: raw, ief_id: list(bars[ief_id])}, what='TRADES')
+    elif case == 'свежее закрытие занижено за купонным потолком':
+        raw = list(bars[spy_id])
+        d_last, px_last = bars[spy_id][-1]
+        bars[spy_id][-1] = (d_last, px_last * 0.97)
+        ib.set_bars({spy_id: raw, ief_id: list(bars[ief_id])}, what='TRADES')
+    elif case == 'дивидендное окно в допуске':
+        # сырое закрытие выше скорректированного на обычный купон 0,3% — штатное дивидендное
+        # окно, обновление обязано ПРОЙТИ
+        tr = list(bars[spy_id])
+        d_last, px_last = tr[-1]
+        tr[-1] = (d_last, px_last * 1.003)
+        ib.set_bars({spy_id: tr, ief_id: list(bars[ief_id])}, what='TRADES')
+    elif case == 'свежий знак в дивидендной зоне':
+        # последнее закрытие ставится на +1% к SMA-12: внутри дивидендной зоны (~1,8%), но
+        # вне прежнего допуска 0,1% — искажение размером с купон могло бы сменить знак
+        s11 = sum(px for _, px in bars[spy_id][-12:-1])
+        d_last, _ = bars[spy_id][-1]
+        x = (1.01 * s11 / 12.0) / (1.0 - 1.01 / 12.0)
+        bars[spy_id][-1] = (d_last, x)
     ib.set_bars(bars)
 
     tmp = tempfile.mkdtemp(prefix='addfut-sig-')
@@ -2337,6 +2572,38 @@ def _sg8(r):
     return r['raised'] and 'общих месяцев' in r['error']
 
 
+@sginv('завышенное свежее закрытие отвергается TRADES-срезом',
+       needs=lambda r: r['case'] == 'свежее закрытие завышено поставщиком')
+def _sg9(r):
+    """Шестнадцатый круг, №3: новейший месяц не покрыт сайдкаром по построению —
+    скорректированное закрытие выше сырого возможно только порчей источника."""
+    return r['raised'] and 'разошёлся с независимым' in r['error']
+
+
+@sginv('заниженное за купонным потолком закрытие отвергается',
+       needs=lambda r: r['case'] == 'свежее закрытие занижено за купонным потолком')
+def _sg10(r):
+    """Отставание от сырого сверх дивидендной границы окна не объясняется купоном."""
+    return r['raised'] and 'разошёлся с независимым' in r['error']
+
+
+@sginv('штатное дивидендное окно проходит сверку',
+       needs=lambda r: r['case'] == 'дивидендное окно в допуске')
+def _sg11(r):
+    """Обычный купон 0,3% в окне не должен блокировать обновление — иначе защита
+    останавливала бы каждый месяц IEF и её пришлось бы снять."""
+    return (not r['raised'] and r['added'] and len(r['added']) == 1
+            and r['added'][0][0] == '2026-08-31')
+
+
+@sginv('свежий знак внутри дивидендной зоны требует подтверждения',
+       needs=lambda r: r['case'] == 'свежий знак в дивидендной зоне')
+def _sg12(r):
+    """Занижение в пределах купона неотличимо от купона TRADES-срезом; если такой сдвиг
+    способен сменить знак — знак стоит в зоне, и автодописывание запрещено."""
+    return r['raised'] and 'пограничное' in r['error']
+
+
 @sginv('без новых месяцев файл не меняется',
        needs=lambda r: r['case'] == 'новых месяцев нет')
 def _sg4(r):
@@ -2425,7 +2692,9 @@ def run_sessions():
                                                  closing_nav=10_000_000.0,
                                                  book_path=str(sp))
             except DL.RollGap as ex:
-                raised = True; rollback = 'приведена к исходной' in str(ex)
+                raised = True
+                rollback = ('приведена к исходной' in str(ex)
+                            or 'соответствует исходной' in str(ex))
                 err = str(ex)
             except Exception as ex:
                 raised = True; err = str(ex)
@@ -2580,6 +2849,17 @@ if __name__ == '__main__':
         cases = lbad.get(name, [])
         print(f'[{"OK  " if not cases else "FAIL"}] {name}: '
               f'{f"ДЕРЖИТСЯ на {cov}" if not cases else f"НАРУШЕН: {cases}"}')
+    # --- ОТКАЗ §8 С РОСТОМ: точечный сценарий вне перебора (шестнадцатый круг, №1/№6).
+    fcov8, fbad8 = run_refusal()
+    print(f'\nслучаев отказа с ростом: {len(REF8_CASES)}, утверждений: {len(REF8)}\n')
+    for name, _, _n in REF8:
+        cov = fcov8.get(name, 0)
+        if cov == 0:
+            fbad8.setdefault(name, []).append('ПОКРЫТИЕ НУЛЕВОЕ')
+            print(f'[FAIL] {name}: НИ РАЗУ НЕ ПРОВЕРЕН (покрытие 0)'); continue
+        cases = fbad8.get(name, [])
+        print(f'[{"OK  " if not cases else "FAIL"}] {name}: '
+              f'{f"ДЕРЖИТСЯ на {cov}" if not cases else f"НАРУШЕН: {cases}"}')
     # --- ОБНОВЛЯТОР СИГНАЛОВ: механика замка, сверки и дописывания.
     gcov, gbad = run_signal()
     print(f'\nслучаев сигнала: {len(SIG_CASES)}, утверждений сигнала: {len(SIG)}\n')
@@ -2592,4 +2872,4 @@ if __name__ == '__main__':
         print(f'[{"OK  " if not cases else "FAIL"}] {name}: '
               f'{f"ДЕРЖИТСЯ на {cov}" if not cases else f"НАРУШЕН: {cases}"}')
     sys.exit(0 if not (bad or sbad or abad or ibad or fbad or rbad or tbad or lbad
-                       or gbad) else 1)
+                       or gbad or fbad8) else 1)
