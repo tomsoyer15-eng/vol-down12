@@ -38,6 +38,11 @@ def _machine_snapshot():
     Фиксируются тип, права, цель ссылки и хэш; каталоги — как записи. Откат «записал и
     вернул» между снимками невидим ПО ПОСТРОЕНИЮ — потому первая линия защиты остаётся
     изоляция окружением, снимок — вторая."""
+    # ДИСПЕТЧЕРСКИЕ файлы живого автопилота — ВНЕ снимка (после починки cron 13.08.2026
+    # тик каждые 10 минут пишет сердцебиение и лог, и часовой прогон selfcheck валился о
+    # ЖИВОЙ контур, а не о стенды). Снимок охраняет ТОРГОВОЕ состояние: книги, журналы,
+    # сигналы, намерение, реестры, тревоги — они в снимке остаются строго.
+    _DISPATCH = {'autopilot.log', 'tick-heartbeat', 'autopilot.lock', 'push-fails'}
     out = {}
     if not os.path.isdir(_REAL_ADDFUT):
         return out
@@ -45,6 +50,8 @@ def _machine_snapshot():
         for _n in sorted(_dirs) + sorted(_files):
             _fp = os.path.join(_root, _n)
             _rel = os.path.relpath(_fp, _REAL_ADDFUT)
+            if _rel in _DISPATCH or _rel.startswith(('traded-', 'closed-', 'sigup-')):
+                continue
             _st = os.lstat(_fp)
             import stat as _stat
             if _stat.S_ISLNK(_st.st_mode):
@@ -85,7 +92,9 @@ ALLOW = ['ADD-FUT-v1_6_0-r33.pdf', 'ADD-FUT-v1_6_0-r33.txt', 'sim_v164.py', 'sim
          'live/ib_stub.py', 'live/contracts.py', 'live/signal_update.py',
          # Диспетчер бумажного этапа: девятая рецензия (№28) — работающая внешняя копия
          # не попадала под контроль целостности пакета вовсе.
-         'live/autopilot.sh'] + [
+         'live/autopilot.sh',
+         # WORM-якорь и диагност тревог (решение заказчика 13.08.2026, после 17-го круга).
+         'live/worm_anchor.py', 'live/diagnose.py'] + [
          # ИСХОДНЫЕ РЯДЫ. Без них §10 проверял только неизменность кода: пересчитать
          # результат по архиву было НЕЛЬЗЯ — данных в нём не было вовсе.
          f'data/{n}' for n in sorted(os.listdir('data')) if n.endswith('.csv')]
@@ -529,10 +538,22 @@ except T.Incident: inc = True
 chk('Исполнитель: capital=NaN = инцидент до OPEN', inc and 'TRANSITION_OPEN' not in open(JX).read())
 ETFc = lambda n, p: (n, p, 'ETF'); FUTc = lambda n, p: (n, p, 'FUT')
 _cl(); _sig('F')
+# ЧЕСТНЫЙ СЧЁТЧИК (семнадцатый круг, №10): полный Е→Ф на 10 млн дробится лимитом §8б на
+# ~1200 заявок и В ОДИН ДЕНЬ под Priority Customer не влезает — прежняя формула «2 на
+# лот» это скрывала. Отказ ДО первой заявки — правильный исход, а не поломка.
 _LEF = {'EQ': dict(src=[('CSPX', 54896, 700.0)], dst=FUTc('MES', 38428.0)),
         'BOND': dict(src=[('CBU0', 1971200, 5.0)], dst=FUTc('ZN', 98560.0))}
 _bz = _B(netpos={'CSPX': 54896, 'CBU0': 1971200, 'MES': 0, 'ZN': 0})
-_rz = T.execute(_bz, SP, 10e6, _LEF, signal_id='s1', from_route='E', to_route='F', **KW)
+inc = False
+try: T.execute(_bz, SP, 10e6, _LEF, signal_id='s1', from_route='E', to_route='F', **KW)
+except T.Incident as _ex: inc = 'Priority Customer' in str(_ex)
+chk('17-й, №10: полный Е→Ф на 10 млн честно упирается в дневной лимит заявок ДО ордеров',
+    inc and len(_bz.calls) == 0)
+_cl(); _sig('F')
+_LEF2 = {'EQ': dict(src=[('CSPX', 6000, 700.0)], dst=FUTc('MES', 38428.0)),
+         'BOND': dict(src=[('CBU0', 250000, 5.0)], dst=FUTc('ZN', 98560.0))}
+_bz = _B(netpos={'CSPX': 6000, 'CBU0': 250000, 'MES': 0, 'ZN': 0})
+_rz = T.execute(_bz, SP, 10e6, _LEF2, signal_id='s1', from_route='E', to_route='F', **KW)
 chk('Исполнитель: порядок ног канонический — EQ→BOND на входе, лимит держится',
     _rz['status'] == 'COMPLETE' and _bz.maxu <= 100_000.0 + 1e-6 and _bz.calls[0][1] == 'CBU0')
 _cl(); _sig('E', grant=98565.0)
@@ -665,12 +686,22 @@ except T.Incident as _ex: inc = 'О-3-Е' in str(_ex)
 chk('Ред.32: запас целевой книги ниже О-3-Е = отказ, заявок ноль, TRANSITION_OPEN не записан',
     inc and len(_bLow.calls) == 0 and 'TRANSITION_OPEN' not in open(JX).read())
 
-# лимит заявок Priority Customer
-chk('Ред.32: счётчик заявок = 2 на лот штатно и 3 с компенсациями',
-    T.plan_orders([0]*7) == (14, 21))
+# лимит заявок Priority Customer — СЧИТАЕТСЯ ПРОГОНОМ ПЛАНА (семнадцатый круг, №10):
+# формула «2 на лот» занижала на порядок — лимит §8б дробит лот на десятки пар.
+_Lc = {'BOND': dict(src=[('ZN', 7, 98560.0)], dst=('CBU0', 5.0, 'ETF'))}
+_pl7 = T.plan_lots(_Lc, 10e6)
+_n7, _m7 = T.plan_orders(_pl7, _Lc, T.unpaired_limit(_Lc, 10e6))
+chk('Ред.32: просторный лимит — пара заявок на лот, потолок с компенсациями',
+    _n7 == 2*len(_pl7) and _m7 == _n7 + len(_pl7))
+_Lt = {'EQ': dict(src=[('CBU0', 20000, 5.0)], dst=('CSPX', 700.0, 'ETF'))}
+_plt = T.plan_lots(_Lt, 1e6)
+_nt, _mt = T.plan_orders(_plt, _Lt, T.unpaired_limit(_Lt, 1e6))
+chk('17-й, №10: тесный лимит дробит лот — заявок БОЛЬШЕ, чем 2 на лот',
+    _nt > 2*len(_plt))
+_Lp = {'EQ': dict(src=[('CBU0', 400000, 5.0)], dst=('CSPX', 700.0, 'ETF'))}
 inc = False
-try: T.preflight_margin_orders({'BOND': dict(src=[('ZN', 1, 98560.0)], dst=('CBU0', 5.0, 'ETF'))},
-                               [0]*200, 1e9, _reg, 'E')
+try: T.preflight_margin_orders(_Lp, T.plan_lots(_Lp, 1e6), 1e6,
+                               {'CSPX': dict(sec_type='STK')}, 'E')
 except T.Incident as _ex: inc = 'Priority Customer' in str(_ex)
 chk('Ред.32: превышение лимита 390 заявок в день = отказ', inc)
 

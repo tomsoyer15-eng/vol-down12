@@ -31,12 +31,47 @@ route() { cat "$ROUTE_F" 2>/dev/null || echo F; }
 # чужой биржи; замыкание Е возможно уже после европейского закрытия.
 trade_from()  { [ "$(route)" = E ] && echo 0845 || echo 0845; }
 trade_till()  { [ "$(route)" = E ] && echo 0945 || echo 1530; }
-close_after() { [ "$(route)" = E ] && echo 1040 || echo 1605; }
+close_after() {
+    # Маршрут Е: ворота ДИНАМИЧЕСКИЕ (семнадцатый круг, №5) — из того же feed.e_close_gate,
+    # что у замыкателя; фиксированное 1040 в недели рассинхронизации DST давало отказ
+    # «рано» и тревогу вместо ожидания. Сбой вычисления — тревога и недостижимое время.
+    if [ "$(route)" = E ]; then
+        local g
+        g=$(cd "$LIVE" && "$PY" -c 'import feed; print(f"{feed.e_close_gate():%H%M}")' 2>/dev/null)
+        case "$g" in
+            [0-9][0-9][0-9][0-9]) echo "$g"; return;;
+        esac
+        echo "ворота Е не вычислены (ответ: '$g')" > "$ST/ALARM-calendar-e.txt"
+        (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-calendar-e.txt" >> "$ST/ALARM-calendar-e.txt" 2>&1) || true
+        echo 2359
+    else
+        echo 1605
+    fi
+}
 
 # Свой замок В САМОМ СКРИПТЕ: строка crontab с flock — внешняя договорённость, её можно
 # потерять при правке crontab; повторный вход должен быть невозможен независимо от неё.
 exec 9>"$ST/autopilot.lock" 2>/dev/null || true
-flock -n 9 || exit 0
+if ! flock -n 9; then
+    # СТОРОЖ ЗАМКА (семнадцатый круг, №14): зависший владелец делал контур слепым — все
+    # тики молча выходили, пропущенный ролл не замечал никто. Сердцебиение пишет владелец
+    # в начале tick; его давность выше часа при занятом замке — тревога (пишется БЕЗ замка).
+    hb="$ST/tick-heartbeat"
+    if [ -f "$hb" ]; then
+        age=$(( $(date +%s) - $(stat -c %Y "$hb" 2>/dev/null || echo 0) ))
+        if [ "$age" -gt 3600 ] && [ ! -e "$ST/ALARM-lock.txt" ]; then
+            {
+                echo "замок занят, сердцебиение владельца устарело на ${age}с — процесс завис"
+                echo "владелец замка (fuser):"
+                fuser -v "$ST/autopilot.lock" 2>&1 | tail -3
+            } > "$ST/ALARM-lock.txt"
+            (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-lock.txt" >> "$ST/ALARM-lock.txt" 2>&1) || true
+            echo "$(date '+%F %T %Z') | ТРЕВОГА: замок автопилота завис (${age}с)" >> "$LOG"
+        fi
+    fi
+    exit 0
+fi
+date +%s > "$ST/tick-heartbeat" 2>/dev/null || true
 
 log() { echo "$(date '+%F %T %Z') | $*" >> "$LOG"; }
 
@@ -110,6 +145,7 @@ HS
     log "шлюз/API не отвечает (подряд: $n)"
     if [ "$n" -ge 3 ]; then
         echo "шлюз или API мертвы три тика подряд" > "$ST/ALARM-gateway.txt"
+        (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-gateway.txt" >> "$ST/ALARM-gateway.txt" 2>&1) || true
         log "ТРЕВОГА: шлюз мёртв три тика подряд — автопилот остановлен"
     fi
     return 1
@@ -121,14 +157,17 @@ run_trade() {
     echo "$out" >> "$LOG"
     if [ $rc -eq 0 ]; then
         touch "$ST/traded-$day"; log "торговля $day: ок"
-    elif "$PY" - "$day" <<'BK' >/dev/null 2>&1
-import json, sys
+    elif (cd "$LIVE" && "$PY" - "$day" <<'BK' >/dev/null 2>&1
+import sys
 from pathlib import Path
-rt = (Path.home() / '.addfut' / 'route.txt')
+import daily, state as ST
+rt = Path.home() / '.addfut' / 'route.txt'
 route = rt.read_text().strip() if rt.exists() else 'F'
-b = json.load(open(Path.home() / '.addfut' / f'book-{route}.json'))['payload']['book']
-sys.exit(0 if b.get('last_session') == sys.argv[1] else 1)
+cls = daily.BookE if route == 'E' else daily.Book
+b, _, _ = ST.load(ST.book_path(route), cls)   # load сверяет digest: порча файла = не штатно
+sys.exit(0 if (b is not None and b.last_session == sys.argv[1]) else 1)
 BK
+    )
     then
         # ШТАТНОСТЬ — ПО КНИГЕ (пятнадцатый круг, №3): день считается отторгованным, если
         # книга несёт СЕГОДНЯШНЮЮ дату. Фразы и коды возврата хрупки: реальный повтор дал
@@ -140,6 +179,7 @@ BK
         touch "$ST/traded-$day"; log "торговля $day: штатный отказ (день уже отторгован)"
     else
         echo "$out" > "$ST/ALARM-trade-$day.txt"
+        (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-trade-$day.txt" >> "$ST/ALARM-trade-$day.txt" 2>&1) || true
         log "ТРЕВОГА торговли $day (код $rc) — автопилот остановлен до ручного разбора"
         return 1
     fi
@@ -151,20 +191,25 @@ run_close() {
     echo "$out" >> "$LOG"
     _closed_ok=0
     if [ $rc -ne 0 ]; then
-        "$PY" - <<'BK2' >/dev/null 2>&1 && _closed_ok=1
-import json, sys
+        (cd "$LIVE" && "$PY" - "$day" <<'BK2' >/dev/null 2>&1
+import sys
 from pathlib import Path
-rt = (Path.home() / '.addfut' / 'route.txt')
+import daily, state as ST
+rt = Path.home() / '.addfut' / 'route.txt'
 route = rt.read_text().strip() if rt.exists() else 'F'
-b = json.load(open(Path.home() / '.addfut' / f'book-{route}.json'))['payload']['book']
-sys.exit(0 if not b.get('close_provisional', True) else 1)
+cls = daily.BookE if route == 'E' else daily.Book
+b, _, _ = ST.load(ST.book_path(route), cls)   # digest + ДАТА: чужой день не «уже замкнут»
+sys.exit(0 if (b is not None and b.last_session == sys.argv[1]
+               and b.close_provisional is False) else 1)
 BK2
+        ) && _closed_ok=1
     fi
     if [ $rc -eq 0 ] || [ "$_closed_ok" = 1 ]; then
         touch "$ST/closed-$day"; log "замыкание $day: ок"
         backup_state "$day"
     else
         echo "$out" > "$ST/ALARM-close-$day.txt"
+        (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-close-$day.txt" >> "$ST/ALARM-close-$day.txt" 2>&1) || true
         log "ТРЕВОГА замыкания $day (код $rc)"
         return 1
     fi
@@ -177,6 +222,7 @@ tick() {
     is_trade_day; _td=$?
     if [ "$_td" -eq 2 ]; then
         echo "календарь маршрута $(route) не покрывает текущий год" > "$ST/ALARM-calendar.txt"
+        (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-calendar.txt" >> "$ST/ALARM-calendar.txt" 2>&1) || true
         log "ТРЕВОГА: календарь не покрыт — автопилот остановлен"
         return 0
     fi
@@ -185,6 +231,7 @@ tick() {
         # ДЕНЬ ПРОПУЩЕН: все тики до конца окна потеряны (машина спала). Торговать в 16:05
         # и тут же замыкать — значит оставить рыночные GTC на ночь; вместо этого тревога.
         echo "тики торгового окна $day пропущены (первый после $hm)" > "$ST/ALARM-missed-$day.txt"
+        (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-missed-$day.txt" >> "$ST/ALARM-missed-$day.txt" 2>&1) || true
         log "ТРЕВОГА: торговое окно $day пропущено — сессии не будет"
         return 0
     fi
@@ -195,15 +242,24 @@ tick() {
         local mon; mon=$(chicago %Y-%m)
         if [ ! -e "$ST/sigup-$mon" ]; then
             local sout
-            if sout=$(cd "$LIVE" && timeout 300 "$PY" signal_update.py 2>&1 | grep -vE '^Error [0-9]+'); then
+            if sout=$(cd "$LIVE" && timeout -k 30 300 "$PY" signal_update.py 2>&1 | grep -vE '^Error [0-9]+'); then
                 echo "$sout" >> "$LOG"; touch "$ST/sigup-$mon"; log "сигнал $mon: обновлён/сверен"
             else
                 echo "$sout" > "$ST/ALARM-signal-$mon.txt"
+                (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-signal-$mon.txt" >> "$ST/ALARM-signal-$mon.txt" 2>&1) || true
                 log "ТРЕВОГА сигнала $mon — торговли не будет до ручного разбора"
                 return 0
             fi
         fi
-        run_trade "$day"
+        # ОКНО ПЕРЕПРОВЕРЯЕТСЯ ПОСЛЕ ПОДГОТОВКИ (семнадцатый круг, №13): подъём шлюза и
+        # месячный сигнал занимают минуты — заявка, поданная за краем окна, висела бы GTC
+        # до чужой сессии. Пропущенное окно поймает штатный механизм ALARM-missed.
+        hm=$(chicago %H%M)
+        if [ "$hm" -ge "$(trade_till)" ]; then
+            log "окно ушло за время подготовки (сейчас $hm) — торговля не начинается"
+        else
+            run_trade "$day"
+        fi
     fi
     if [ "$hm" -ge "$(close_after)" ] && [ -e "$ST/traded-$day" ] && [ ! -e "$ST/closed-$day" ]; then
         ensure_gw && run_close "$day"
@@ -226,10 +282,24 @@ backup_state() {
         --exclude='.addfut/*.lock' .addfut 2>/dev/null \
        && mv "$bdir/.addfut-$day-$stamp.tmp" "$bdir/addfut-$day-$stamp.tgz"; then
         log "резервная копия состояния: addfut-$day-$stamp.tgz"
+        # WORM-ЯКОРЬ ВНЕ МАШИНЫ (решение заказчика 13.08.2026): корень цепочки §7 и
+        # digest книги — датированным файлом в репозиторий, коммитом до выгрузки; подмена
+        # прошлого потребует force-push с расхождением двух удалённых историй.
+        if wa=$(cd "$LIVE" && "$PY" worm_anchor.py "$day" 2>&1); then
+            log "WORM: $wa"
+            ( cd /home/alex/claude-projects/vol-down12 \
+              && git add anchors/ >/dev/null 2>&1 \
+              && git commit -q -m "WORM-якорь $day" >/dev/null 2>&1 ) || true
+        else
+            echo "WORM-якорь $day не создан: $wa" > "$ST/ALARM-worm-$day.txt"
+            (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-worm-$day.txt" >> "$ST/ALARM-worm-$day.txt" 2>&1) || true
+            log "ТРЕВОГА: WORM-якорь не создан — автопилот остановлен"
+            return 1
+        fi
         # ВНЕШНЯЯ ВЫГРУЗКА ПОД ПРОВЕРКОЙ (пятнадцатый круг, №7): разовый сбой сети — не
         # тревога (локальная копия есть, догонит следующим замыканием), но три подряд
         # означают, что внешних копий давно нет, — стоим до ручного разбора.
-        if /bin/bash /home/alex/claude-projects/vol-down12/tools/backup_push.sh >>"$LOG" 2>&1; then
+        if timeout -k 30 180 /bin/bash /home/alex/claude-projects/vol-down12/tools/backup_push.sh >>"$LOG" 2>&1; then
             rm -f "$ST/push-fails"
         else
             local pf=0
@@ -238,6 +308,7 @@ backup_state() {
             log "внешняя выгрузка копий не удалась ($pf подряд)"
             if [ "$pf" -ge 3 ]; then
                 echo "backup_push.sh не удаётся $pf замыканий подряд — внешних копий нет" > "$ST/ALARM-push.txt"
+                (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-push.txt" >> "$ST/ALARM-push.txt" 2>&1) || true
                 log "ТРЕВОГА: внешние копии не выгружаются — автопилот остановлен"
                 return 1
             fi
@@ -245,6 +316,7 @@ backup_state() {
     else
         rm -f "$bdir/.addfut-$day-$stamp.tmp"
         echo "tar не создал копию состояния за $day" > "$ST/ALARM-backup-$day.txt"
+        (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-backup-$day.txt" >> "$ST/ALARM-backup-$day.txt" 2>&1) || true
         log "ТРЕВОГА: резервная копия $day не создана — автопилот остановлен"
         return 1
     fi
@@ -283,6 +355,16 @@ case "${1:-tick}" in
         hm=$(chicago %H%M)
         [ "$hm" -ge "$(close_after)" ] || { echo "до окна замыкания маршрута $(route)"; exit 1; }
         ensure_gw && run_close "$(chicago %F)" ;;
+    diagnose)
+        found=0
+        for f in "$ST"/ALARM-*.txt; do
+            [ -e "$f" ] || continue
+            found=1
+            echo "=== $f ==="
+            (cd "$LIVE" && "$PY" diagnose.py "$f") || true
+        done
+        [ "$found" = 1 ] || echo "тревог нет"
+        ;;
     status) status ;;
     *) echo "команды: tick|trade|close|status"; exit 1 ;;
 esac

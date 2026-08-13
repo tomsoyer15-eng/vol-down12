@@ -187,6 +187,25 @@ class IBBroker:
             out.add(t.order.orderId)
         return sorted(out)
 
+    def todays_executions(self):
+        """permId сегодняшних исполнений НАШЕЙ метки на НАШЕМ счёте (семнадцатый круг, №3):
+        второй независимый источник для разбора намерения — снимок позиций один не
+        доказывает «заявок не было» (fill_after_end, stale_twice)."""
+        self._exec_barrier()
+        out = []
+        for f in (self.ib.fills() or []):
+            ex = getattr(f, 'execution', None)
+            if ex is None:
+                continue
+            acct = getattr(ex, 'acctNumber', '') or ''
+            if self.account and acct and acct != self.account:
+                continue
+            ref = getattr(ex, 'orderRef', '') or ''
+            if ref != 'ADDFUT':
+                continue
+            out.append(getattr(ex, 'permId', 0))
+        return out
+
     def margin_cushion(self):
         """Живой запас О-3-Е: EquityWithLoan / MaintMarginReq от брокера (десятый круг,
         №2). Без него step_e пользовался расчётной прокси, которая при капе 2,00 не
@@ -200,10 +219,15 @@ class IBBroker:
                 ewl = float(v.value)
             if v.tag == 'MaintMarginReq' and v.currency == 'USD':
                 maint = float(v.value)
-        if ewl is None:
-            raise BrokerError('брокер не вернул EquityWithLoanValue — запас О-3-Е неизвестен')
+        # NaN НЕ ЧИСЛО (семнадцатый круг, №7): NaN/maint давал cushion=NaN, сравнение
+        # «NaN < 1.40» ложно — аварийное сокращение молча отключалось.
+        if ewl is None or ewl != ewl:
+            raise BrokerError('брокер не вернул числовой EquityWithLoanValue — запас '
+                              'О-3-Е неизвестен')
+        if maint is not None and maint != maint:
+            raise BrokerError('MaintMarginReq = NaN — запас О-3-Е неизвестен')
         if not maint:
-            return None                     # позиций нет — запас не определён и не нужен
+            return None       # требования нет; «нет позиций или неполный ответ» решает вызывающий
         return ewl / maint
 
     def net_liquidation(self):

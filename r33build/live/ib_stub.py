@@ -79,9 +79,12 @@ class _Trade:
 
 
 class _Exec:
-    def __init__(self, orderId, permId, shares, side, acct):
+    def __init__(self, orderId, permId, shares, side, acct, orderRef='ADDFUT'):
         self.orderId = orderId; self.permId = permId; self.shares = shares
         self.side = side; self.acctNumber = acct; self.price = 100.0
+        # Метка стратегии на ИСПОЛНЕНИИ — как у настоящего шлюза (семнадцатый круг, №3):
+        # барьер todays_executions фильтрует отчёты по ней.
+        self.orderRef = orderRef
 
 
 class _Commission:
@@ -196,8 +199,21 @@ class StubIB:
         бумажном шлюзе не возвращается вовсе и вешала сессию до тайм-аута. Отдаются и теги
         запаса О-3-Е; при 'thin_cushion' запас 1,20 — ниже порога 1,40."""
         out = self.accountValues(account)
+        # 'nan_cushion': шлюз временно отдаёт NaN в тегах запаса (семнадцатый круг, №7).
+        if self.behaviour == 'nan_cushion':
+            out.append(_Val('EquityWithLoanValue', 'nan'))
+            out.append(_Val('MaintMarginReq', 'nan'))
+            return out
         ewl = self._nlv
-        maint = (self._nlv / 1.2) if self.behaviour == 'thin_cushion' else 0.0
+        # Требование при ЖИВЫХ позициях ненулевое, как у настоящего шлюза (семнадцатый
+        # круг, №7): нулевой maint при существующих позициях — неполный ответ, и сессия Е
+        # обязана отказывать, а не брать прокси; пустой счёт честно отдаёт ноль.
+        if self.behaviour == 'thin_cushion':
+            maint = self._nlv / 1.2
+        elif any(self._pos.values()):
+            maint = self._nlv / 2.0
+        else:
+            maint = 0.0
         out.append(_Val('EquityWithLoanValue', f'{ewl:.2f}'))
         out.append(_Val('MaintMarginReq', f'{maint:.2f}'))
         return out
@@ -305,7 +321,8 @@ class StubIB:
                                      _Exec(order.orderId, 999999, 77.0, 'BOT', self._acct)))
         self._pos[contract.conId] = self._pos.get(contract.conId, 0) + done
         f = _Fill(contract, _Exec(order.orderId, order.permId, abs(done),
-                                  'BOT' if done > 0 else 'SLD', self._acct))
+                                  'BOT' if done > 0 else 'SLD', self._acct,
+                                  orderRef=getattr(order, 'orderRef', '') or ''))
         if b in ('late_fills', 'late_cancelled', 'fill_after_end'):
             self._pending = getattr(self, '_pending', []) + [f]
         else:

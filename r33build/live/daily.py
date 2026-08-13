@@ -652,6 +652,23 @@ MAINT_E = 0.25                # нормативное поддерживающ�
 O3E_MIN = 1.40                # §6: ниже — сокращение до L=1 в ту же сессию
 
 
+def o3e_reduce(capital, m, p_e, p_b, n_eq, n_bd, n0_eq, n0_bd, share):
+    """Аварийное сокращение О-3-Е до L=1 — ЦЕЛЬ ОТ КАПИТАЛА ПОСЛЕ ФАКТИЧЕСКИХ РАСХОДОВ
+    (семнадцатый круг, №16): сокращение само стоит комиссий, и цель от старого капитала
+    оставляла L≈1,0005 при правиле «не выше 1». Неподвижная точка за пару итераций:
+    оборот меняет капитал, капитал меняет цель. Ограничители прежние — не выше капнутого
+    и не выше исходного (аварийный критерий не открывает позицию)."""
+    e = float(capital) - S.COST * (abs(n_eq - n0_eq) * p_e + abs(n_bd - n0_bd) * p_b)
+    for _ in range(4):
+        ne2 = min(n_eq, n0_eq, math.floor(share * (1.0 * m.st_eq * e) / p_e))
+        nb2 = min(n_bd, n0_bd, math.floor(share * (1.0 * m.st_bd * e) / p_b))
+        e2 = float(capital) - S.COST * (abs(ne2 - n0_eq) * p_e + abs(nb2 - n0_bd) * p_b)
+        if (ne2, nb2) == (n_eq, n_bd) and abs(e2 - e) < 1e-9:
+            return n_eq, n_bd, e
+        n_eq, n_bd, e = ne2, nb2, e2
+    return n_eq, n_bd, e
+
+
 @dataclass(frozen=True)
 class BookE:
     """Состояние книги маршрута Е. Доли, а не контракты; серий и роллов нет.
@@ -772,7 +789,6 @@ def step_e(book, m, capital, band=None, cap=CAP_LEV, drag=DRAG_E, check_o3e=True
                 d.reasons.append('кап плеча §1')
 
     P = n_eq * p_e + n_bd * p_b
-    debit = max(0.0, P + 0.05 * e - e)
     d.exposure = {'А': n_eq * p_e, 'Б': n_bd * p_b}
     d.leverage = P / e if e else 0.0
     # О-3-Е — КРИТЕРИЙ ПО ЖИВОМУ ЗНАЧЕНИЮ БРОКЕРА, а не по нашему расчёту. После кап-блока
@@ -791,8 +807,7 @@ def step_e(book, m, capital, band=None, cap=CAP_LEV, drag=DRAG_E, check_o3e=True
         # L=1 означает СУММАРНОЕ плечо 1,0, а не половину каждой цели: при выключенной ноге
         # половина цели давала бы ноль по ней и полное плечо по другой.
         share = 1.0 / max(float(m.st_eq) + float(m.st_bd), 1.0)
-        n_eq = min(n_eq, n0_eq, math.floor(share * tgt_e / p_e))
-        n_bd = min(n_bd, n0_bd, math.floor(share * tgt_b / p_b))
+        n_eq, n_bd, e = o3e_reduce(capital, m, p_e, p_b, n_eq, n_bd, n0_eq, n0_bd, share)
         P = n_eq * p_e + n_bd * p_b
         d.exposure = {'А': n_eq * p_e, 'Б': n_bd * p_b}
         d.leverage = P / e if e else 0.0
@@ -802,6 +817,10 @@ def step_e(book, m, capital, band=None, cap=CAP_LEV, drag=DRAG_E, check_o3e=True
         d.orders['CSPX'] = n_eq - n0_eq
     if n_bd != n0_bd:
         d.orders['CBU0'] = n_bd - n0_bd
+    # ЗАЁМ И СУТОЧНЫЕ РАСХОДЫ — ОТ ФИНАЛЬНОЙ КНИГИ (семнадцатый круг, №16): debit,
+    # посчитанный до аварийного сокращения, относил стоимость займа к уже несуществующей
+    # позиции, а журнал уносил её в сверку §7.
+    debit = max(0.0, P + 0.05 * e - e)
     d.daily_costs = dict(ter=TER_E * P / 252.0, drag=drag * n_eq * p_e / 252.0,
                          loan=loan_spread_amt(debit) / 252.0, debit=debit)
     d.capital_after_costs = e
@@ -885,16 +904,22 @@ def restore_to(broker, target_book, route='F'):
         return False, have0, stuck
     want = ST.expected_positions(target_book, route)
     have = {k: v for k, v in (broker.net_positions() or {}).items() if v}
+    unknown = []
     for inst in sorted(set(want) | set(have)):
         d = want.get(inst, 0) - have.get(inst, 0)
         if d:
             try:
                 broker.place(inst, d)
-            except Exception:
-                pass
+            except Exception as ex:
+                # НЕИЗВЕСТНОСТЬ КОМПЕНСАЦИИ НЕ ГЛОТАЕТСЯ (семнадцатый круг, №4): оборванная
+                # компенсирующая заявка могла исполниться позже — совпавший снимок после неё
+                # ничего не доказывает, и «восстановлено» объявлять нельзя.
+                unknown.append(f'{inst} {d:+}: исход неизвестен ({ex})')
     stuck += _cancel_all(broker)
     have2 = {k: float(v) for k, v in (broker.net_positions() or {}).items() if v}
     want2 = {k: float(v) for k, v in want.items()}
+    if unknown:
+        return False, have2, stuck + unknown
     return (have2 == want2 and not stuck), have2, stuck
 
 
@@ -964,12 +989,35 @@ def _resume_intent(ST, bp, cls, route, book, sess, broker, dry_run):
                            f'запрошен {route} — ручной разбор')
     before = cls(**it['book_before'])
     after = cls(**it['book_after'])
+    # СОСТОЯНИЕ УЖЕ ДОПИСАНО ПРОШЛЫМ ПРОЦЕССОМ (семнадцатый круг, №3): обрыв между
+    # ST.save() и clear_intent() оставлял намерение при уже записанной книге — повторная
+    # запись удваивала номер сессии и стирала рассчитанные поля замыкания.
+    d_int = it.get('session_date') or ''
+    if d_int and book.last_session == d_int:
+        if not dry_run:
+            ST.clear_intent(bp)
+        return book, None
     pos = broker.net_positions()
     live = getattr(broker, 'open_orders', lambda: [])()
     if live:
         raise RuntimeError(f'осталось незавершённое намерение прошлого запуска И живые '
                            f'заявки {live} — сессия остановлена до ручного разбора (О-5)')
     if not ST.reconcile(before, route, pos):
+        # СНИМОК ПОЗИЦИЙ — НЕ ДОКАЗАТЕЛЬСТВО «заявок не было» (семнадцатый круг, №3):
+        # исполнение могло состояться, а отчёт и позиция запаздывать (fill_after_end,
+        # stale_twice). Второй независимый источник — БАРЬЕР сегодняшних исполнений нашей
+        # метки: пустой барьер ПЛЮС исходные позиции = заявок действительно не было; отчёт
+        # при исходных позициях = снимок лжёт, О-5.
+        try:
+            execs = list(getattr(broker, 'todays_executions', lambda: [])())
+        except Exception as ex:
+            raise RuntimeError(f'намерение не разобрано: барьер исполнений недоступен '
+                               f'({ex}) — ручной разбор (О-5)')
+        if execs:
+            raise RuntimeError(
+                f'позиции совпадают с исходной книгой, но за сегодня есть исполнения '
+                f'нашей метки (permId {execs[:6]}) — снимок недостоверен, поздний отчёт '
+                f'возможен; ручной разбор (О-5)')
         if not dry_run:
             ST.clear_intent(bp)
         return book, None
@@ -1027,6 +1075,16 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
         if done_date:
             # Сессия этой даты уже исполнена прошлым запуском: заявок нет, решение не
             # считается заново. Замыкание выполняется отдельным запуском, как обычно.
+            # ЖУРНАЛ §7 ПОЛУЧАЕТ ЧЕСТНУЮ ПОМЕТКУ (семнадцатый круг, №15): строки
+            # исполнения этой сессии утрачены вместе с упавшим процессом — без пометки
+            # выборка §7 выглядела бы полной, не быв ею.
+            if journal_path and not dry_run:
+                J.append(journal_path, dict(
+                    date=done_date, leg='', instrument='ИТОГ', qty=0, px_order='-',
+                    px_fill='', commission='', reason='', nav='', leverage='',
+                    roll_spread_near='', roll_spread_far='',
+                    note=f'итог сессии {sess + 1}: состояние принято по намерению, строки '
+                         f'исполнения утрачены — сверка §7 обязана исключить сессию'))
             dd = Decision(date=market.date, book_after=book, capital_after_costs=0.0)
             dd.reasons.append(f'сессия {done_date} исполнена прошлым запуском; состояние '
                               f'дописано по намерению, повторного решения не было')
@@ -1058,6 +1116,21 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                   else book_to_orders(dec, book))
         placed = []
         if dec.trade and not dry_run:
+            # ЖУРНАЛ §7 ПРОВЕРЯЕТСЯ ДО ЗАЯВОК (семнадцатый круг, №15): цепочка хэшей
+            # доказывает нетронутость записанного, но не полноту — повреждённый журнал
+            # прежде молча продолжался, а сессия без итоговой строки означает, что часть
+            # строк исполнения могла не записаться; выборка §7 стала бы ложной.
+            if journal_path:
+                try:
+                    J.verify(journal_path)
+                except Exception as ex:
+                    raise RuntimeError(f'журнал §7 повреждён: {ex} — торговля запрещена '
+                                       f'до починки (О-5)')
+                _jr = J.read(journal_path)
+                if _jr and not str(_jr[-1].get('note', '')).startswith('итог сессии'):
+                    raise RuntimeError('журнал §7 не закрыт итоговой строкой прошлой '
+                                       'сессии — записи исполнения могли потеряться; '
+                                       'ручной разбор (О-5)')
             # НАМЕРЕНИЕ ДО ПЕРВОЙ ЗАЯВКИ. С этого момента на диске записано, какая книга
             # намечалась; сбой между сделкой и сохранением состояния перестаёт быть
             # неразличимым случаем.
@@ -1136,8 +1209,18 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                             + note)
         if journal_path:
             fills = {r['instrument']: r for r in placed}
-            for row in J.rows_from_decision(dec, nlv, orders, fills):
+            _rows = J.rows_from_decision(dec, nlv, orders, fills)
+            for row in _rows:
                 J.append(journal_path, row)
+            # ИТОГОВАЯ СТРОКА СЕССИИ (семнадцатый круг, №15): маркер полноты. Обрыв между
+            # append-ами оставляет валидную ЦЕПОЧКУ без итога — следующая сессия увидит
+            # незакрытый журнал и остановится, вместо того чтобы копить ложную выборку §7.
+            if dec.trade and not dry_run:
+                J.append(journal_path, dict(
+                    date=f'{market.date:%Y-%m-%d}', leg='', instrument='ИТОГ', qty=0,
+                    px_order='-', px_fill='', commission='', reason='', nav=nlv,
+                    leverage='', roll_spread_near='', roll_spread_far='',
+                    note=f'итог сессии {sess + 1}: строк {len(_rows)}'))
         # ОТКАЗ РЕШЕНИЯ БЕЗ ЕДИНОЙ ЗАЯВКИ НЕ ЗАКРЫВАЕТ ДЕНЬ (десятый круг, №5): прежде
         # last_session ставился, книга сохранялась, и «сессия не считается» на деле
         # означало «день отторгован без требуемого входа».

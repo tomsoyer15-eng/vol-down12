@@ -128,40 +128,45 @@ def _verify_border(sym, me):
                           f'автодописывание запрещено; подтвердить ADDFUT_SIGNAL_CONFIRM=1')
 
 
-def _verify_fresh(ib, sym, primary, me):
-    """СВЕЖИЙ МЕСЯЦ СВЕРЯЕТСЯ НЕЗАВИСИМЫМ СРЕЗОМ TRADES (шестнадцатый круг, №3): новейший
-    завершённый месяц отсутствует в сайдкаре ПО ПОСТРОЕНИЮ, и порча последнего закрытия
-    ADJUSTED_LAST проходила бы уровневую сверку молча. Последний бар скорректированного
-    ряда отличается от сырого TRADES только дивидендами, чьи экс-даты попали в окно
-    «конец месяца - сегодня»: скорректированное закрытие НЕ СМЕЕТ превышать сырое сверх
-    допуска уровней, а отставать — сверх дивидендной границы окна. Занижение в пределах
-    купона добирает расширенная пограничная зона _verify_border. Сплит в окне даст кратное
-    расхождение и честный отказ (SPY/IEF — событие редчайшее, разбор ручной)."""
+def _verify_fresh(ib, sym, primary, me, months):
+    """КАЖДЫЙ МЕСЯЦ ВНЕ ЗАМОРОЖЕННОГО САЙДКАРА сверяется независимым срезом TRADES
+    (шестнадцатый круг, №3; семнадцатый, №12): при пропуске нескольких месяцев в SMA
+    свежего решения входят точки, не покрытые ни уровнями, ни прежней сверкой одного
+    последнего месяца. Скорректированное закрытие НЕ СМЕЕТ превышать сырое сверх допуска
+    уровней, а отставать — сверх дивидендной границы СВОЕГО окна (для старших месяцев
+    граница честно шире: купонов в окне больше). Занижение в пределах купона добирает
+    расширенная пограничная зона _verify_border. Сплит в окне даст кратное расхождение и
+    честный отказ (SPY/IEF — событие редчайшее, разбор ручной)."""
+    if not months:
+        return
     import pandas as pd
     from ib_insync import Stock, util
+    import feed as FD
     c = Stock(sym, 'SMART', 'USD', primaryExchange=primary)
     ib.qualifyContracts(c)
     if not getattr(c, 'conId', 0):
         raise SignalError(f'{sym}: контракт для TRADES-сверки не подтверждён')
-    d = me.index[-1]
-    bars = ib.reqHistoricalData(c, endDateTime='', durationStr='3 M',
+    span = max(95, int((FD.exchange_today() - min(months)).days) + 40)
+    dur = f'{span} D' if span <= 350 else '2 Y'   # >12 мес IBKR принимает только в годах
+    bars = ib.reqHistoricalData(c, endDateTime='', durationStr=dur,
                                 barSizeSetting='1 day', whatToShow='TRADES', useRTH=True)
     if not bars:
-        raise SignalError(f'{sym}: TRADES-история пуста — свежий месяц {d:%Y-%m} остался '
-                          f'без независимого подтверждения')
+        raise SignalError(f'{sym}: TRADES-история пуста — месяцы '
+                          f'{[f"{d:%Y-%m}" for d in months]} без независимого подтверждения')
     df = util.df(bars).set_index('date')['close']
     df.index = pd.to_datetime(df.index)
     mt = df.resample('ME').last().dropna()
-    if d not in mt.index:
-        raise SignalError(f'{sym}: в TRADES нет месяца {d:%Y-%m} — свежий месяц остался '
-                          f'без независимого подтверждения')
-    rel = float(mt.loc[d]) / float(me.loc[d]) - 1.0
-    bound = _div_bound(d)
-    if not (-LEVEL_TOL <= rel <= bound):
-        raise SignalError(f'{sym}: свежий месяц {d:%Y-%m} разошёлся с независимым '
-                          f'TRADES-закрытием ({rel:+.3%}; допустимо от {-LEVEL_TOL:.1%} '
-                          f'до +{bound:.2%} дивидендного окна) — последнее закрытие '
-                          f'источника недостоверно')
+    for d in months:
+        if d not in mt.index:
+            raise SignalError(f'{sym}: в TRADES нет месяца {d:%Y-%m} — месяц вне сайдкара '
+                              f'остался без независимого подтверждения')
+        rel = float(mt.loc[d]) / float(me.loc[d]) - 1.0
+        bound = _div_bound(d)
+        if not (-LEVEL_TOL <= rel <= bound):
+            raise SignalError(f'{sym}: месяц {d:%Y-%m} разошёлся с независимым '
+                              f'TRADES-закрытием ({rel:+.3%}; допустимо от {-LEVEL_TOL:.1%} '
+                              f'до +{bound:.2%} дивидендного окна) — закрытие источника '
+                              f'недостоверно')
 
 
 def states(me):
@@ -220,16 +225,30 @@ def _check_levels(sym, live, me):
     # оставляя слабые 12 битов. Повреждение опубликованного сайдкара — не повод доверять.
     if sym not in df.columns:
         if os.environ.get('ADDFUT_LEVELS_BOOTSTRAP') == '1':
-            return
+            return set()
         raise SignalError(f'сайдкар {lp} не содержит столбца {sym}: сверка уровней этой '
                           f'ноги невозможна; починка файла или ADDFUT_LEVELS_BOOTSTRAP=1')
     old = df[sym].dropna().to_dict()
     common = [d for d in me.index if d in old]
     if not common:
         if os.environ.get('ADDFUT_LEVELS_BOOTSTRAP') == '1':
-            return
+            return set()
         raise SignalError(f'сайдкар {lp}: по {sym} нет общих месяцев с рядом поставщика — '
                           f'база сравнения пуста; починка файла или ADDFUT_LEVELS_BOOTSTRAP=1')
+    # БАЗА НЕ КОРОЧЕ ПОРОГА ПЕРЕКРЫТИЯ (семнадцатый круг, №12): один общий месяц с
+    # одиннадцатью дырами «проходил» как полноценная уровневая база. Порог жёсткий — 6,
+    # как у сверки битов; усечённый файл неотличим от «молодого», поэтому мягких скидок
+    # нет: молодой сайдкар первых месяцев разрешает только оператор бутстрапом.
+    if len(common) < 6:
+        raise SignalError(f'{sym}: уровневая база коротка — общих месяцев {len(common)} '
+                          f'при записанных {len(old)}; сверка неубедительна, починка '
+                          f'сайдкара или ADDFUT_LEVELS_BOOTSTRAP=1')
+    # ЗАПИСАННЫЙ МЕСЯЦ ИСЧЕЗ ИЗ РЯДА ПОСТАВЩИКА — источник дефектен, а не «не общий».
+    lo, hi = me.index[0], me.index[-1]
+    holes = [f'{d:%Y-%m}' for d in old if lo <= d <= hi and d not in me.index]
+    if holes:
+        raise SignalError(f'{sym}: в ряду поставщика пропали записанные месяцы '
+                          f'{holes[:4]} — источник дефектен')
     ratios = [me.loc[d] / old[d] for d in common]
     k = sorted(ratios)[len(ratios) // 2]
     bad = [f'{d:%Y-%m}: {me.loc[d]/old[d]/k-1:+.3%}' for d in common
@@ -238,6 +257,7 @@ def _check_levels(sym, live, me):
         raise SignalError(f'{sym}: УРОВНИ ряда разошлись с записанными сверх общего '
                           f'множителя — {bad[:4]}; поставщик пересчитал историю, сигнал '
                           f'пограничного месяца недостоверен')
+    return set(common)
 
 
 def _commit_levels(live, pending):
@@ -291,9 +311,12 @@ def _update_locked(ib, LIVE, pd):
     pending_levels = {}
     for col, sym, primary in LEGS:
         me = monthly_adjusted(ib, sym, primary)
-        _check_levels(sym, LIVE, me)       # только ПРОВЕРКА (одиннадцатый круг, №10)
+        covered = _check_levels(sym, LIVE, me) or set()   # ПРОВЕРКА без записи (11-й, №10)
         _verify_border(sym, me)            # пограничный свежий месяц (тринадцатый, №8)
-        _verify_fresh(ib, sym, primary, me)  # независимый срез TRADES (шестнадцатый, №3)
+        # ВСЕ месяцы SMA-окна вне замороженного сайдкара — под независимый срез TRADES
+        # (шестнадцатый круг, №3; семнадцатый, №12 — пропуск нескольких месяцев).
+        fresh_months = [d for d in me.index[-SMA:] if d not in covered]
+        _verify_fresh(ib, sym, primary, me, fresh_months)
         pending_levels[sym] = me
         st = states(me)
         _verify_overlap(sym, col, ref, st)

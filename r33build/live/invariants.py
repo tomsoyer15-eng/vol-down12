@@ -580,6 +580,45 @@ def _a12(beh):
     return sorted(stuck) == [502, 503] and {502, 503} <= still
 
 
+@ainv('NaN-запас О-3-Е — отказ, а не «выше порога»',
+      needs=lambda b: b == 'nan_cushion')
+def _a15(beh):
+    """Семнадцатый круг, №7: NaN/maint давал cushion=NaN, «NaN < 1,40» ложно — аварийное
+    сокращение молча отключалось при фактическом запасе 1,20."""
+    import ib_broker as IBB
+    br, ib, rows = _adapter(beh)
+    try:
+        br.margin_cushion()
+        return False
+    except IBB.BrokerError:
+        return True
+
+
+@ainv('неизвестность компенсации не объявляется восстановлением',
+      needs=lambda b: b == 'normal')
+def _a14(beh):
+    """Семнадцатый круг, №4: оборванная компенсирующая заявка могла исполниться позже —
+    совпавший снимок после неё ничего не доказывает, restore_to обязан вернуть отказ."""
+    import daily as DLm
+
+    class _B:
+        def open_orders(self):
+            return []
+
+        def cancel_order(self, oid):
+            return True
+
+        def net_positions(self):
+            return {'ZNU26': 5}
+
+        def place(self, inst, qty, px_order=None):
+            raise RuntimeError('компенсация оборвана')
+    b = DLm.Book(d_fix=8.0, n_e=0, n_b=10, unit_is_mes=True, prev_st_eq=False,
+                 prev_st_bd=True, ser_a=None, ser_b='U26', es_held=0)
+    ok, have, stuck = DLm.restore_to(_B(), b, 'F')
+    return (not ok) and any('исход неизвестен' in str(s) for s in stuck)
+
+
 @ainv('сбой запроса заявок — отказ, а не пустой список',
       needs=lambda b: b == 'orders_req_fails')
 def _a13(beh):
@@ -645,7 +684,7 @@ def _a7(beh):
 ADAPTER_CASES = ('normal', 'partial', 'reject', 'disconnect', 'cancelled_but_filled',
                  'stale_positions', 'foreign_fill', 'wrong_contract', 'late_fills',
                  'late_cancelled', 'other_account', 'fill_after_end',
-                 'stale_twice', 'foreign_orders', 'orders_req_fails')
+                 'stale_twice', 'foreign_orders', 'orders_req_fails', 'nan_cushion')
 
 
 def run_adapter():
@@ -706,11 +745,22 @@ def _intent_full(kind):
         bp = Path(tmp) / 'book.json'
         ST.save(bp, before, 'F', 7)
         ST.save_intent(bp, 'F', 8, before, after, orders, session_date='2026-08-26')
-        pos = (DL.physical_book(after) if kind == 'ролл исполнен целиком'
+        pos = (DL.physical_book(after) if kind in ('ролл исполнен целиком',
+                                                   'состояние уже дописано')
                else DL.physical_book(before))
         prices = {k: 600.0 if 'ES' in k else 112.0
                   for k in set(pos) | set(DL.physical_book(after)) | set(DL.physical_book(before))}
         br = FakeBroker(prices=prices, positions=dict(pos)); br.nlv = 10_000_000.0
+        if kind == 'исполнение в пути':
+            # Позиции ещё исходные, но БАРЬЕР уже несёт сегодняшнее исполнение нашей метки
+            # (семнадцатый круг, №3): снимок один не доказывает «заявок не было».
+            br.todays_executions = lambda: [4242]
+        if kind == 'состояние уже дописано':
+            # Процесс умер МЕЖДУ ST.save() и clear_intent(): книга уже записана прошлым
+            # запуском, намерение осталось — повторная запись удвоила бы номер сессии.
+            import dataclasses as _dc
+            ST.save(bp, _dc.replace(after, last_session='2026-08-26',
+                                    close_provisional=True), 'F', 8)
         keep = os.environ.get('ADDFUT_BOOK_PATH'), os.environ.get('ADDFUT_LOCK_DIR')
         os.environ['ADDFUT_BOOK_PATH'] = str(bp); os.environ['ADDFUT_LOCK_DIR'] = tmp
         out = dict(kind=kind, raised=False, error='', dec=None, orders=None)
@@ -726,8 +776,10 @@ def _intent_full(kind):
                 os.environ.pop(k, None)
                 if v is not None:
                     os.environ[k] = v
-        sv, _, _ = ST.load(bp, DL.Book)
+        sv, sess_after, _ = ST.load(bp, DL.Book)
         out['saved'] = sv
+        out['sess'] = sess_after
+        out['intent_left'] = bool(ST.load_intent(bp))
         out['before'] = before; out['after'] = after
         return out
 
@@ -809,11 +861,31 @@ def _t3(r):
     return r['raised'] and r['intent_left'] and r['saved'].n_e == r['before'].n_e
 
 
+@iinv('исполнение в пути: снимок исходных позиций не очищает намерение',
+      needs=lambda r: r.get('kind') == 'исполнение в пути')
+def _t4(r):
+    """Семнадцатый круг, №3: заявка принята, отчёт в барьере, позиция запаздывает —
+    очистка намерения разрешила бы новую торговлю поверх позднего исполнения."""
+    return (r['raised'] and 'снимок недостоверен' in r['error'] and r['intent_left']
+            and r['saved'].n_e == r['before'].n_e)
+
+
+@iinv('дописанное состояние не дописывается второй раз',
+      needs=lambda r: r.get('kind') == 'состояние уже дописано')
+def _t5(r):
+    """Семнадцатый круг, №3: обрыв между save() и clear_intent() — повторная запись
+    удваивала номер сессии и стирала поля замыкания; теперь намерение снимается, книга
+    не трогается, день честно объявляется отторгованным."""
+    return (r['raised'] and 'не новее' in r['error'] and not r['intent_left']
+            and r['sess'] == 8 and r['saved'].n_e == r['after'].n_e)
+
+
 def run_intent():
     cov, bad = {}, {}
     cases = [('не начиналось', _intent_case), ('прошло целиком', _intent_case),
              ('промежуточное', _intent_case),
-             ('ролл исполнен целиком', _intent_full), ('ролл не начинался', _intent_full)]
+             ('ролл исполнен целиком', _intent_full), ('ролл не начинался', _intent_full),
+             ('исполнение в пути', _intent_full), ('состояние уже дописано', _intent_full)]
     for kind, maker in cases:
         r = maker(kind)
         for name, fn, needs in INTENT:
@@ -1056,7 +1128,7 @@ RUN_CASES = ('наблюдение', 'торговля', 'незамкнутая
              'позднее исполнение после сессии', 'гонка при замыкании',
              'смена маршрута в связке с торговлей', 'замок между процессами',
              'маршрут Е при тонком запасе', 'отказ дня по §8',
-             'ролл: исход заявки неизвестен')
+             'ролл: исход заявки неизвестен', 'журнал повреждён')
 
 
 def _session_run(case):
@@ -1160,6 +1232,17 @@ def _session_run(case):
             ib._pos = {es: 2, 900002: 6, zn: 10}
             ib._shown = dict(ib._pos)
             book_bytes0 = bp.read_bytes()
+        if case == 'журнал повреждён':
+            # ПРАВКА ЗАДНИМ ЧИСЛОМ (семнадцатый круг, №15): цепочка хэшей рвётся, и
+            # торговля обязана остановиться ДО заявок, а не дописывать битый журнал.
+            import journal as JJ
+            jp = Path(tmp) / f'journal-{route}.csv'
+            JJ.append(jp, dict(date='2026-08-11', leg='', instrument='X', qty=1,
+                               px_order='1', px_fill='', commission='', reason='',
+                               nav='', leverage='', roll_spread_near='',
+                               roll_spread_far='', note='итог сессии 1: строк 0'))
+            jp.write_text(jp.read_text(encoding='utf-8').replace(',X,', ',Y,'),
+                          encoding='utf-8')
         if case == 'посторонняя позиция':
             ib._pos = {777777: 5}; ib._shown = dict(ib._pos)
             ib.rows[777777] = dict(instrument='ЧУЖОЙ', sec_type='FUT', exchange='CME',
@@ -1213,6 +1296,26 @@ def _r1(r):
 @rinv('торговля подаёт заявки и сохраняет книгу', needs=lambda r: r['case'] == 'торговля')
 def _r2(r):
     return not r['raised'] and r['placed'] > 0 and r['saved'] is not None and r['positions']
+
+
+@rinv('журнал сессии закрыт итоговой строкой', needs=lambda r: r['case'] == 'торговля')
+def _r3b(r):
+    """Семнадцатый круг, №15: цепочка хэшей не доказывает полноту — маркер полноты
+    ставит итоговая строка; обрыв между append-ами оставит журнал без неё, и следующая
+    сессия остановится вместо накопления ложной выборки §7."""
+    import journal as JJ
+    if r['raised'] or not r['journal'].exists():
+        return False
+    rows = JJ.read(r['journal'])
+    return (bool(rows) and rows[-1].get('instrument') == 'ИТОГ'
+            and str(rows[-1].get('note', '')).startswith('итог сессии'))
+
+
+@rinv('повреждённый журнал останавливает торговлю ДО заявок',
+      needs=lambda r: r['case'] == 'журнал повреждён')
+def _r3c(r):
+    """Семнадцатый круг, №15: правленный задним числом журнал прежде молча продолжался."""
+    return r['raised'] and 'журнал §7 повреждён' in r['error'] and r['placed'] == 0
 
 
 @rinv('в живом журнале есть цена-ориентир', needs=lambda r: r['case'] == 'торговля')
@@ -1291,6 +1394,29 @@ def _r20(r):
     d = r['dec']
     return (d is not None and any('О-3-Е' in x for x in d.reasons)
             and d.book_after.n_eq < 1195 and d.book_after.n_bd < 6538)
+
+
+@rinv('О-3-Е: капитал, плечо и заём считаются от ФИНАЛЬНОЙ книги',
+      needs=lambda r: r['case'] == 'маршрут Е при тонком запасе')
+def _r20b(r):
+    """Семнадцатый круг, №16: цель L=1 от капитала ДО расходов сокращения оставляла
+    L≈1,0005, а заём журналировался по несуществующей позиции. Проверяются деньги:
+    комиссии соответствуют финальным заявкам, плечо не выше 1, debit — от финала."""
+    if r['raised'] or r['dec'] is None:
+        return False
+    d = r['dec']
+    b = d.book_after
+    if not (b.n_eq and b.n_bd):
+        return False
+    p_e = d.exposure['А'] / b.n_eq
+    p_b = d.exposure['Б'] / b.n_bd
+    turn = (abs(d.orders.get('CSPX', 0)) * p_e + abs(d.orders.get('CBU0', 0)) * p_b)
+    want_e = 1_000_000.0 - DL.S.COST * turn
+    P = d.exposure['А'] + d.exposure['Б']
+    want_debit = max(0.0, P + 0.05 * d.capital_after_costs - d.capital_after_costs)
+    return (abs(d.capital_after_costs - want_e) < 1e-6
+            and d.leverage <= 1.0 + 1e-9
+            and abs(d.daily_costs['debit'] - want_debit) < 1e-6)
 
 
 @rinv('отказ дня не помечает день отторгованным',
@@ -1878,7 +2004,8 @@ TR_CASES = ('план целых фьючерсов', 'план дробных �
             'повторный запуск после обрыва', 'ИСПОЛНЕНИЕ дробного источника',
             'источник мельче зерна цели', 'битый замер маржи', 'замер без привязки',
             'замер прежней серии', 'замер не покрывает корень', 'замер отсутствует',
-            'живой замер покрывает')
+            'живой замер покрывает', 'частичный прогресс лота при resume',
+            'остаток непарной дельты при resume')
 
 
 class _Unp(dict):
@@ -1974,6 +2101,34 @@ def _tr_run(case):
                     _os.environ.pop(k, None)
                     if v is not None:
                         _os.environ[k] = v
+        elif case == 'частичный прогресс лота при resume':
+            # Семнадцатый круг, №1: продано 3 из 10 до обрыва — повтор обязан продать
+            # РОВНО 7, а не 10; st['partial'] строится resume-блоком и потребляется циклом.
+            lots = TRN.plan_lots(legs_fut, 10e6)
+            lim = TRN.unpaired_limit(legs_fut, 10e6)
+            br = _TrBroker()
+            st = dict(done=[], order_ids=[], log=[], executed_usd=0.0,
+                      partial={'ZN': 3})
+            sp = Path(tempfile.mkdtemp(prefix='addfut-tr-')) / 'st.json'
+            TRN._run_lots(br, lots, st, sp, lim, _Unp({k: 0.0 for k in legs_fut}), {},
+                          lambda msg, cancel=True: (_ for _ in ()).throw(TRN.Incident(msg)))
+            out['sold'] = sum(q for k, i, q in st['log'] if k == 'sell')
+            out['partial_left'] = dict(st.get('partial', {}))
+        elif case == 'остаток непарной дельты при resume':
+            # Семнадцатый круг, №2: перенесённый из resume остаток занимает лимит §8б —
+            # обнулённый остаток дал бы разрыв поверх разрыва.
+            lots = TRN.plan_lots(legs_fut, 10e6)
+            lim = TRN.unpaired_limit(legs_fut, 10e6)
+            br = _TrBroker()
+            st = dict(done=[], order_ids=[], log=[], executed_usd=0.0)
+            sp = Path(tempfile.mkdtemp(prefix='addfut-tr-')) / 'st.json'
+            unp = _Unp({k: 0.0 for k in legs_fut})
+            unp['Б'] = lim - 1_000.0          # почти весь лимит уже занят остатком resume
+
+            def _f(msg, cancel=True):
+                raise TRN.Incident(msg)
+
+            TRN._run_lots(br, lots, st, sp, lim, unp, {}, _f)
         elif case == 'план целых фьючерсов':
             out['lots'] = TRN.plan_lots(legs_fut, 10e6)
         elif case == 'план дробных долей фонда':
@@ -2099,6 +2254,23 @@ def _t7(r):
     return not r['raised'] and r['second_calls'] == []
 
 
+@tinv('прерванный лот допродаёт РОВНО остаток',
+      needs=lambda r: r['case'] == 'частичный прогресс лота при resume')
+def _t_p1(r):
+    """Семнадцатый круг, №1: повтор целого лота продавал уже исполненную часть заново —
+    короткая позиция источника на величину прогресса."""
+    return (not r['raised'] and r.get('sold') == 7
+            and not any(v for v in (r.get('partial_left') or {}).values()))
+
+
+@tinv('остаток непарной дельты resume занимает лимит §8б',
+      needs=lambda r: r['case'] == 'остаток непарной дельты при resume')
+def _t_p2(r):
+    """Семнадцатый круг, №2: обнулённый остаток освобождал лимит — новый проход строил
+    разрыв поверх старого; с переносом остатка первый же шаг обязан упереться в §8б."""
+    return r['raised'] and 'нет места под лимитом' in r['error']
+
+
 @tinv('битый замер маржи — отказ перехода',
       needs=lambda r: r['case'] == 'битый замер маржи')
 def _t_m1(r):
@@ -2117,9 +2289,9 @@ def _t_m2(r):
 @tinv('замер прежней серии живым не считается',
       needs=lambda r: r['case'] == 'замер прежней серии')
 def _t_m3(r):
-    """Шестнадцатый круг, №4: после смены реестра старый ESZ25 не смеет выдавать свою
-    маржу за маржу корня ES — у новой серии требование может быть выше."""
-    return r['raised'] and 'не совпала' in r['error']
+    """Шестнадцатый круг, №4 (усилено семнадцатым, №8): после смены реестра старый ESZ25
+    не покрывает текущие серии — замер обязан покрыть КАЖДУЮ FUT-строку реестра."""
+    return r['raised'] and ('не покрывает серии' in r['error'] or 'не совпала' in r['error'])
 
 
 @tinv('дыра существующего замера не добирается константами',
@@ -2414,7 +2586,9 @@ SIG_CASES = ('дописывается новый месяц', 'источник
              'сайдкар уровней отсутствует', 'сайдкар без столбца ноги',
              'сайдкар без общих месяцев', 'свежее закрытие завышено поставщиком',
              'свежее закрытие занижено за купонным потолком',
-             'дивидендное окно в допуске', 'свежий знак в дивидендной зоне')
+             'дивидендное окно в допуске', 'свежий знак в дивидендной зоне',
+             'порча промежуточного месяца после пропуска',
+             'уровневая база из одного месяца')
 
 
 def _sig_run(case):
@@ -2505,6 +2679,27 @@ def _sig_run(case):
             else:
                 dfl.index = dfl.index + pd.DateOffset(years=30)
                 dfl.to_csv(lp)
+        if case == 'порча промежуточного месяца после пропуска':
+            # ПРОПУСК НЕСКОЛЬКИХ МЕСЯЦЕВ (семнадцатый круг, №12): сайдкар и живой ряд
+            # отстали на три месяца; поставщик испортил ПРОМЕЖУТОЧНЫЙ месяц только в
+            # скорректированном срезе — старые уровни целы, последний месяц цел, но SMA
+            # свежего решения строится по непроверенной точке.
+            SU.update(ib)
+            os.environ.pop('ADDFUT_LEVELS_BOOTSTRAP', None)
+            lp = live.with_name('signals_levels.csv')
+            pd.read_csv(lp, parse_dates=[0], index_col=0).iloc[:-3].to_csv(lp)
+            pd.read_csv(live, parse_dates=[0], index_col=0).iloc[:-3].to_csv(live)
+            raw_spy = list(bars[spy_id])
+            d_mid, px_mid = bars[spy_id][-2]
+            bars[spy_id][-2] = (d_mid, px_mid * 1.02)
+            ib.set_bars({spy_id: raw_spy, ief_id: list(bars[ief_id])}, what='TRADES')
+            ib.set_bars(bars)
+        if case == 'уровневая база из одного месяца':
+            # Сайдкар из ОДНОЙ строки прежде «проходил» как полноценная база уровней.
+            SU.update(ib)
+            os.environ.pop('ADDFUT_LEVELS_BOOTSTRAP', None)
+            lp = live.with_name('signals_levels.csv')
+            pd.read_csv(lp, parse_dates=[0], index_col=0).iloc[-1:].to_csv(lp)
         out['added'] = SU.update(ib)
         out['rows_after'] = sum(1 for _ in open(live, encoding='utf-8')) - 1
     except Exception as ex:
@@ -2602,6 +2797,21 @@ def _sg12(r):
     """Занижение в пределах купона неотличимо от купона TRADES-срезом; если такой сдвиг
     способен сменить знак — знак стоит в зоне, и автодописывание запрещено."""
     return r['raised'] and 'пограничное' in r['error']
+
+
+@sginv('непроверенный промежуточный месяц отвергается TRADES-срезом',
+       needs=lambda r: r['case'] == 'порча промежуточного месяца после пропуска')
+def _sg13(r):
+    """Семнадцатый круг, №12: сверка одного лишь последнего месяца пропускала порчу
+    внутри пропущенного окна — SMA и свежий знак менялись без единой ошибки."""
+    return r['raised'] and 'разошёлся с независимым' in r['error']
+
+
+@sginv('уровневая база из одного месяца отвергается',
+       needs=lambda r: r['case'] == 'уровневая база из одного месяца')
+def _sg14(r):
+    """Семнадцатый круг, №12: один общий месяц — не база; порог как у сверки битов."""
+    return r['raised'] and 'коротка' in r['error']
 
 
 @sginv('без новых месяцев файл не меняется',

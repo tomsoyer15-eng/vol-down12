@@ -179,13 +179,19 @@ def main():
     import os as _os
     _os.replace(tmp, out)
     _mp = Path(os.environ.get('ADDFUT_MARGINS') or (ROOT / 'live' / 'margins_live.json'))
-    _need_roots = {r0 for r0, _, _ in ROOTS}
-    _got_roots = {k.rstrip('0123456789').rstrip('UZHM') for k in margins}
-    if margins and _got_roots < _need_roots:
-        # ЧАСТИЧНЫЙ ЗАМЕР НЕ ПУБЛИКУЕТСЯ (№2): затереть полный файл половиной значит дать
-        # переходу константы по недостающему корню при, возможно, повышенном требовании.
-        print(f'  замер неполон ({sorted(_got_roots)} из {sorted(_need_roots)}) — '
+    # ПОЛНОТА — ПО СЕРИЯМ, НЕ ПО КОРНЯМ (семнадцатый круг, №8): «хотя бы одна серия
+    # корня» пропускала замер без следующей серии, и после смены реестра переход шёл по
+    # марже прежней; полный замер обязан покрыть КАЖДУЮ FUT-строку реестра.
+    _need_series = {r['instrument'] for r in rows if r['sec_type'] == 'FUT'}
+    if margins and set(margins) < _need_series:
+        print(f'  замер неполон (нет {sorted(_need_series - set(margins))}) — '
               f'margins_live.json сохранён прежним')
+        margins = {}
+    # ЗАМЕР ТОЛЬКО НА ЯВНОМ СЧЁТЕ (семнадцатый круг, №8): при нескольких managed accounts
+    # молчаливый выбор первого публиковал маржу чужого счёта как живую.
+    _accts = ib.managedAccounts() or []
+    if margins and not os.environ.get('ADDFUT_ACCOUNT') and len(_accts) > 1:
+        print(f'  счетов несколько ({_accts}), ADDFUT_ACCOUNT не задан — замер не публикуется')
         margins = {}
     if margins:
         # ПРИВЯЗКА ЗАМЕРА (шестнадцатый круг, №4): дата, счёт и серии — без них старый

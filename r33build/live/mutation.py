@@ -374,6 +374,54 @@ def _adapter_mutations():
             return sorted(out)
         return orig, patched
 
+    def nan_cushion_ok():
+        """NaN в тегах запаса принимается (как было до семнадцатого круга, №7):
+        cushion=NaN, «NaN < 1,40» ложно — сокращение отключено молча."""
+        orig = B.IBBroker.margin_cushion
+
+        def patched(self):
+            vals = (self.ib.accountSummary(self.account) if self.account
+                    else self.ib.accountSummary())
+            ewl = maint = None
+            for v in vals:
+                if v.tag == 'EquityWithLoanValue' and v.currency == 'USD':
+                    ewl = float(v.value)
+                if v.tag == 'MaintMarginReq' and v.currency == 'USD':
+                    maint = float(v.value)
+            if ewl is None:
+                raise B.BrokerError('нет EWL')
+            if not maint:
+                return None
+            return ewl / maint
+        return orig, patched
+
+    def restore_swallows_unknown():
+        """Неизвестность компенсации глотается (как было до семнадцатого круга, №4):
+        except-pass вокруг place, совпавший снимок объявляется восстановлением."""
+        import daily as DLm
+        import state as STm
+        orig = DLm.restore_to
+
+        def patched(broker, target_book, route='F'):
+            stuck = DLm._cancel_all(broker)
+            if stuck:
+                have0 = {k: v for k, v in (broker.net_positions() or {}).items() if v}
+                return False, have0, stuck
+            want = STm.expected_positions(target_book, route)
+            have = {k: v for k, v in (broker.net_positions() or {}).items() if v}
+            for inst in sorted(set(want) | set(have)):
+                d = want.get(inst, 0) - have.get(inst, 0)
+                if d:
+                    try:
+                        broker.place(inst, d)
+                    except Exception:
+                        pass
+            stuck += DLm._cancel_all(broker)
+            have2 = {k: float(v) for k, v in (broker.net_positions() or {}).items() if v}
+            want2 = {k: float(v) for k, v in want.items()}
+            return (have2 == want2 and not stuck), have2, stuck
+        return orig, patched, DLm
+
     def isin_empty_ok():
         """Пустой ISIN реестра пропускается (как было до пятнадцатого круга, №6): строка STK
         без ISIN означала «проверка не нужна», а не повреждённый реестр."""
@@ -398,6 +446,8 @@ def _adapter_mutations():
             ('контракт без сверки личности', '_contract', no_identity_check),
             ('пустой ISIN реестра пропускается', 'verify_isin', isin_empty_ok),
             ('ошибка запроса заявок глотается', 'open_orders', orders_req_swallow),
+            ('неизвестность компенсации глотается', 'restore_to', restore_swallows_unknown),
+            ('NaN-запас О-3-Е принимается', 'margin_cushion', nan_cushion_ok),
             ('Cancelled считается неисполнением', 'place', cancel_is_failure)]
 
 
@@ -438,9 +488,45 @@ def _intent_mutations():
             return book
         return orig, patched
 
+    def snapshot_proves():
+        """Снимок позиций объявляется доказательством «заявок не было», дописанное
+        состояние не распознаётся (как было до семнадцатого круга, №3): барьер исполнений
+        не спрашивается, обрыв между save() и clear_intent() пишет книгу второй раз."""
+        orig = DL._resume_intent
+
+        def patched(ST, bp, cls, route, book, sess, broker, dry_run):
+            import dataclasses as dc
+            it = ST.load_intent(bp)
+            if not it:
+                return book, None
+            if it.get('route') != route:
+                raise RuntimeError('намерение чужого маршрута — ручной разбор')
+            before = cls(**it['book_before'])
+            after = cls(**it['book_after'])
+            pos = broker.net_positions()
+            live = getattr(broker, 'open_orders', lambda: [])()
+            if live:
+                raise RuntimeError(f'живые заявки {live} — О-5')
+            if not ST.reconcile(before, route, pos):
+                if not dry_run:
+                    ST.clear_intent(bp)
+                return book, None
+            if not ST.reconcile(after, route, pos):
+                d = it.get('session_date') or ''
+                after = dc.replace(after, last_session=d or after.last_session,
+                                   close_provisional=True)
+                if dry_run:
+                    return after, d
+                ST.save(bp, after, route, sess + 1, note='принято по снимку (старый разбор)')
+                ST.clear_intent(bp)
+                return after, d
+            raise RuntimeError('промежуточное состояние — О-5')
+        return orig, patched
+
     return [('принятое намерение не завершает сессию', not_finishing),
             ('намерение не разбирается', no_intent),
             ('намеченная книга принимается всегда', adopt_always),
+            ('снимок доказывает отсутствие заявок', snapshot_proves),
             ('намерение всегда снимается', drop_intent_always)]
 
 
@@ -598,6 +684,40 @@ def _run_mutations():
                 ST.book_path = real
         return orig, patched, TRN, 'hand_over_book'
 
+    def no_session_total():
+        """Итоговая строка сессии не пишется (семнадцатый круг, №15 наоборот): журнал
+        выглядит полным при потерянных строках исполнения."""
+        import journal as JJ
+        orig = JJ.append
+
+        def patched(path, row):
+            if row.get('instrument') == 'ИТОГ':
+                return ''
+            return orig(path, row)
+        return orig, patched, JJ, 'append'
+
+    def no_journal_verify():
+        """Журнал не проверяется перед торговлей (как было): правка задним числом молча
+        продолжается новыми строками."""
+        import journal as JJ
+        orig = JJ.verify
+        return orig, (lambda path: 0), JJ, 'verify'
+
+    def o3e_stale_target():
+        """Цель О-3-Е — от капитала ДО расходов сокращения (как было до семнадцатого
+        круга, №16): фактические комиссии не пересчитываются, L остаётся выше 1."""
+        import daily as DLm
+
+        orig = DLm.o3e_reduce
+
+        def patched(capital, m, p_e, p_b, n_eq, n_bd, n0_eq, n0_bd, share):
+            e = float(capital) - DLm.S.COST * (abs(n_eq - n0_eq) * p_e
+                                               + abs(n_bd - n0_bd) * p_b)
+            ne = min(n_eq, n0_eq, DLm.math.floor(share * (1.0 * m.st_eq * e) / p_e))
+            nb = min(n_bd, n0_bd, DLm.math.floor(share * (1.0 * m.st_bd * e) / p_b))
+            return ne, nb, e          # капитал не пересчитан по финальному обороту
+        return orig, patched, DLm, 'o3e_reduce'
+
     def unknown_provable():
         """Неизвестный исход объявляется доказуемо восстановленным (шестнадцатый круг, №5
         наоборот): совпавший снимок засчитывается, ролл автопереносится, состояние пишется."""
@@ -615,6 +735,9 @@ def _run_mutations():
             ('ориентиры не снимаются', no_refs),
             ('отказ по незамкнутой сессии снят', ignore_provisional),
             ('неизвестный исход объявляется восстановленным', unknown_provable),
+            ('цель О-3-Е от старого капитала', o3e_stale_target),
+            ('итог сессии не пишется', no_session_total),
+            ('журнал не проверяется перед торговлей', no_journal_verify),
             ('маршрут игнорируется', force_route_f)]
 
 
@@ -687,22 +810,61 @@ def _transition_mutations():
         return orig, patched, '_live_margins'
 
     def margin_gap_constants():
-        """Дыры существующего замера добираются константами (как было): .get с запасным
-        значением прятал неполноту при, возможно, повышенном требовании."""
+        """Дыры существующего замера добираются константами (как было ДО привязки к
+        сериям): старый разбор файла без _meta и без сверки с реестром плюс .get с
+        запасным значением — неполнота при повышенном требовании пряталась целиком."""
         orig = TRN.book_margin
 
         def patched(book, reg, prices=None):
+            import json as _json
+            import os as _os
+            from pathlib import Path as _P
+            cand = _os.environ.get('ADDFUT_MARGINS')
+            p = _P(cand) if cand else (_P(TRN.__file__).resolve().parent / 'live'
+                                       / 'margins_live.json')
+            lm = {}
+            if p.exists():
+                raw = _json.loads(p.read_text(encoding='utf-8'))
+                raw.pop('_meta', None)
+                for k, v in raw.items():
+                    root = k.rstrip('0123456789').rstrip('UZHM') or k
+                    lm[root] = max(lm.get(root, 0.0),
+                                   float(v.get('maint') or v.get('init')))
             total = 0.0
             for instr, units in book.items():
                 if instr not in reg:
                     raise TRN.Incident(f'{instr}: инструмента нет в реестре')
                 if reg[instr]['sec_type'] == 'FUT':
-                    lm = TRN._live_margins()
                     total += abs(int(units)) * lm.get(instr, TRN.FUT_MARGIN[instr])
                 else:
                     total += abs(int(units)) * float((prices or {})[instr]) * TRN.ETF_MAINT
             return total
         return orig, patched, 'book_margin'
+
+    def partial_ignored():
+        """Частичный прогресс лота выбрасывается (как было до семнадцатого круга, №1):
+        повтор продаёт лот целиком поверх уже исполненной части."""
+        orig = TRN._run_lots
+
+        def patched(broker, plan, st, state_path, lim, unp, dst_bought, fail,
+                    _M=None, journal=None):
+            st.pop('partial', None)
+            return orig(broker, plan, st, state_path, lim, unp, dst_bought, fail,
+                        _M, journal)
+        return orig, patched, '_run_lots'
+
+    def resume_unp_zeroed():
+        """Остаток непарной дельты после resume обнуляется (как было до семнадцатого
+        круга, №2): лимит §8б считается свободным."""
+        orig = TRN._run_lots
+
+        def patched(broker, plan, st, state_path, lim, unp, dst_bought, fail,
+                    _M=None, journal=None):
+            for k in unp:
+                unp[k] = 0.0
+            return orig(broker, plan, st, state_path, lim, unp, dst_bought, fail,
+                        _M, journal)
+        return orig, patched, '_run_lots'
 
     return [('дробность источника не признаётся', no_frac),
             ('лимит непарной дельты снят', limit_off),
@@ -710,6 +872,8 @@ def _transition_mutations():
             ('дробное исполнение фьючерса принимается', frac_fut_ok),
             ('привязка замера маржи отключена', margins_unbound),
             ('дыры замера добираются константами', margin_gap_constants),
+            ('частичный прогресс лота выбрасывается', partial_ignored),
+            ('остаток непарной дельты обнуляется', resume_unp_zeroed),
             ('завершённые лоты исполняются повторно', replay_done)]
 
 
@@ -843,7 +1007,7 @@ def _signal_mutations():
         """Сверка свежего месяца с TRADES отключена (как было до шестнадцатого круга, №3):
         порча последнего закрытия скорректированного ряда проходит молча."""
         orig = SU._verify_fresh
-        return orig, (lambda ib, sym, primary, me: None), '_verify_fresh'
+        return orig, (lambda ib, sym, primary, me, months: None), '_verify_fresh'
 
     def border_fixed():
         """Пограничная зона НЕ расширена до дивидендной границы (как было): занижение
@@ -861,9 +1025,33 @@ def _signal_mutations():
                 raise SU.SignalError(f'{sym}: решение месяца {d:%Y-%m} пограничное')
         return orig, patched, '_verify_border'
 
+    def fresh_last_only():
+        """Сверяется только ПОСЛЕДНИЙ месяц (как было до семнадцатого круга, №12):
+        порча промежуточного месяца пропущенного окна проходит в SMA молча."""
+        orig = SU._verify_fresh
+
+        def patched(ib, sym, primary, me, months):
+            return orig(ib, sym, primary, me, months[-1:] if months else [])
+        return orig, patched, '_verify_fresh'
+
+    def short_base_ok():
+        """Короткая уровневая база принимается (как было): один общий месяц = «база»."""
+        orig = SU._check_levels
+
+        def patched(sym, live, me):
+            try:
+                return orig(sym, live, me)
+            except SU.SignalError as ex:
+                if 'коротка' in str(ex):
+                    return set()
+                raise
+        return orig, patched, '_check_levels'
+
     return [('сверка уровней отключена', levels_off),
             ('частичный сайдкар принимается', partial_ok),
             ('сверка свежего месяца отключена', fresh_off),
+            ('сверяется только последний месяц', fresh_last_only),
+            ('короткая база уровней принимается', short_base_ok),
             ('пограничная зона не расширена', border_fixed),
             ('сверка перекрытия отключена', overlap_off),
             ('потерянный хвост месяца принимается', tail_off)]

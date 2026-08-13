@@ -87,6 +87,18 @@ def _live_margins():
     if not valid:
         raise Incident(f'{rp}: в живом реестре нет фьючерсов — привязка замера маржи '
                        f'непроверяема')
+    # ЗАМЕР ОБЯЗАН ПОКРЫВАТЬ ВСЕ FUT-СЕРИИ РЕЕСТРА (семнадцатый круг, №8): реестр с U26 и
+    # Z26 при замере одной U26 давал переход по марже прежней серии.
+    missing = sorted(valid - set(entries))
+    if missing:
+        raise Incident(f'{p}: замер не покрывает серии реестра {missing} — '
+                       f'перегенерировать first_connect')
+    # СЧЁТ ЗАМЕРА — НАШ (семнадцатый круг, №8): пин задан, чужой замер живым не считается.
+    _pin = _os.environ.get('ADDFUT_ACCOUNT')
+    _macct = (meta or {}).get('account') or ''
+    if _pin and _macct and _macct != _pin:
+        raise Incident(f'{p}: замер снят на счёте {_macct}, торговый счёт {_pin} — '
+                       f'перегенерировать first_connect')
     out = {}
     for k, val in entries.items():
         if k not in valid:
@@ -139,6 +151,12 @@ def target_book(legs):
         # вместо фактических 2 000 000,5 — предстартовая маржа расходилась с планом.
         usd = sum(_units(_i, u)*float(uu) for _i, u, uu in spec['src'])   # переводимая сумма ноги
         units = int(usd // dp)                                    # целые единицы цели (округление вниз)
+        # ПОКУПКА КРОЕТ ОСТАТОК ROUND-ОМ (семнадцатый круг, №11): исполнитель законно
+        # берёт на одну долю больше плана (финальная сверка допускает ±цену цели), и
+        # ворота О-3 обязаны выдержать этот худший разрешённый случай — маржа цели
+        # считается по потолку, а не по полу.
+        if usd - units*dp > TOL:
+            units += 1
         for k, v in mapped_book(di, units).items():
             book[k] = book.get(k, 0) + v
         prices[di] = dp
@@ -146,21 +164,68 @@ def target_book(legs):
             prices['ES'] = dp*10.0; prices['MES'] = dp
     return book, prices
 
-def plan_orders(plan):
-    """Заявок за сессию перехода: каждый лот — продажа источника и покупка цели.
-    Компенсация недобора и откат учитываются запасом в одну заявку на лот."""
-    return 2*len(plan), 3*len(plan)          # (штатно, потолок с компенсациями)
+class _CountBroker:
+    """Считающий брокер: полное исполнение каждой заявки. Оценка числа заявок ведётся ТЕМ ЖЕ
+    кодом, который исполняет (семнадцатый круг, №10): прежняя формула «2 на лот» занижала
+    на порядок — внутри лота лимит §8б дробит исполнение на десятки пар sell/buy."""
 
-def preflight_margin_orders(legs, plan, capital, reg, to_route):
+    def __init__(self):
+        self.n = 0
+
+    def sell_units(self, i, u):
+        self.n += 1
+        return (f'c{self.n}', u)
+
+    def buy_units(self, i, u):
+        self.n += 1
+        return (f'c{self.n}', u)
+
+    def minutes_since(self, k):
+        return 0
+
+    def gross(self):
+        return 0.0
+
+    def open_orders(self):
+        return []
+
+    def cancel_order(self, oid):
+        return True
+
+    def net_positions(self):
+        return {}
+
+
+def plan_orders(plan, legs, lim):
+    """Заявок за сессию перехода — прогоном плана через исполнителя на считающем брокере.
+    Потолок — плюс компенсация/откат по заявке на лот."""
+    import copy
+    import tempfile
+    br = _CountBroker()
+    st = dict(done=[], order_ids=[], log=[], executed_usd=0.0)
+    unp = {name: 0.0 for name in legs}
+    sp = os.path.join(tempfile.mkdtemp(prefix='addfut-plancount-'), 'st.json')
+
+    def _f(msg, cancel=True):
+        raise Incident(f'оценка плана заявок: {msg}')
+
+    _run_lots(br, copy.deepcopy(plan), st, sp, lim, unp, {}, _f)
+    return br.n, br.n + len(plan)
+
+def preflight_margin_orders(legs, plan, capital, reg, to_route, lim=None):
     """Ред. 32: предстартовая проверка книги маршрута-цели.
-    Возвращает сводку; нарушение порога или лимита заявок = Incident до первой заявки."""
+    Возвращает сводку; нарушение порога или лимита заявок = Incident до первой заявки.
+    lim — лимит §8б, УЖЕ ВЫЧИСЛЕННЫЙ исполнителем (с журнальным грантом): пересчёт здесь
+    без гранта ронял preflight там, где исполнение законно (семнадцатый круг, №10)."""
     book, prices = target_book(legs)
     margin = book_margin(book, reg, prices)
     if margin <= 0:
         raise Incident('маржа целевой книги нулевая — план пуст либо книга не распознана')
     cushion = capital/margin
     need = CUSHION_E if to_route == 'E' else CUSHION_F
-    n_ord, n_max = plan_orders(plan)
+    if lim is None:
+        lim = unpaired_limit(legs, capital)
+    n_ord, n_max = plan_orders(plan, legs, lim)
     info = dict(book=book, margin_usd=margin, cushion=cushion, need=need,
                 orders=n_ord, orders_max=n_max, limit=ORDERS_PER_DAY)
     if cushion < need:
@@ -462,7 +527,7 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
                 raise Incident(f'{instr}: позиция класса источника ({qty}) вне плана — книга не переводится целиком')
             if reg[instr]['sec_type'] == want_cls:
                 raise Incident(f'{instr}: предсуществующая позиция класса цели ({qty}) до перехода — требуется разбор')
-    mo = preflight_margin_orders(legs, plan, capital, reg, to_route)   # ред. 32: маржа и заявки ДО открытия
+    mo = preflight_margin_orders(legs, plan, capital, reg, to_route, lim=lim)   # ред. 32: маржа и заявки ДО открытия
     st['preflight'] = {k: mo[k] for k in ('margin_usd', 'cushion', 'orders', 'orders_max')}
     _atomic(state_path, st)
     if not hook('open'):                                      # проверяется ВСЕГДА, включая resume (идемпотентно)
@@ -474,7 +539,15 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
     def fail(msg, cancel=True):
         stuck = []
         if cancel:
-            for oid in broker.open_orders():
+            # СБОЙ САМОГО ЗАПРОСА ЗАЯВОК НЕ РОНЯЕТ АВАРИЙНЫЙ ПУТЬ (семнадцатый круг, №9):
+            # open_orders теперь обязан отказывать, и невыясненность живых заявок — это
+            # НЕСНЯТОЕ по смыслу, исход MIXED, а не сырое исключение мимо hook().
+            try:
+                _open = list(broker.open_orders())
+            except Exception as ex:
+                _open = []
+                stuck.append(f'запрос заявок: {ex}')
+            for oid in _open:
                 # РЕЗУЛЬТАТ ОТМЕНЫ ПРОВЕРЯЕТСЯ (девятая рецензия, №24): прежде он
                 # игнорировался, при живой заявке писался ABORT, pending снимался — а заявка
                 # позже исполнялась сама, уже вне всякого учёта.
@@ -485,7 +558,10 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
                 if not (r is True or (isinstance(r, dict) and r.get('terminal'))):
                     stuck.append(oid)
             if not stuck:
-                still = list(broker.open_orders())
+                try:
+                    still = list(broker.open_orders())
+                except Exception as ex:
+                    still = [f'запрос заявок: {ex}']
                 stuck += still
         try:                                                            # обязательная сверка книги до записи исхода
             now = broker.net_positions(); snap = st['snapshot']
@@ -506,16 +582,30 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         _atomic(state_path, st)
         raise Incident(msg)
 
+    resume_unp = {}
     if resume:
-        for oid in broker.open_orders():                      # ВСЕ открытые: известные и чужие
+        # ВСЕ БРОКЕРСКИЕ ШАГИ RESUME — ПОД АВАРИЙНОЙ ОБОЛОЧКОЙ (семнадцатый круг, №9):
+        # сырое исключение здесь оставляло разорванную книгу без MIXED в журнале.
+        try:
+            _open0 = list(broker.open_orders())               # ВСЕ открытые: известные и чужие
+        except Exception as ex:
+            fail(f'resume: запрос открытых заявок не выполнен ({ex}) — состояние недоказуемо')
+        for oid in _open0:
             # СТРУКТУРНЫЙ ФАКТ ОТМЕНЫ (десятый круг, №7): живой адаптер отдаёт словарь, и
             # строгое «is True» останавливало resume после ПОДТВЕРЖДЁННОЙ отмены; хуже —
             # ранний Incident не писал MIXED при, возможно, уже изменившейся позиции.
-            _r = broker.cancel_order(oid)
+            try:
+                _r = broker.cancel_order(oid)
+            except Exception as ex:
+                fail(f'resume: отмена ордера {oid} оборвана ({ex})')
             if not (_r is True or (isinstance(_r, dict) and _r.get('terminal'))):
                 fail(f'отмена ордера {oid} не подтверждена терминальным статусом')
             st['log'].append(('cancel_on_resume', oid, 0))
-        now = broker.net_positions(); snap = st['snapshot']
+        try:
+            now = broker.net_positions()
+        except Exception as ex:
+            fail(f'resume: позиции недоступны ({ex}) — состояние недоказуемо')
+        snap = st['snapshot']
         src_prog = {}; total_unp = 0.0; total_abs = 0.0
         for name, spec in legs.items():
             di, dp = spec['dst'][0], spec['dst'][1]
@@ -529,32 +619,53 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
             _int_fill(db, di)
             diff = sold_leg - db*dp                       # компенсация СВОЕЙ ногой
             if diff > dp/2 + TOL:
-                oid, f = broker.buy_units(di, int(round(diff/dp)))
+                try:
+                    oid, f = broker.buy_units(di, int(round(diff/dp)))
+                except Exception as ex:
+                    fail(f'{name}: восстановительная покупка {di} оборвана ({ex}) — '
+                         f'исход недоказуем')
                 st['order_ids'].append(oid); diff -= _int_fill(f, di)*dp
                 st['log'].append(('recover_buy', di, f))
             elif diff < -dp/2 - TOL:
-                oid, f = broker.sell_units(di, int(round(-diff/dp)))
+                try:
+                    oid, f = broker.sell_units(di, int(round(-diff/dp)))
+                except Exception as ex:
+                    fail(f'{name}: восстановительная продажа {di} оборвана ({ex}) — '
+                         f'исход недоказуем')
                 st['order_ids'].append(oid); diff += _int_fill(f, di)*dp
                 st['log'].append(('recover_sell', di, f))
             _atomic(state_path, st)
             if abs(diff) > dp + TOL:
                 raise Incident(f'{name}: рассинхрон не компенсирован своей ногой — ручная сверка')
             total_unp += diff; total_abs += abs(diff)
+            resume_unp[name] = diff
         if total_abs > lim + TOL:
             hook('mixed'); _atomic(state_path, st)
             raise Incident('восстановление: |непарная| выше предела — состояние MIXED, ручная сверка')
         st['done'] = []
+        st['partial'] = {}
         acc = {}
         for lot in plan:
             got = src_prog.get(lot['src'], 0) - acc.get(lot['src'], 0)
             if got >= lot['units']:
                 st['done'].append(f"{lot['src']}:{lot['step']}")
                 acc[lot['src']] = acc.get(lot['src'], 0) + lot['units']
+        # ПРОГРЕСС ВНУТРИ ЛОТА НЕ ВЫБРАСЫВАЕТСЯ (семнадцатый круг, №1): проданные 3 из 10
+        # при повторе лота продавались бы заново — источник уходил в короткую на повтор.
+        for name, spec in legs.items():
+            for instr, units, u in spec['src']:
+                left = src_prog.get(instr, 0) - acc.get(instr, 0)
+                if left > 0:
+                    st['partial'][instr] = left
         st['executed_usd'] = max(st.get('executed_usd', 0.0),
             sum(src_prog.get(i, 0)*u for name, spec in legs.items() for i, n, u in spec['src']))
         _atomic(state_path, st)
 
     unp = {name: 0.0 for name in legs}
+    if resume_unp:
+        # ОСТАТОК НЕПАРНОЙ ДЕЛЬТЫ ПЕРЕЖИВАЕТ ВОССТАНОВЛЕНИЕ (семнадцатый круг, №2):
+        # обнуление освобождало лимит §8б, и новый проход строил разрыв поверх старого.
+        unp.update(resume_unp)
     dst_bought = {}
     try:
         _run_lots(broker, plan, st, state_path, lim, unp, dst_bought, fail, _M, journal)
@@ -684,6 +795,20 @@ def _run_lots(broker, plan, st, state_path, lim, unp, dst_bought, fail, _M=None,
         key = f"{lot['src']}:{lot['step']}"
         if key in st['done']: continue
         remaining = lot['units']; noop = 0
+        # ЧАСТИЧНЫЙ ПРОГРЕСС ПРЕРВАННОГО ЛОТА (семнадцатый круг, №1): проданное до обрыва
+        # вычитается из остатка первого незавершённого лота этого источника — повтор
+        # целиком продавал бы уже исполненную часть и уводил источник в короткую.
+        _part = st.get('partial', {}).get(lot['src'], 0)
+        if _part:
+            _take = min(_part, remaining)
+            remaining -= _take
+            st['partial'][lot['src']] = _part - _take
+            st['log'].append(('resume_partial', lot['src'], _take))
+            _atomic(state_path, st)
+            if remaining <= 0:
+                st['done'].append(key)
+                _atomic(state_path, st)
+                continue
         while remaining > 0:
             head = min(lot['dprice'], lot['unit_usd'])/2.0 + 1.0
             # СУММА МОДУЛЕЙ, а не модуль суммы (№25): противоположные разрывы двух ног
@@ -696,8 +821,17 @@ def _run_lots(broker, plan, st, state_path, lim, unp, dst_bought, fail, _M=None,
             avail = lim - used - head
             k_dst = max(1, int(avail // lot['dprice']))          # выравнивание по зерну ЦЕЛИ с зазором
             desired = k_dst*lot['dprice'] - unp[lot['leg']]      # продажа целится в кванты МИНУС текущий остаток
+            k_src = int(avail // lot['unit_usd'])
+            if (used + lot['unit_usd'] > lim + TOL) and not _frac(lot['src']):
+                # МЕСТО ПОД ЦЕЛУЮ ДОЛЮ ИСТОЧНИКА ПРОВЕРЯЕТСЯ ДО ЗАЯВКИ (семнадцатый круг,
+                # №2, вскрыто стендом остатка): прежний «or 1» продавал единицу СВЕРХ
+                # лимита §8б, и Incident приходил уже после ушедшей брокеру заявки.
+                # Мерило — САМ лимит, а не avail с зазором цели: зазор относится к
+                # выравниванию покупки и законную продажу единицы в лимит не запрещает.
+                fail(f'нет места под лимитом §8б даже для одной доли источника '
+                     f'{lot["src"]}: занято ${used:,.0f} из ${lim:,.0f} — заявка не подаётся')
             step = max(1, min(remaining, int(round(desired/lot['unit_usd'])) or 1,
-                              int(avail // lot['unit_usd']) or 1))
+                              k_src or 1))
             # ОСТАТОК МЕНЬШЕ ЕДИНИЦЫ НЕ ОКРУГЛЯЕТСЯ ВВЕРХ. При remaining = 0,5 шаг выходил
             # равным 1: исполнитель продавал целую долю вместо половины и уводил источник
             # в КОРОТКУЮ позицию — ровно то, от чего защищает планировщик, но уже в цикле.

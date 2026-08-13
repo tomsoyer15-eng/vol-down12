@@ -414,6 +414,20 @@ def reference_prices(ib, route='F'):
     return out
 
 
+def e_close_gate(today=None):
+    """Ворота замыкания маршрута Е на ДАТУ: максимум лондонского 16:35 и цюрихского 17:35,
+    приведённых к Чикаго (DST-безопасно). ЕДИНСТВЕННЫЙ источник и для замыкателя, и для
+    автопилота (семнадцатый круг, №5): фиксированное 10:40 в тике ломалось в недели
+    рассинхронизации DST — в марте фактические ворота ~11:35, тик получал отказ «рано» и
+    ставил тревогу вместо ожидания."""
+    import pandas as pd
+    if today is None:
+        today = exchange_today()
+    lon = pd.Timestamp(f'{today:%Y-%m-%d} 16:35', tz='Europe/London').tz_convert(EXCHANGE_TZ)
+    zur = pd.Timestamp(f'{today:%Y-%m-%d} 17:35', tz='Europe/Zurich').tz_convert(EXCHANGE_TZ)
+    return max(lon, zur)
+
+
 def closing_values(ib, route, book):
     """Фактические цены ЗАКРЫТИЯ текущей сессии — для замыкания §1.
 
@@ -431,11 +445,9 @@ def closing_values(ib, route, book):
     if route == 'E':
         # ОТ ФАКТИЧЕСКОГО ЕВРОПЕЙСКОГО ЗАКРЫТИЯ (тринадцатый круг, №4): фиксированные 10:35
         # Чикаго ломаются в недели рассинхронизации DST (США уже перешли, Европа ещё нет —
-        # закрытие уезжает на час, и незавершённый бар шёл в триггер капа). Ворота — макс.
-        # из лондонского 16:35 и цюрихского 17:35, приведённых к Чикаго на СЕГОДНЯ.
-        _lon = pd.Timestamp(f'{today:%Y-%m-%d} 16:35', tz='Europe/London').tz_convert(EXCHANGE_TZ)
-        _zur = pd.Timestamp(f'{today:%Y-%m-%d} 17:35', tz='Europe/Zurich').tz_convert(EXCHANGE_TZ)
-        _gate_ts = max(_lon, _zur)
+        # закрытие уезжает на час, и незавершённый бар шёл в триггер капа). Единый источник
+        # ворот — e_close_gate (его же читает автопилот, семнадцатый круг, №5).
+        _gate_ts = e_close_gate(today)
         ok_time = now >= _gate_ts
         gate = f'{_gate_ts:%H:%M} (европейское закрытие)'
     else:
