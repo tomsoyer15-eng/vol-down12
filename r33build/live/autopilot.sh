@@ -121,7 +121,8 @@ run_trade() {
     echo "$out" >> "$LOG"
     if [ $rc -eq 0 ]; then
         touch "$ST/traded-$day"; log "торговля $day: ок"
-    elif echo "$out" | grep -qE 'не новее'; then
+    elif [ $rc -eq 1 ] && echo "$out" | grep -q 'не новее' \
+         && ! echo "$out" | grep -q 'не совпадает'; then
         # ЕДИНСТВЕННЫЙ штатный отказ — «день уже отторгован». Первая попытка сужения не
         # применилась из-за несовпавшей строки, и это увидела ВНЕШНЯЯ рецензия, а не моя
         # проверка: правка без последующего grep — не правка. Любой другой ОТКАЗ (сигнал,
@@ -137,7 +138,7 @@ run_close() {
     local day=$1 out rc
     out=$(cd "$LIVE" && timeout -k 30 400 "$PY" session.py --close --route "$(route)" 2>&1 | grep -vE '^Error [0-9]+'); rc=$?
     echo "$out" >> "$LOG"
-    if [ $rc -eq 0 ] || echo "$out" | grep -q 'уже замкнута'; then
+    if [ $rc -eq 0 ] || { [ $rc -eq 2 ] && echo "$out" | grep -q 'уже замкнута'; }; then
         touch "$ST/closed-$day"; log "замыкание $day: ок"
         backup_state "$day"
     else
@@ -219,10 +220,29 @@ status() {
     tail -5 "$LOG" 2>/dev/null
 }
 
+guard_manual() {
+    # РУЧНОЙ ВХОД ПРОХОДИТ ТЕ ЖЕ ВОРОТА (четырнадцатый круг, №10): вызов trade в 15:00 по
+    # маршруту Е отправил бы GTC на закрытую Европу, а без sigup — торговлю без сигнала.
+    ls "$ST"/ALARM-*.txt >/dev/null 2>&1 && { echo "стоит ТРЕВОГА — сначала разбор"; return 1; }
+    is_trade_day; [ $? -eq 0 ] || { echo "не торговый день маршрута $(route)"; return 1; }
+    return 0
+}
+
 case "${1:-tick}" in
     tick)   tick ;;
-    trade)  ensure_gw && run_trade "$(chicago %F)" ;;
-    close)  ensure_gw && run_close "$(chicago %F)" ;;
+    trade)
+        guard_manual || exit 1
+        hm=$(chicago %H%M); day=$(chicago %F)
+        { [ "$hm" -ge "$(trade_from)" ] && [ "$hm" -lt "$(trade_till)" ]; } \
+            || { echo "вне торгового окна маршрута $(route)"; exit 1; }
+        mon=$(chicago %Y-%m)
+        [ -e "$ST/sigup-$mon" ] || { echo "сигнал месяца не обновлён (sigup-$mon)"; exit 1; }
+        ensure_gw && run_trade "$day" ;;
+    close)
+        guard_manual || exit 1
+        hm=$(chicago %H%M)
+        [ "$hm" -ge "$(close_after)" ] || { echo "до окна замыкания маршрута $(route)"; exit 1; }
+        ensure_gw && run_close "$(chicago %F)" ;;
     status) status ;;
     *) echo "команды: tick|trade|close|status"; exit 1 ;;
 esac

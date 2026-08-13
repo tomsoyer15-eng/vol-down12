@@ -153,7 +153,10 @@ def main():
         from ib_insync import Contract
         c = Contract(conId=r['con_id'], exchange=r['exchange'])
         ib.qualifyContracts(c)
-        st = ib.whatIfOrder(c, MarketOrder('BUY', 1))
+        _o = MarketOrder('BUY', 1)
+        _acct = os.environ.get('ADDFUT_ACCOUNT') or (ib.managedAccounts() or [''])[0]
+        _o.account = _acct                      # замер — на ПИНОВАННОМ счёте (№3)
+        st = ib.whatIfOrder(c, _o)
         if st and st.initMarginChange:
             margins[r['instrument']] = dict(init=float(st.initMarginChange),
                                             maint=float(st.maintMarginChange))
@@ -176,6 +179,14 @@ def main():
     import os as _os
     _os.replace(tmp, out)
     _mp = Path(os.environ.get('ADDFUT_MARGINS') or (ROOT / 'live' / 'margins_live.json'))
+    _need_roots = {r0 for r0, _, _ in ROOTS}
+    _got_roots = {k.rstrip('0123456789').rstrip('UZHM') for k in margins}
+    if margins and _got_roots < _need_roots:
+        # ЧАСТИЧНЫЙ ЗАМЕР НЕ ПУБЛИКУЕТСЯ (№2): затереть полный файл половиной значит дать
+        # переходу константы по недостающему корню при, возможно, повышенном требовании.
+        print(f'  замер неполон ({sorted(_got_roots)} из {sorted(_need_roots)}) — '
+              f'margins_live.json сохранён прежним')
+        margins = {}
     if margins:
         # атомарно и по тому же адресу, откуда читает переход (тринадцатый круг, №5)
         _tmp = _mp.with_suffix('.json.tmp')

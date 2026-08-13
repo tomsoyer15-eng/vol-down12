@@ -188,6 +188,11 @@ def _commit_levels(live, pending):
         rows = {d: dict(r) for d, r in df.iterrows()}
     for sym, me in pending.items():
         for d, v in me.items():
+            # ЭТАЛОН ЗАМОРОЖЕН (четырнадцатый круг, №7): записанный месяц не обновляется —
+            # иначе поставщик сдвигал бы историю по 0,09% за прогон, и накопленный дрейф
+            # прошёл бы все пороги, ни разу их не нарушив. Дописываются только НОВЫЕ месяцы.
+            if sym in rows.get(d, {}):
+                continue
             rows.setdefault(d, {})[sym] = float(v)
     cols = sorted({c for r in rows.values() for c in r})
     fd, tmp = tempfile.mkstemp(dir=str(lp.parent), suffix='.tmp')

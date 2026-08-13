@@ -362,7 +362,9 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
     roll_any = roll_now or missed_roll
     eq_switch = (m.st_eq != b.prev_st_eq)
     bd_switch = (m.st_bd != b.prev_st_bd)
-    if roll_any or bd_switch:
+    # d_fix — свойство НОГИ Б (четырнадцатый круг, №4): навёрстывание одной лишь ноги А не
+    # смеет менять модельную единицу ZN — иначе полоса и цель Б съезжают без причины.
+    if roll_b or bd_switch:
         b = replace(b, d_fix=m.dref_prev)
 
     u_e, u_b = units(b, m)
@@ -480,7 +482,8 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
             d.roll_pairs.append(dict(leg=leg, close=(held, -n_old), open=(want, n_new)))
             if 'ролл серии' not in d.reasons:
                 d.reasons.append('ролл серии')
-        if held is not None and delivery_risk(held, m.date) and not roll_now:
+        _rolling_this_leg = roll_now or (missed_a if leg == 'А' else missed_b)
+        if held is not None and delivery_risk(held, m.date) and not _rolling_this_leg:
             d.refusals.append(f'нога {leg}: удерживается серия {held}, наступил её месяц '
                               f'поставки — сессия ролла пропущена, требуется ручной разбор (§1)')
 
@@ -836,6 +839,12 @@ def restore_to(broker, target_book, route='F'):
     """
     import state as ST
     stuck = _cancel_all(broker)
+    if stuck:
+        # ЖИВАЯ ЗАЯВКА = НИКАКИХ НОВЫХ ЗАЯВОК (четырнадцатый круг, №1): компенсация поверх
+        # неснятого остатка исполняется вместе с ним, и счёт уезжает на сумму остатка при
+        # «восстановленном» файле. Стоим и зовём человека.
+        have0 = {k: v for k, v in (broker.net_positions() or {}).items() if v}
+        return False, have0, stuck
     want = ST.expected_positions(target_book, route)
     have = {k: v for k, v in (broker.net_positions() or {}).items() if v}
     for inst in sorted(set(want) | set(have)):

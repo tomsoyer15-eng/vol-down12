@@ -62,7 +62,10 @@ def _live_margins():
         out = {}
         for k, v in raw.items():
             root = k.rstrip('0123456789').rstrip('UZHM') or k
-            out[root] = float(v.get('maint') or v.get('init'))
+            val = float(v.get('maint') or v.get('init'))
+            # НЕСКОЛЬКО СЕРИЙ ОДНОГО КОРНЯ — КОНСЕРВАТИВНЫЙ МАКСИМУМ (№8), а не последняя
+            # по порядку JSON: заниженная маржа разрешала бы переход без запаса.
+            out[root] = max(out.get(root, 0.0), val)
     except Exception as ex:
         # ТРИНАДЦАТЫЙ КРУГ, №5: молча подменять живой замер константами нельзя — переход
         # разрешался бы по фиктивному запасу при повышенном house-требовании.

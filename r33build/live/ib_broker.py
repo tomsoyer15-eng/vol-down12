@@ -243,7 +243,8 @@ class IBBroker:
         if not c.conId:
             raise BrokerError(f'{instrument}: con_id {cid} не подтверждён биржей')
         import contracts as CT
-        bad = CT.mismatches(c, self._meta.get(instrument, {}))
+        bad = CT.mismatches(c, self._meta.get(instrument, {})) \
+            + CT.verify_isin(self.ib, c, self._meta.get(instrument, {}))
         if bad:
             raise BrokerError(f'{instrument}: con_id {cid} описывает другой контракт — '
                               f'{"; ".join(bad)}; обновить реестр first_connect.py')

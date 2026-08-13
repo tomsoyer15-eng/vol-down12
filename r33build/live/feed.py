@@ -111,7 +111,7 @@ def contract_of(ib, name, reg=None):
         raise FeedError(f'{name}: нет в реестре — обновить first_connect.py')
     c = Contract(conId=int(reg[name]['con_id']))
     ib.qualifyContracts(c)
-    bad = CT.mismatches(c, reg[name])
+    bad = CT.mismatches(c, reg[name]) + CT.verify_isin(ib, c, reg[name])
     if bad:
         raise FeedError(f'{name}: con_id описывает другой контракт — {"; ".join(bad)}; '
                         f'цена чужого актива легла бы в основу размера книги. '

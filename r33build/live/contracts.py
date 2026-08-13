@@ -9,6 +9,33 @@
 """
 
 
+_ISIN_OK = set()          # con_id, чей ISIN уже подтверждён в этой сессии процесса
+
+
+def verify_isin(ib, c, row):
+    """ISIN сверяется И ПРИ ТОРГОВЛЕ (четырнадцатый круг, №6): реестр мог устареть или быть
+    подменён — conId другой листинговой линии с тем же тикером прошёл бы все полевые
+    проверки. Дорогая (reqContractDetails) проверка кэшируется на процесс."""
+    want = (row.get('isin') or '').strip()
+    if not want or c.conId in _ISIN_OK:
+        return []
+    try:
+        det = ib.reqContractDetails(c)
+    except Exception as ex:
+        return [f'ISIN не проверен: reqContractDetails недоступен ({ex})']
+    got = ''
+    for d in det or []:
+        for x in getattr(d, 'secIdList', None) or []:
+            if getattr(x, 'tag', '') == 'ISIN':
+                got = getattr(x, 'value', '')
+    if not got:
+        return [f'ISIN биржей не подтверждён (ожидался {want})']
+    if got != want:
+        return [f'ISIN {got} вместо {want} — другая листинговая линия']
+    _ISIN_OK.add(c.conId)
+    return []
+
+
 def mismatches(c, row):
     """Чем описание биржи расходится с реестром. Пустой список — совпало."""
     bad = []
