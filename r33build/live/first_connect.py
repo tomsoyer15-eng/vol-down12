@@ -121,6 +121,16 @@ def main():
             print(f'  {sym}: КОНТРАКТ НЕ НАЙДЕН — проверить права на {exch}')
             continue
         d = det[0]
+        # ISIN ПОДТВЕРЖДАЕТСЯ ИЗ БИРЖИ (двенадцатый круг, №7): константа — лишь ожидание.
+        _ids = {x.tagValue2 if hasattr(x, 'tagValue2') else getattr(x, 'value', None):
+                getattr(x, 'tag', None) for x in (getattr(d, 'secIdList', None) or [])}
+        _isin_exch = next((v for v, tg in
+                           ((getattr(x, 'value', ''), getattr(x, 'tag', ''))
+                            for x in (getattr(d, 'secIdList', None) or []))
+                           if tg == 'ISIN'), '')
+        if _isin_exch and _isin_exch != isin:
+            raise SystemExit(f'{sym}: ISIN у биржи {_isin_exch}, ожидался {isin} — '
+                             f'другая листинговая линия, реестр не пишется')
         # secType — КАК ЕГО ВИДИТ БИРЖА (у IBKR фонды — 'STK'); литерал 'ETF' в реестре
         # заставлял сверку личности отвергать НАСТОЯЩИЕ контракты маршрута Е (№14).
         rows.append(dict(instrument=sym, sec_type=d.contract.secType,
@@ -161,8 +171,14 @@ def main():
     pd.DataFrame(rows).to_csv(tmp, index=False)
     import os as _os
     _os.replace(tmp, out)
-    (ROOT / 'live' / 'margins_live.json').write_text(
-        json.dumps(margins, ensure_ascii=False, indent=1), encoding='utf-8')
+    _mp = ROOT / 'live' / 'margins_live.json'
+    if margins:
+        _mp.write_text(json.dumps(margins, ensure_ascii=False, indent=1), encoding='utf-8')
+    else:
+        # ПУСТОЙ ЗАМЕР НЕ ЗАТИРАЕТ ФАКТИЧЕСКИЙ (двенадцатый круг, №4): whatIf на бумажном
+        # шлюзе маржи не возвращает, и прежде файл с живыми замерами обнулялся при каждой
+        # регенерации реестра.
+        print('  маржи предпросмотром не получены — существующий margins_live.json сохранён')
     print(f'\nзаписано: {out} ({len(rows)} строк) и margins_live.json')
 
     acct = {v.tag: v.value for v in ib.accountValues() if v.tag in

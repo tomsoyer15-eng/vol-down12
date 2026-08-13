@@ -310,7 +310,7 @@ d_bad = _Refuse(prices={'ZNU26': 112.0, 'ZNZ26': 112.5}, positions={'ZNU26': 101
 try:
     DL.execute_roll(d_bad, ro_orders, book_before=_bk_old); gap = 'исполнено'
 except DL.RollGap as ex:
-    gap = 'откачен' if 'восстановлена' in str(ex) else 'НЕ ОТКАЧЕН'
+    gap = 'откачен' if 'приведена к исходной' in str(ex) else 'НЕ ОТКАЧЕН'
     _msg = str(ex)
 chk('ролл: отказ на открытии откатывает закрытие, книга не остаётся пустой',
     gap == 'откачен' and d_bad.net_positions().get('ZNU26', 0) == 101,
@@ -418,7 +418,7 @@ la = _LostAck(prices={'ZNU26': 112.0, 'ZNZ26': 112.5}, positions={'ZNU26': 101})
 try:
     DL.execute_roll(la, ro_orders, book_before=_bk_old); lost = 'прошло'
 except DL.RollGap as ex:
-    lost = 'восстановлено' if 'восстановлена в исходном виде' in str(ex) else str(ex)[:50]
+    lost = 'восстановлено' if 'приведена к исходной' in str(ex) else str(ex)[:50]
 chk('ролл: потерянное подтверждение НЕ приводит к повтору и книга восстановлена',
     lost == 'восстановлено' and la.net_positions().get('ZNU26', 0) == 101
     and la.net_positions().get('ZNZ26', 0) == 0,

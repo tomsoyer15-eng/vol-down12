@@ -43,6 +43,28 @@ def mapped_book(instrument, units):
         return out
     return {instrument: units} if units else {}
 
+def _live_margins():
+    """Фактические маржи из margins_live.json (пишет first_connect по замеру постановкой
+    контракта). Двенадцатый круг, №4: preflight считал по константам, и при повышенном
+    house-требовании переход разрешался по фиктивному запасу."""
+    import json as _json
+    import os as _os
+    from pathlib import Path as _P
+    cand = _os.environ.get('ADDFUT_MARGINS')
+    p = _P(cand) if cand else _P(__file__).resolve().parent / 'live' / 'margins_live.json'
+    if not p.exists():
+        return {}
+    try:
+        raw = _json.loads(p.read_text(encoding='utf-8'))
+        out = {}
+        for k, v in raw.items():
+            root = k.rstrip('0123456789').rstrip('UZHM') or k
+            out[root] = float(v.get('maint') or v.get('init'))
+        return out
+    except Exception:
+        return {}
+
+
 def book_margin(book, reg, prices=None):
     """Занятая маржа по фактической книге. Фьючерсы — требование на контракт;
     ETF — поддерживающее требование от стоимости позиции (нужна цена единицы)."""
@@ -53,7 +75,8 @@ def book_margin(book, reg, prices=None):
         if reg[instr]['sec_type'] == 'FUT':
             if instr not in FUT_MARGIN:
                 raise Incident(f'{instr}: нет модельного требования маржи')
-            total += abs(int(units))*FUT_MARGIN[instr]
+            _lm = _live_margins()
+            total += abs(int(units)) * _lm.get(instr, FUT_MARGIN[instr])
         else:
             px = (prices or {}).get(instr)
             if px is None:
@@ -560,8 +583,31 @@ def hand_over_book(broker, from_route, to_route):
     _pb, _prev_sess, _ = _ST2.load(_ST2.book_path(from_route),
                                    _BF if from_route == 'F' else _BE)
     _prev_pending = bool(getattr(_pb, 'roll_pending', False)) if _pb else False
+    # d_fix И СОСТОЯНИЯ СИГНАЛА ПЕРЕЖИВАЮТ ПЕРЕХОД (двенадцатый круг, №2): книга Ф с
+    # d_fix=0 занижала вклад ZN в плечо закрытия вплоть до исключения ноги Б из триггера
+    # капа; пустые prev_st_* выдавали обе ноги за переключившиеся. Состояния берутся из
+    # книги ПРЕЖНЕГО маршрута (они маршрутно-независимы), дюрационная база — из живой
+    # доходности той же формулой, что и в расчётах.
+    _st_eq = getattr(_pb, 'prev_st_eq', None) if _pb else None
+    _st_bd = getattr(_pb, 'prev_st_bd', None) if _pb else None
+    _dfx = 0.0
+    if to_route == 'F':
+        # Иерархия источников d_fix: прежняя книга Ф (если была) -> живая доходность через
+        # брокера -> явная пометка в записи. Требовать .ib у ЛЮБОГО брокера нельзя — стабы
+        # самопроверки его не имеют, и первый же прогон выпуска это показал.
+        try:
+            _oldF, _, _ = _ST2.load(_ST2.book_path('F'), _BF)
+            if _oldF is not None and getattr(_oldF, 'd_fix', 0.0):
+                _dfx = float(_oldF.d_fix)
+        except Exception:
+            pass
+        if not _dfx and getattr(broker, 'ib', None) is not None:
+            import feed as _FD2b
+            _y, _ = _FD2b.yield_pct(broker.ib, _FD2b.exchange_today())
+            _dfx = _FD2b.dref_from_yield(_y / 100.0)
     _bk = _ST2.book_from_broker(_cls, broker.net_positions(), to_route,
-                                roll_pending=_prev_pending)
+                                roll_pending=_prev_pending, d_fix=_dfx,
+                                st_eq=_st_eq, st_bd=_st_bd)
     # ВРЕМЕННАЯ ИСТОРИЯ НЕ СТИРАЕТСЯ. Прежде книга сохранялась с session_no=0 и пустой
     # last_session: защита «сессия не новее последней» и отказ по незамкнутой сессии
     # отключались разом, и сразу после перехода разрешалась ПОВТОРНАЯ торговля тем же днём —

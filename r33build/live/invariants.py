@@ -391,7 +391,10 @@ def _s2c(res):
     # ПОКА ЖИВАЯ ЗАЯВКА ЕСТЬ, ЗАЯВЛЯТЬ О ВОССТАНОВЛЕНИИ НЕЛЬЗЯ. Иначе сообщение говорит
     # «книга восстановлена в исходном виде», а заявка исполнится позже и книгу изменит —
     # ровно тот случай, который сессия объявила бы благополучно закрытым.
-    if 'восстановлена в исходном виде' in msg:
+    # ПРИ ЖИВОЙ ЗАЯВКЕ ЛЮБОЕ заявление о приведении книги ложно — с оговоркой или без:
+    # заявка исполнится позже и книгу изменит. Оговорка «подтверждение сверкой» не
+    # индульгенция (двенадцатый круг: ослабленный вариант пропускал мутацию).
+    if 'приведена к исходной' in msg:
         return False
     return any(k in msg for k in ('заяв', 'О-5', 'ручной разбор'))
 
@@ -892,7 +895,7 @@ def _feed_run(case):
     ib_insync.Index = Idx
     FD.registry = lambda: {r['instrument']: r for r in
                            __import__('csv').DictReader(open(reg, encoding='utf-8'))}
-    FD.signal_state = lambda today, path=None: real_sig(today, path=sig)
+    FD.signal_state = lambda today, path=None, **kw: real_sig(today, path=sig, **kw)
     try:
         px = 7747.5 if case != 'цена ноги А в индексных пунктах' else None
         m, src = FD.build_market(ib, d0, DL.Book(ser_a='U26', ser_b='U26'), route='F')
@@ -1076,7 +1079,7 @@ def _session_run(case):
         FD.registry = lambda: {r['instrument']: r for r in
                                __import__('csv').DictReader(open(reg, encoding='utf-8'))}
         _sig = FD.signal_state
-        FD.signal_state = lambda t, path=None: _sig(t, path=sig)
+        FD.signal_state = lambda t, path=None, **kw: _sig(t, path=sig, **kw)
         # Час выбирается СЦЕНАРИЕМ: замыкание до закрытия биржи обязано быть отвергнуто.
         hour = 9 if case == 'замыкание рано' else 17
         FD.exchange_today = lambda: pd.Timestamp(today)
@@ -1257,7 +1260,7 @@ def _r10(r):
 @rinv('замыкание до закрытия биржи отвергается',
       needs=lambda r: r['case'] == 'замыкание рано')
 def _r7(r):
-    return r['raised'] and 'торги ещё идут' in r['error'] and r['provisional'] is True
+    return r['raised'] and 'НЕ ЗАВЕРШЁН' in r['error'] and r['provisional'] is True
 
 
 @rinv('маршрут Е строит книгу в долях фондов, а не во фьючерсах',
@@ -1316,7 +1319,7 @@ def _session_days(days=('2026-08-12', '2026-08-13', '2026-08-14')):
         FD.registry = lambda: {r['instrument']: r for r in
                                __import__('csv').DictReader(open(reg, encoding='utf-8'))}
         _sig = FD.signal_state
-        FD.signal_state = lambda t, path=None: _sig(t, path=sig)
+        FD.signal_state = lambda t, path=None, **kw: _sig(t, path=sig, **kw)
         os.environ['ADDFUT_DIR'] = tmp
         os.environ['ADDFUT_LOCK_DIR'] = tmp
         os.environ['ADDFUT_REGISTRY'] = str(reg)
@@ -1419,7 +1422,7 @@ def _session_late_fill():
         FD.registry = lambda: {r['instrument']: r for r in
                                __import__('csv').DictReader(open(reg, encoding='utf-8'))}
         _sig = FD.signal_state
-        FD.signal_state = lambda t, path=None: _sig(t, path=sig)
+        FD.signal_state = lambda t, path=None, **kw: _sig(t, path=sig, **kw)
         os.environ['ADDFUT_DIR'] = tmp
         os.environ['ADDFUT_LOCK_DIR'] = tmp
         os.environ['ADDFUT_REGISTRY'] = str(reg)
@@ -1624,7 +1627,7 @@ def _session_route_switch():
         FD.registry = lambda: {r['instrument']: r for r in
                                __import__('csv').DictReader(open(reg, encoding='utf-8'))}
         _sig = FD.signal_state
-        FD.signal_state = lambda t, path=None: _sig(t, path=sig)
+        FD.signal_state = lambda t, path=None, **kw: _sig(t, path=sig, **kw)
         os.environ['ADDFUT_DIR'] = tmp
         os.environ['ADDFUT_LOCK_DIR'] = tmp
         os.environ['ADDFUT_REGISTRY'] = str(reg)
@@ -2145,7 +2148,8 @@ def sginv(name, needs=None):
 
 
 SIG_CASES = ('дописывается новый месяц', 'источник разошёлся с историей',
-             'хвост месяца потерян', 'новых месяцев нет', 'уровни пересчитаны поставщиком')
+             'хвост месяца потерян', 'новых месяцев нет', 'уровни пересчитаны поставщиком',
+             'сайдкар уровней отсутствует')
 
 
 def _sig_run(case):
@@ -2175,6 +2179,8 @@ def _sig_run(case):
     out = dict(case=case, raised=False, error='', added=None, rows_after=None)
     try:
         os.environ['ADDFUT_SIGNALS'] = str(live)
+        if case != 'сайдкар уровней отсутствует':
+            os.environ['ADDFUT_LEVELS_BOOTSTRAP'] = '1'
         FD.exchange_today = lambda: pd.Timestamp('2026-08-13')
         eq = SU.states(SU.monthly_adjusted(ib, 'SPY', 'ARCA'))
         bd = SU.states(SU.monthly_adjusted(ib, 'IEF', 'NASDAQ'))
@@ -2202,6 +2208,7 @@ def _sig_run(case):
         out['error'] = f'{type(ex).__name__}: {ex}'
     finally:
         os.environ.pop('ADDFUT_SIGNALS', None)
+        os.environ.pop('ADDFUT_LEVELS_BOOTSTRAP', None)
         if keep_env is not None:
             os.environ['ADDFUT_SIGNALS'] = keep_env
         FD.exchange_today = keep_today
@@ -2235,6 +2242,14 @@ def _sg5(r):
     """Биты «закрытие>SMA» совпадают, а уровни разошлись сверх общего множителя — ровно
     случай, который сверка битов пропускает (десятый круг, №9)."""
     return r['raised'] and 'УРОВНИ' in r['error']
+
+
+@sginv('без сайдкара уровней обновление отвергается',
+       needs=lambda r: r['case'] == 'сайдкар уровней отсутствует')
+def _sg6(r):
+    """Двенадцатый круг, №6: без уровней сверка сводится к 12 битам и закрепляет уехавший
+    источник как норму; первый запуск — только явным разрешением оператора."""
+    return r['raised'] and 'сайдкара уровней' in r['error']
 
 
 @sginv('без новых месяцев файл не меняется',
@@ -2325,7 +2340,7 @@ def run_sessions():
                                                  closing_nav=10_000_000.0,
                                                  book_path=str(sp))
             except DL.RollGap as ex:
-                raised = True; rollback = 'восстановлена в исходном виде' in str(ex)
+                raised = True; rollback = 'приведена к исходной' in str(ex)
                 err = str(ex)
             except Exception as ex:
                 raised = True; err = str(ex)

@@ -39,6 +39,24 @@ def main():
     h = hashlib.sha256(Z.read_bytes()).hexdigest()
     with tempfile.TemporaryDirectory() as t:
         zipfile.ZipFile(Z).extractall(t)
+        # НЕЗАВИСИМАЯ СВЕРКА ХЭШЕЙ ДО ЗАПУСКА ПРОВЕРЯЮЩЕГО (двенадцатый круг, №8):
+        # selfcheck сам исключает себя из уровня 0б, и изменённый проверяющий код мог бы
+        # заверить сам себя. Здесь release, а не selfcheck, сверяет КАЖДЫЙ файл архива —
+        # включая selfcheck_v192.py — с манифестом, и только затем исполняет его.
+        man = Path(t) / 'MANIFEST-192.txt'
+        bad = []
+        for ln in man.read_text(encoding='utf-8').splitlines():
+            mm = re.match(r'^([0-9a-f]{64})\s+(\S+)$', ln.strip())
+            if not mm:
+                continue
+            fp = Path(t) / mm.group(2)
+            if not fp.exists():
+                bad.append(f'{mm.group(2)}: отсутствует'); continue
+            if hashlib.sha256(fp.read_bytes()).hexdigest() != mm.group(1):
+                bad.append(f'{mm.group(2)}: хэш не совпал')
+        if bad:
+            sys.exit('ВЫПУСК НЕ СОСТОЯЛСЯ: архив расходится с манифестом ДО запуска '
+                     'проверяющего: ' + '; '.join(bad[:6]))
         r = subprocess.run([str(PY), 'selfcheck_v192.py'], cwd=t, capture_output=True, text=True)
         tail = (r.stdout or r.stderr).strip().splitlines()[-1:]
     ok = r.returncode == 0 and 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' in (r.stdout or '')

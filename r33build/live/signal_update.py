@@ -132,7 +132,13 @@ def _check_levels(sym, live, me):
     import pandas as pd
     lp = _levels_path(live)
     if not lp.exists():
-        return
+        # ОТСУТСТВИЕ САЙДКАРА — ОТКАЗ (двенадцатый круг, №6): без уровней сверка сводится к
+        # 12 битам, и уехавший источник закреплялся бы как новая норма. Первый запуск —
+        # только явным разрешением оператора.
+        if os.environ.get('ADDFUT_LEVELS_BOOTSTRAP') == '1':
+            return
+        raise SignalError(f'нет сайдкара уровней {lp}: сверка только по битам запрещена; '
+                          f'первый запуск — с ADDFUT_LEVELS_BOOTSTRAP=1')
     df = pd.read_csv(lp, parse_dates=[0], index_col=0)
     if sym not in df.columns:
         return

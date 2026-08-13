@@ -866,7 +866,7 @@ def execute_roll(broker, orders, book_before=None, route='F', ref_prices=None):
                           f'требуется ручной разбор (О-5)')
         ok, have, stuck = restore_to(broker, book_before, route)
         if ok:
-            raise RollGap(f'{msg}; книга восстановлена в исходном виде, ролл переносится '
+            raise RollGap(f'{msg}; книга приведена к исходной ПО ДОСТУПНЫМ ДАННЫМ (подтверждение — сверкой следующей сессии), ролл переносится '
                           f'на следующую сессию')
         raise RollGap(f'{msg}; ВОССТАНОВИТЬ НЕ УДАЛОСЬ: у брокера {have}, неснятых заявок '
                       f'{len(stuck)} — требуется ручной разбор (О-5)')
@@ -1009,7 +1009,7 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                 except RollGap as gap:
                     # ОТКАЧЕННЫЙ РОЛЛ ДОЛЖЕН ПОВТОРИТЬСЯ. День ролла один; без отметки
                     # перенос не состоялся бы никогда, и книга дожила бы до поставки.
-                    if 'восстановлена в исходном виде' in str(gap):
+                    if 'приведена к исходной' in str(gap):
                         ST.save(bp, replace(book, roll_pending=True), route, sess + 1,
                                 note=f'ролл отложен: {gap}')
                     raise
@@ -1026,7 +1026,7 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                         ok_r, have_r, stuck_r = restore_to(broker, book, route)
                         raise RuntimeError(
                             f'{inst} {qty:+d}: {ex} (статус НЕИЗВЕСТЕН, повтор не '
-                            f'выполняется); ' + ('книга восстановлена в исходном виде, '
+                            f'выполняется); ' + ('книга приведена к исходной ПО ДОСТУПНЫМ ДАННЫМ (подтверждение — сверкой следующей сессии), '
                             'сессия переносится' if ok_r else
                             f'ВОССТАНОВИТЬ НЕ УДАЛОСЬ: у брокера {have_r}, неснятых заявок '
                             f'{len(stuck_r)} — ручной разбор (О-5)'))
@@ -1048,7 +1048,7 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                         ok_r, have_r, stuck_r = restore_to(broker, book, route)
                         raise RuntimeError(
                             f'{inst}: заявка {qty:+d}, исполнено {rec.get("filled")}; ' +
-                            ('книга восстановлена в исходном виде, сессия переносится'
+                            ('книга приведена к исходной ПО ДОСТУПНЫМ ДАННЫМ (окончательное подтверждение — входной сверкой следующей сессии), сессия переносится'
                              if ok_r else f'ВОССТАНОВИТЬ НЕ УДАЛОСЬ: у брокера {have_r} — '
                              f'ручной разбор (О-5)'))
         if journal_path:

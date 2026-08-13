@@ -229,7 +229,7 @@ def yield_pct(ib, today, expected_prev=None):
     return y / 10.0, d               # TNX котируется в десятых долях процента
 
 
-def signal_state(today, path=None):
+def signal_state(today, path=None, holidays=None):
     """Состояние сигнала §1 на сессию — из месячного ряда, без ежедневного пересчёта.
 
     КОНВЕНЦИЯ РЯДА ДОКАЗАНА НА ИСТОРИИ (2022, 12/12): строка помечена месяцем ДЕЙСТВИЯ, а
@@ -267,7 +267,8 @@ def signal_state(today, path=None):
     # переключение исполняется второй. Живая читалка без этого сдвига расходилась бы с
     # доказанной историей ровно на день при каждом переключении (девятая рецензия, №2).
     import daily as _DL
-    hol = _DL.holidays_for(t.year)
+    # календарь МАРШРУТА (двенадцатый круг, №5): для Е подаются европейские праздники
+    hol = holidays if holidays is not None else _DL.holidays_for(t.year)
     if prev_session(t, hol).month != t.month:
         t = t - pd.offsets.MonthEnd(1)
     cur = df[(df.index.year == t.year) & (df.index.month == t.month)]
@@ -303,7 +304,14 @@ def build_market(ib, today, book, *, route='F', roll_today=None, roll_passed=Non
         hol = DL.holidays_for(d0.year, d0.year + 1)
     except RuntimeError:
         hol = DL.holidays_for(d0.year)
-    st_eq, st_bd, sig_date, age = signal_state(d0)
+    if route == 'E':
+        try:
+            _sig_hol = eu_holidays(d0.year, d0.year + 1)
+        except FeedError:
+            _sig_hol = eu_holidays(d0.year)
+    else:
+        _sig_hol = hol
+    st_eq, st_bd, sig_date, age = signal_state(d0, holidays=_sig_hol)
     reg = registry()
     for name, row in reg.items():
         root = ''.join(ch for ch in name if ch.isalpha())
@@ -415,10 +423,19 @@ def closing_values(ib, route, book):
     """
     import pandas as pd
     now = pd.Timestamp.now(tz=EXCHANGE_TZ)
-    if now.hour < CLOSE_AFTER_H:
-        raise FeedError(f'сейчас {now:%H:%M} по бирже ({EXCHANGE_TZ}) — торги ещё идут; '
-                        f'дневной бар с сегодняшней датой существует, но НЕ ЗАВЕРШЁН. '
-                        f'Замыкание возможно после {CLOSE_AFTER_H}:00')
+    # ВОРОТА ПО МАРШРУТУ (двенадцатый круг, №3): Е замыкается ПОСЛЕ ЕВРОПЕЙСКОГО закрытия
+    # (~10:30 Чикаго), а не после американского — прежнее безусловное «после 16:00» делало
+    # заявленное окно Е технически недостижимым: первый же вызов в 10:40 падал, ставил
+    # тревогу и оставлял маржинальную книгу без ежедневного управления.
+    if route == 'E':
+        ok_time = now.hour > 10 or (now.hour == 10 and now.minute >= 35)
+        gate = '10:35'
+    else:
+        ok_time = now.hour >= CLOSE_AFTER_H
+        gate = f'{CLOSE_AFTER_H}:00'
+    if not ok_time:
+        raise FeedError(f'сейчас {now:%H:%M} по бирже ({EXCHANGE_TZ}) — торги маршрута ещё '
+                        f'идут; дневной бар существует, но НЕ ЗАВЕРШЁН. Замыкание после {gate}')
     today = exchange_today()
     reg = registry()
     if route == 'E':
