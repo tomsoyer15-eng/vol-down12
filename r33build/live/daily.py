@@ -362,8 +362,12 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
     roll_any = roll_now or missed_roll
     eq_switch = (m.st_eq != b.prev_st_eq)
     bd_switch = (m.st_bd != b.prev_st_bd)
-    # d_fix — свойство НОГИ Б (четырнадцатый круг, №4): навёрстывание одной лишь ноги А не
-    # смеет менять модельную единицу ZN — иначе полоса и цель Б съезжают без причины.
+    # d_fix — свойство НОГИ Б (четырнадцатый круг, №4; уточнение пятнадцатого, №1):
+    # перефиксация — роллом ноги Б ИЛИ переключением её сигнала (bd_switch), В ТОЧНОСТИ как
+    # в замороженном движке (sim_v164: «if roll_today or bd_switch»). Формулировка
+    # четырнадцатого круга «только роллом» была неточной: включение Б после паузы обязано
+    # брать СВЕЖУЮ дюрацию — старая d_fix могла устареть на годы. Навёрстывание одной лишь
+    # ноги А единицу ZN по-прежнему не трогает.
     if roll_b or bd_switch:
         b = replace(b, d_fix=m.dref_prev)
 
@@ -432,7 +436,10 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
             ea = e - S.COST * ((abs(ne - n0_e) - abs(n_e - n0_e)) * u_e +
                                (abs(nb - n0_b) - abs(n_b - n0_b)) * u_b)
             if roll_any:
-                ea -= S.ROLL_BP * (ne * u_e + nb * u_b)
+                # ПО РОЛЛЯЩИМСЯ НОГАМ (пятнадцатый круг, №2): просрочка одной ноги не
+                # списывает стоимость переноса с исправной.
+                ea -= S.ROLL_BP * ((ne * u_e if roll_a else 0.0) +
+                                   (nb * u_b if roll_b else 0.0))
             return ea
 
         def breach(ne, nb):
@@ -460,8 +467,11 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
     # ПО roll_now, А НЕ ПО КАЛЕНДАРНОМУ ФЛАГУ. Отложенный ролл (roll_pending) переносил
     # серию, но стоимость переноса НЕ списывалась: капитал и доступное плечо завышались,
     # и пограничная книга получала на контракт больше положенного.
+    # И ПО КАЖДОЙ НОГЕ ОТДЕЛЬНО (пятнадцатый круг, №2): при просрочке одной лишь Б прежний
+    # код списывал ролл и с исправной А — фиктивно занижая капитал и цель. В квартальный
+    # ролл roll_a=roll_b=True, поэтому с замороженным движком расхождения нет.
     if roll_any:
-        e -= S.ROLL_BP * (exp_e + exp_b)
+        e -= S.ROLL_BP * ((exp_e if roll_a else 0.0) + (exp_b if roll_b else 0.0))
 
     if n_e != n0_e:
         d.orders['А'] = n_e - n0_e

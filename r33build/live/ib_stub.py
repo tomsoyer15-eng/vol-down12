@@ -38,16 +38,20 @@ from typing import NamedTuple
 # рабочем каталоге. Здесь набор фиксирован и самодостаточен.
 FIXTURE_ROWS = [
     dict(instrument='ESU26', sec_type='FUT', pair_group='EQ', exchange='CME', currency='USD',
-         con_id='900001', local_symbol='ESU6', expiry='20260918', multiplier='50'),
+         con_id='900001', local_symbol='ESU6', expiry='20260918', multiplier='50', isin=''),
     dict(instrument='MESU26', sec_type='FUT', pair_group='EQ', exchange='CME', currency='USD',
-         con_id='900002', local_symbol='MESU6', expiry='20260918', multiplier='5'),
+         con_id='900002', local_symbol='MESU6', expiry='20260918', multiplier='5', isin=''),
     dict(instrument='ZNU26', sec_type='FUT', pair_group='BOND', exchange='CBOT', currency='USD',
-         con_id='900003', local_symbol='ZNU6', expiry='20260921', multiplier='1000'),
+         con_id='900003', local_symbol='ZNU6', expiry='20260921', multiplier='1000', isin=''),
     # У IBKR фонды — 'STK': литерал 'ETF' в фикстуре скрывал от стендов дефект №14.
+    # ISIN у STK обязателен (пятнадцатый круг, №6) — как в боевом реестре first_connect;
+    # фьючерсам ISIN не положен, пустое поле для них штатно.
     dict(instrument='CSPX', sec_type='STK', pair_group='EQ', exchange='SMART', currency='USD',
-         con_id='900004', local_symbol='CSPX', expiry='', multiplier=''),
+         con_id='900004', local_symbol='CSPX', expiry='', multiplier='',
+         isin='IE00B5BMR087'),
     dict(instrument='CBU0', sec_type='STK', pair_group='BOND', exchange='SMART', currency='USD',
-         con_id='900005', local_symbol='CSBGU0', expiry='', multiplier=''),
+         con_id='900005', local_symbol='CSBGU0', expiry='', multiplier='',
+         isin='IE00B3VWN518'),
 ]
 FIXTURE_COLS = list(FIXTURE_ROWS[0])
 
@@ -207,6 +211,22 @@ class StubIB:
                         exchange=r.get('exchange', ''), currency=r.get('currency', 'USD'),
                         lastTradeDateOrContractMonth=str(r.get('expiry', '')),
                         multiplier=str(r.get('multiplier', '')))
+
+    def reqContractDetails(self, c):
+        """Личность по бирже: ISIN отдаётся в secIdList — как настоящий шлюз. Строка без
+        ISIN (фьючерс) даёт пустой список тегов; verify_isin до этого вызова для FUT и не
+        доходит, но полнота ответа — забота стаба, не проверяющего."""
+        r = self.rows.get(getattr(c, 'conId', 0))
+        if r is None:
+            return []
+
+        class _Tag:
+            tag = 'ISIN'
+            value = (r.get('isin') or '').strip()
+
+        class _Det:
+            secIdList = [_Tag()] if _Tag.value else []
+        return [_Det()]
 
     AUX = {'SPY': 900010, 'IEF': 900011}     # инструменты сигналов и цены ноги А
 

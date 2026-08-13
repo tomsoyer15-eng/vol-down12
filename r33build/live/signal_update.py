@@ -161,12 +161,21 @@ def _check_levels(sym, live, me):
         raise SignalError(f'нет сайдкара уровней {lp}: сверка только по битам запрещена; '
                           f'первый запуск — с ADDFUT_LEVELS_BOOTSTRAP=1')
     df = pd.read_csv(lp, parse_dates=[0], index_col=0)
+    # ЧАСТИЧНЫЙ САЙДКАР — ТОЖЕ ОТКАЗ (пятнадцатый круг, №5): файл без столбца нужной ноги
+    # или без общих месяцев по силе равен отсутствующему — сверка уровней молча выключалась,
+    # оставляя слабые 12 битов. Повреждение опубликованного сайдкара — не повод доверять.
     if sym not in df.columns:
-        return
+        if os.environ.get('ADDFUT_LEVELS_BOOTSTRAP') == '1':
+            return
+        raise SignalError(f'сайдкар {lp} не содержит столбца {sym}: сверка уровней этой '
+                          f'ноги невозможна; починка файла или ADDFUT_LEVELS_BOOTSTRAP=1')
     old = df[sym].dropna().to_dict()
     common = [d for d in me.index if d in old]
     if not common:
-        return
+        if os.environ.get('ADDFUT_LEVELS_BOOTSTRAP') == '1':
+            return
+        raise SignalError(f'сайдкар {lp}: по {sym} нет общих месяцев с рядом поставщика — '
+                          f'база сравнения пуста; починка файла или ADDFUT_LEVELS_BOOTSTRAP=1')
     ratios = [me.loc[d] / old[d] for d in common]
     k = sorted(ratios)[len(ratios) // 2]
     bad = [f'{d:%Y-%m}: {me.loc[d]/old[d]/k-1:+.3%}' for d in common

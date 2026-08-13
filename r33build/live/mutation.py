@@ -354,6 +354,18 @@ def _adapter_mutations():
             return r
         return orig, patched
 
+    def isin_empty_ok():
+        """Пустой ISIN реестра пропускается (как было до пятнадцатого круга, №6): строка STK
+        без ISIN означала «проверка не нужна», а не повреждённый реестр."""
+        import contracts as CT
+        orig = CT.verify_isin
+
+        def patched(ib, c, row):
+            if not (row.get('isin') or '').strip():
+                return []
+            return orig(ib, c, row)
+        return orig, patched, CT
+
     return [('дробная доля усекается до целого', 'place', truncating_place),
             ('исполнения по orderId, не по permId', '_executed', orderid_matching),
             ('позиции одним снимком', 'refresh', single_snapshot),
@@ -364,6 +376,7 @@ def _adapter_mutations():
             ('отмена по инструменту, а не по метке', 'cancel_order', cancel_by_instrument),
             ('барьер отчётов об исполнении снят', '_exec_barrier', no_exec_barrier),
             ('контракт без сверки личности', '_contract', no_identity_check),
+            ('пустой ISIN реестра пропускается', 'verify_isin', isin_empty_ok),
             ('Cancelled считается неисполнением', 'place', cancel_is_failure)]
 
 
@@ -689,8 +702,29 @@ def _roll_mutations():
             return orig(held, m) or orig('U26', m)   # U26 просрочен в сентябре 2026
         return orig, patched2, DL, 'leg_roll_overdue'
 
+    def roll_cost_both():
+        """Стоимость переноса списывается с ОБЕИХ ног (как было до пятнадцатого круга, №2):
+        при просрочке одной лишь Б исправная А тоже «платит» за ролл."""
+        orig = DL.step
+
+        def patched(book, m, capital, **kw):
+            d = orig(book, m, capital, **kw)
+            if d.refusals:
+                return d
+            rn = bool(m.roll_today) or bool(getattr(book, 'roll_pending', False))
+            ra = rn or ((not rn) and DL.leg_roll_overdue(book.ser_a, m))
+            rb = rn or ((not rn) and DL.leg_roll_overdue(book.ser_b, m))
+            if ra != rb:                     # роллится ровно одна — добираем с исправной
+                ba = d.book_after
+                ue, ub = DL.units(ba, m)
+                d.capital_after_costs -= DL.S.ROLL_BP * (
+                    (ba.n_e * ue) if not ra else (ba.n_b * ub))
+            return d
+        return orig, patched, DL, 'step'
+
     return [('просрочка одной ноги роллит обе', global_overdue),
             ('навёрстывание видит только ногу А', ser_a_only),
+            ('стоимость ролла списывается с обеих ног', roll_cost_both),
             ('признак отложенного ролла теряется', pending_lost),
             ('признак ролла не гаснет', pending_sticky),
             ('праздники не учитываются', holidays_off)]
@@ -715,7 +749,22 @@ def _signal_mutations():
         orig = SU._check_levels
         return orig, (lambda sym, live, me: None), '_check_levels'
 
+    def partial_ok():
+        """Частичный сайдкар принимается (как было до пятнадцатого круга, №5): нет столбца
+        ноги или общих месяцев — молчаливый возврат к слабым 12 битам."""
+        orig = SU._check_levels
+
+        def patched(sym, live, me):
+            try:
+                return orig(sym, live, me)
+            except SU.SignalError as ex:
+                if 'столбца' in str(ex) or 'общих месяцев' in str(ex):
+                    return None
+                raise
+        return orig, patched, '_check_levels'
+
     return [('сверка уровней отключена', levels_off),
+            ('частичный сайдкар принимается', partial_ok),
             ('сверка перекрытия отключена', overlap_off),
             ('потерянный хвост месяца принимается', tail_off)]
 
@@ -934,12 +983,16 @@ def run_adapter_mutations():
     _ = []
     print(f"\n{'мутация адаптера':<40}{'поймана':>9}  какими утверждениями")
     for label, attr, make in _adapter_mutations():
-        orig, patched = make()
-        setattr(B.IBBroker, attr, patched)
+        got = make()
+        # Носитель по умолчанию — класс адаптера; мутация может назвать свой модуль
+        # (сверка личности живёт в contracts и патчится там, где её ищут вызовы).
+        orig, patched = got[0], got[1]
+        holder = got[2] if len(got) == 3 else B.IBBroker
+        setattr(holder, attr, patched)
         try:
             _, bad = I.run_adapter()
         finally:
-            setattr(B.IBBroker, attr, orig)
+            setattr(holder, attr, orig)
         killers = ', '.join(sorted(bad))[:70]
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {killers}')
         if not bad:

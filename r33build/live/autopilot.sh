@@ -121,8 +121,18 @@ run_trade() {
     echo "$out" >> "$LOG"
     if [ $rc -eq 0 ]; then
         touch "$ST/traded-$day"; log "торговля $day: ок"
-    elif [ $rc -eq 1 ] && echo "$out" | grep -q 'не новее' \
-         && ! echo "$out" | grep -q 'не совпадает'; then
+    elif "$PY" - "$day" <<'BK' >/dev/null 2>&1
+import json, sys
+from pathlib import Path
+rt = (Path.home() / '.addfut' / 'route.txt')
+route = rt.read_text().strip() if rt.exists() else 'F'
+b = json.load(open(Path.home() / '.addfut' / f'book-{route}.json'))['payload']['book']
+sys.exit(0 if b.get('last_session') == sys.argv[1] else 1)
+BK
+    then
+        # ШТАТНОСТЬ — ПО КНИГЕ (пятнадцатый круг, №3): день считается отторгованным, если
+        # книга несёт СЕГОДНЯШНЮЮ дату. Фразы и коды возврата хрупки: реальный повтор дал
+        # rc=2 «не замкнута», а не ожидавшийся rc=1 «не новее».
         # ЕДИНСТВЕННЫЙ штатный отказ — «день уже отторгован». Первая попытка сужения не
         # применилась из-за несовпавшей строки, и это увидела ВНЕШНЯЯ рецензия, а не моя
         # проверка: правка без последующего grep — не правка. Любой другой ОТКАЗ (сигнал,
@@ -131,6 +141,7 @@ run_trade() {
     else
         echo "$out" > "$ST/ALARM-trade-$day.txt"
         log "ТРЕВОГА торговли $day (код $rc) — автопилот остановлен до ручного разбора"
+        return 1
     fi
 }
 
@@ -138,12 +149,24 @@ run_close() {
     local day=$1 out rc
     out=$(cd "$LIVE" && timeout -k 30 400 "$PY" session.py --close --route "$(route)" 2>&1 | grep -vE '^Error [0-9]+'); rc=$?
     echo "$out" >> "$LOG"
-    if [ $rc -eq 0 ] || { [ $rc -eq 2 ] && echo "$out" | grep -q 'уже замкнута'; }; then
+    _closed_ok=0
+    if [ $rc -ne 0 ]; then
+        "$PY" - <<'BK2' >/dev/null 2>&1 && _closed_ok=1
+import json, sys
+from pathlib import Path
+rt = (Path.home() / '.addfut' / 'route.txt')
+route = rt.read_text().strip() if rt.exists() else 'F'
+b = json.load(open(Path.home() / '.addfut' / f'book-{route}.json'))['payload']['book']
+sys.exit(0 if not b.get('close_provisional', True) else 1)
+BK2
+    fi
+    if [ $rc -eq 0 ] || [ "$_closed_ok" = 1 ]; then
         touch "$ST/closed-$day"; log "замыкание $day: ок"
         backup_state "$day"
     else
         echo "$out" > "$ST/ALARM-close-$day.txt"
         log "ТРЕВОГА замыкания $day (код $rc)"
+        return 1
     fi
 }
 
@@ -200,13 +223,30 @@ backup_state() {
     mkdir -p "$bdir"
     if tar -czf "$bdir/.addfut-$day-$stamp.tmp" -C "$HOME" \
         --exclude='.addfut/ibgw.env' --exclude='.addfut/zoneinfo' \
-        --exclude='.addfut/*.lock' .addfut 2>/dev/null; then
-        mv "$bdir/.addfut-$day-$stamp.tmp" "$bdir/addfut-$day-$stamp.tgz"
+        --exclude='.addfut/*.lock' .addfut 2>/dev/null \
+       && mv "$bdir/.addfut-$day-$stamp.tmp" "$bdir/addfut-$day-$stamp.tgz"; then
         log "резервная копия состояния: addfut-$day-$stamp.tgz"
-        /bin/bash /home/alex/claude-projects/vol-down12/tools/backup_push.sh
+        # ВНЕШНЯЯ ВЫГРУЗКА ПОД ПРОВЕРКОЙ (пятнадцатый круг, №7): разовый сбой сети — не
+        # тревога (локальная копия есть, догонит следующим замыканием), но три подряд
+        # означают, что внешних копий давно нет, — стоим до ручного разбора.
+        if /bin/bash /home/alex/claude-projects/vol-down12/tools/backup_push.sh >>"$LOG" 2>&1; then
+            rm -f "$ST/push-fails"
+        else
+            local pf=0
+            [ -f "$ST/push-fails" ] && pf=$(cat "$ST/push-fails")
+            pf=$((pf + 1)); echo "$pf" > "$ST/push-fails"
+            log "внешняя выгрузка копий не удалась ($pf подряд)"
+            if [ "$pf" -ge 3 ]; then
+                echo "backup_push.sh не удаётся $pf замыканий подряд — внешних копий нет" > "$ST/ALARM-push.txt"
+                log "ТРЕВОГА: внешние копии не выгружаются — автопилот остановлен"
+                return 1
+            fi
+        fi
     else
         rm -f "$bdir/.addfut-$day-$stamp.tmp"
-        log "ТРЕВОГА: резервная копия $day не создана"
+        echo "tar не создал копию состояния за $day" > "$ST/ALARM-backup-$day.txt"
+        log "ТРЕВОГА: резервная копия $day не создана — автопилот остановлен"
+        return 1
     fi
     ls -1t "$bdir"/addfut-*.tgz 2>/dev/null | tail -n +61 | xargs -r rm -f
 }

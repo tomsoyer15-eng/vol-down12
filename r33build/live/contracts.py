@@ -17,7 +17,15 @@ def verify_isin(ib, c, row):
     подменён — conId другой листинговой линии с тем же тикером прошёл бы все полевые
     проверки. Дорогая (reqContractDetails) проверка кэшируется на процесс."""
     want = (row.get('isin') or '').strip()
-    if not want or c.conId in _ISIN_OK:
+    if not want:
+        # ПУСТОЙ ISIN У ФОНДА — ОТКАЗ (пятнадцатый круг, №6): тикер+валюта+площадка не
+        # различают листинговые линии одного фонда; строка STK без ISIN — повреждённый или
+        # усечённый реестр, а не «проверка не нужна». Фьючерсам ISIN не положен.
+        if (row.get('sec_type') or '') == 'STK':
+            return [f'в реестре нет ISIN для {row.get("symbol", "?")} — торговля фондом '
+                    f'без сверки личности запрещена; перегенерировать реестр first_connect']
+        return []
+    if c.conId in _ISIN_OK:
         return []
     try:
         det = ib.reqContractDetails(c)

@@ -578,6 +578,21 @@ def _a12(beh):
     return sorted(stuck) == [502, 503] and {502, 503} <= still
 
 
+@ainv('фонд без ISIN в реестре отвергается ДО торговли',
+      needs=lambda b: b == 'normal')
+def _a12(beh):
+    """Пятнадцатый круг, №6: пустой ISIN у строки STK — повреждённый или усечённый реестр,
+    а не «проверка не нужна»: тикер+валюта+площадка не различают листинговые линии одного
+    фонда. Фьючерсам ISIN не положен — пустое поле для FUT штатно."""
+    import contracts as CT
+
+    class _C:
+        conId = 999001
+    stk = CT.verify_isin(None, _C(), {'sec_type': 'STK', 'symbol': 'CSPX', 'isin': ''})
+    fut = CT.verify_isin(None, _C(), {'sec_type': 'FUT', 'symbol': 'ES', 'isin': ''})
+    return bool(stk) and 'ISIN' in stk[0] and fut == []
+
+
 @ainv('позиция ЧУЖОГО счёта не попадает в книгу',
       needs=lambda b: b == 'other_account')
 def _a9(beh):
@@ -2069,6 +2084,20 @@ def _roll_seq(case):
             # Нога А уже в свежей серии, Б просрочена. Исправная нога трогаться НЕ должна.
             b0 = DL.Book(d_fix=8.0, n_e=100, n_b=50, unit_is_mes=True, prev_st_eq=True,
                          prev_st_bd=True, ser_a='Z26', ser_b='U26', es_held=10)
+            # День навёрстывания отдельно — ради ДЕНЕЖНОЙ сверки (пятнадцатый круг, №2):
+            # рецензия верно указала, что стенд смотрел лишь серии, а списание стоимости
+            # переноса с ИСПРАВНОЙ ноги А проходило незамеченным.
+            d1 = pd.Timestamp('2026-09-10')
+            m1 = DL.Market(date=d1, px_eq_prev=600.0, dref_prev=8.0, dref_today=8.0,
+                           px_eq_today=600.0, roll_today=DL.is_roll_day(d1, hol),
+                           st_eq=True, st_bd=True, holidays=hol,
+                           roll_passed=DL.roll_passed_for(d1, hol))
+            dec0 = DL.step(b0, m1, 10_000_000.0)
+            ba = dec0.book_after
+            ue, ub = DL.units(ba, m1)
+            out['cap_after'] = dec0.capital_after_costs
+            out['money'] = (abs(ba.n_e - b0.n_e) * ue + abs(ba.n_b - b0.n_b) * ub,
+                            ba.n_e * ue, ba.n_b * ub)
             bx, ser, pen = run_days(b0, ('2026-09-10', '2026-09-11'))
             out['ser_a_fin'] = bx.ser_a; out['ser_b_fin'] = bx.ser_b
         elif case == 'пропущенный ролл только нога Б':
@@ -2105,6 +2134,18 @@ def _rl2(r):
     терялся, перенос не состоялся бы до следующего квартального ролла, и поймал бы это лишь
     запрет входа в месяц поставки — то есть поздно и уже отказом."""
     return not r['raised'] and r.get('carried') and r['series'] == ['H27', 'H27']
+
+
+@rlinv('стоимость навёрстывания ложится ТОЛЬКО на роллящуюся ногу',
+       needs=lambda r: r['case'] == 'смешанная книга: просрочена только Б')
+def _rl6(r):
+    """Пятнадцатый круг, №2: общий roll_any списывал перенос и с исправной ноги А —
+    фиктивно заниженный капитал сдвигает цель и кап на границе округления."""
+    if r['raised'] or r.get('cap_after') is None:
+        return False
+    turn, exp_a, exp_b = r['money']
+    want = 10_000_000.0 - DL.S.COST * turn - DL.S.ROLL_BP * exp_b
+    return exp_a > 0 and abs(r['cap_after'] - want) < 1e-6
 
 
 @rlinv('просрочка одной ноги НЕ роллит исправную',
@@ -2164,7 +2205,8 @@ def sginv(name, needs=None):
 
 SIG_CASES = ('дописывается новый месяц', 'источник разошёлся с историей',
              'хвост месяца потерян', 'новых месяцев нет', 'уровни пересчитаны поставщиком',
-             'сайдкар уровней отсутствует')
+             'сайдкар уровней отсутствует', 'сайдкар без столбца ноги',
+             'сайдкар без общих месяцев')
 
 
 def _sig_run(case):
@@ -2216,6 +2258,18 @@ def _sig_run(case):
                 bars[k] = [(d, px * (1.03 if d.startswith('2026-03') else 1.0))
                            for d, px in bars[k]]
             ib.set_bars(bars)
+        if case in ('сайдкар без столбца ноги', 'сайдкар без общих месяцев'):
+            # ЧАСТИЧНЫЙ сайдкар (пятнадцатый круг, №5): публикация полного файла первым
+            # прогоном, затем порча. Прежний код молча возвращался к слабым 12 битам.
+            SU.update(ib)
+            os.environ.pop('ADDFUT_LEVELS_BOOTSTRAP', None)
+            lp = live.with_name('signals_levels.csv')
+            dfl = pd.read_csv(lp, parse_dates=[0], index_col=0)
+            if case == 'сайдкар без столбца ноги':
+                dfl.drop(columns=['IEF']).to_csv(lp)
+            else:
+                dfl.index = dfl.index + pd.DateOffset(years=30)
+                dfl.to_csv(lp)
         out['added'] = SU.update(ib)
         out['rows_after'] = sum(1 for _ in open(live, encoding='utf-8')) - 1
     except Exception as ex:
@@ -2265,6 +2319,22 @@ def _sg6(r):
     """Двенадцатый круг, №6: без уровней сверка сводится к 12 битам и закрепляет уехавший
     источник как норму; первый запуск — только явным разрешением оператора."""
     return r['raised'] and 'сайдкара уровней' in r['error']
+
+
+@sginv('сайдкар без столбца ноги отвергается',
+       needs=lambda r: r['case'] == 'сайдкар без столбца ноги')
+def _sg7(r):
+    """Пятнадцатый круг, №5: файл только с SPY молча переводил IEF на слабые 12 битов —
+    неоднородный пересчёт истории IEF мог сменить свежий знак и десятки ZN."""
+    return r['raised'] and 'столбца' in r['error']
+
+
+@sginv('сайдкар без общих месяцев отвергается',
+       needs=lambda r: r['case'] == 'сайдкар без общих месяцев')
+def _sg8(r):
+    """Пятнадцатый круг, №5: непересекающийся сайдкар по силе равен отсутствующему —
+    база сравнения пуста, а проверка молча «проходила»."""
+    return r['raised'] and 'общих месяцев' in r['error']
 
 
 @sginv('без новых месяцев файл не меняется',
