@@ -1,0 +1,7 @@
+WORM-якорь ADD-FUT v1.6.0 ред. 33 — 2026-08-14 (маршрут F, сессия 3)
+книга: 2026-08-14, замкнута=да, digest 52eff512bcaf30d449fb33a0b727ef1a46d3bcc9dd554d29ff66b43db5e3c042 (payload сверен state.load)
+журнал §7: строк 12, корень цепочки 99fb82d5baaf0012fbff93eca4c0bf0ecc6c42823fb7a5d67366e9e622538515
+sha256 журнала-файла: 756f17f48641d9fa0c31438e58567e15c4ff778ff52a10d4996795dfdb00e0d9
+sha256 реестра (instruments_live.csv): b5d56fc9e373d2cfde31ade3f42d668c4a1781c121f24703b5b3d2051145ed13
+sha256 замера маржи (margins_live.json): 19e8b13b4b8468474a278aa7c00b4814da33a6e1ed372d39effebd2add0622c2
+sha256 живого ряда сигналов: 371b7fa34b596264de58871470da4a505b07aa1da99af99b983ed85d2538ca66
