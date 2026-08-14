@@ -184,7 +184,12 @@ class IBBroker:
             acct = getattr(t.order, 'account', '') or ''
             if self.account and acct and acct != self.account:
                 continue
-            out.add(t.order.orderId)
+            # КЛЮЧ УНИКАЛЕН ТОЛЬКО ПАРОЙ clientId:orderId (восемнадцатый круг, №2):
+            # голый orderId схлопывал заявки разных клиентов в set, и отмена била по
+            # первой найденной. Ключ непрозрачен для вызывающих — они возвращают его
+            # в cancel_order как есть.
+            cid = getattr(t.order, 'clientId', 0) or 0
+            out.add(f'{cid}:{t.order.orderId}')
         return sorted(out)
 
     def todays_executions(self):
@@ -384,8 +389,18 @@ class IBBroker:
         неснятыми; а «очевидная починка» return True назвала бы исполненную заявку успешно
         отменённой — дефект опаснее исходного.
         """
+        # Ключ — 'clientId:orderId' из open_orders; голое число (старые вызыватели и
+        # стенды) сравнивается только по orderId нашего clientId по-прежнему безопасно:
+        # отмена дальше фильтрует счёт и метку стратегии.
+        want_cid = want_oid = None
+        if isinstance(oid, str) and ':' in oid:
+            _c, _o = oid.split(':', 1)
+            want_cid, want_oid = int(_c), int(_o)
+        else:
+            want_oid = int(oid)
         for t in self.ib.openTrades():
-            if t.order.orderId == oid:
+            _tc = getattr(t.order, 'clientId', 0) or 0
+            if t.order.orderId == want_oid and (want_cid is None or _tc == want_cid):
                 # СЧЁТ ПРОВЕРЯЕТСЯ И ЗДЕСЬ (тринадцатый круг, №6): orderId не глобален между
                 # clientId и счетами; защита не должна распадаться между open_orders и отменой.
                 acct = getattr(t.order, 'account', '') or ''

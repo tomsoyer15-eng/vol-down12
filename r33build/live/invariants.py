@@ -573,11 +573,13 @@ def _a12(beh):
     t3 = ib_stub._Trade(ib._contract_of(int(rows[0]['con_id'])), o3)
     ib._trades += [t1, t2, t3]
     vis = br.open_orders()
-    if 501 in vis or 502 not in vis or 503 not in vis:
+    # Ключи заявок — 'clientId:orderId' (восемнадцатый круг, №2): голый номер схлопывал
+    # заявки разных клиентов.
+    if '0:501' in vis or '0:502' not in vis or '0:503' not in vis:
         return False
     stuck = DLm._cancel_all(br)
     still = {t.order.orderId for t in ib.openTrades()}
-    return sorted(stuck) == [502, 503] and {502, 503} <= still
+    return sorted(stuck) == ['0:502', '0:503'] and {502, 503} <= still
 
 
 @ainv('NaN-запас О-3-Е — отказ, а не «выше порога»',
@@ -1143,6 +1145,7 @@ def _session_run(case):
 
     route = 'E' if case == 'маршрут Е' else 'F'
     es, zn, tnx, cspx, cbu0 = 900001, 900003, 990001, 900004, 900005
+    esz, mesz, znz = 900006, 900007, 900008
     rows = list(ib_stub.FIXTURE_ROWS)
     ib = ib_stub.StubIB(rows, nlv=1_000_000.0)
     ib.rows[tnx] = dict(instrument='TNX', sec_type='IND', exchange='CBOE', currency='USD',
@@ -1154,6 +1157,9 @@ def _session_run(case):
             es: [('2026-08-10', 7700.0), (prev, 7747.5)],
             900002: [('2026-08-10', 7700.0), (prev, 7747.5)],
             zn: [('2026-08-10', 108.4), (prev, 108.5)],
+            esz: [('2026-08-10', 7712.0), (prev, 7760.0)],
+            mesz: [('2026-08-10', 7712.0), (prev, 7760.0)],
+            znz: [('2026-08-10', 108.1), (prev, 108.2)],
             tnx: [('2026-08-10', 46.9), (prev, 46.84)],
             cspx: [('2026-08-10', 830.0), (prev, 834.66)],
             cbu0: [('2026-08-10', 152.5), (prev, 152.94)]}
@@ -1782,6 +1788,7 @@ def _session_route_switch():
     import transition as TRN
 
     es, zn, tnx, cspx, cbu0 = 900001, 900003, 990001, 900004, 900005
+    esz, mesz, znz = 900006, 900007, 900008
     rows = list(ib_stub.FIXTURE_ROWS)
     ib = ib_stub.StubIB(rows, nlv=1_000_000.0)
     ib.rows[tnx] = dict(instrument='TNX', sec_type='IND', exchange='CBOE', currency='USD',
@@ -2073,19 +2080,20 @@ def _tr_run(case):
                 'expiry,multiplier,primary_exchange,isin\n'
                 'ESU26,FUT,EQ,CME,USD,1,ESU6,20260918,50,,\n'
                 'ZNU26,FUT,BOND,CBOT,USD,2,ZNU6,20260921,1000,,\n', encoding='utf-8')
+            _today = __import__('datetime').date.today().isoformat()
             if case == 'битый замер маржи':
                 mp.write_text('{оборвано', encoding='utf-8')
             elif case == 'замер без привязки':
                 mp.write_text(_json.dumps({'ESU26': {'maint': 40000.0},
                                            'ZNU26': {'maint': 2500.0}}), encoding='utf-8')
             elif case == 'замер прежней серии':
-                mp.write_text(_json.dumps({'_meta': {'date': 'x', 'series': ['ESZ25']},
+                mp.write_text(_json.dumps({'_meta': {'date': _today, 'series': ['ESZ25']},
                                            'ESZ25': {'maint': 30000.0}}), encoding='utf-8')
             elif case == 'замер не покрывает корень':
-                mp.write_text(_json.dumps({'_meta': {'date': 'x', 'series': ['ZNU26']},
+                mp.write_text(_json.dumps({'_meta': {'date': _today, 'series': ['ZNU26']},
                                            'ZNU26': {'maint': 2500.0}}), encoding='utf-8')
             elif case == 'живой замер покрывает':
-                mp.write_text(_json.dumps({'_meta': {'date': 'x',
+                mp.write_text(_json.dumps({'_meta': {'date': _today,
                                                      'series': ['ESU26', 'ZNU26']},
                                            'ESU26': {'maint': 40000.0},
                                            'ZNU26': {'maint': 2500.0}}), encoding='utf-8')

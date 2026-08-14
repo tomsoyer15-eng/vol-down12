@@ -66,7 +66,13 @@ def _live_margins():
     try:
         raw = _json.loads(raw_text)
         meta = raw.pop('_meta', None)
-        entries = {k: float(v.get('maint') or v.get('init')) for k, v in raw.items()}
+        # INIT ПРЕЖДЕ MAINT (восемнадцатый круг, №13): возможность ОТКРЫТЬ книгу
+        # определяется начальным требованием; поддерживающее — лишь запасной источник.
+        entries = {k: float(v.get('init') or v.get('maint')) for k, v in raw.items()}
+        for k, val in entries.items():
+            if not (val == val and 0 < val < float('inf')):
+                raise Incident(f'{p}: маржа {k} = {val!r} — не конечное положительное '
+                               f'число, замер повреждён')
     except Exception as ex:
         # ТРИНАДЦАТЫЙ КРУГ, №5: молча подменять живой замер константами нельзя — переход
         # разрешался бы по фиктивному запасу при повышенном house-требовании.
@@ -75,6 +81,27 @@ def _live_margins():
     if meta is None:
         raise Incident(f'{p}: замер без привязки (_meta с датой и сериями) — формат '
                        f'устарел, перегенерировать first_connect')
+    # ПРИВЯЗКА ПРОВЕРЯЕТСЯ ПО СОДЕРЖАНИЮ, А НЕ ПО НАЛИЧИЮ (восемнадцатый круг, №13).
+    import datetime as _dt
+    try:
+        _md = _dt.datetime.strptime(str(meta.get('date', ''))[:10], '%Y-%m-%d').date()
+    except ValueError:
+        raise Incident(f'{p}: _meta.date {meta.get("date")!r} не разбирается — '
+                       f'перегенерировать first_connect')
+    _age = (_dt.datetime.now(_dt.timezone.utc).date() - _md).days
+    if not (0 <= _age <= 35):
+        # 35 дней: замер обновляется каждым first_connect и как минимум при квартальной
+        # смене серий; более старый неотличим от забытого. Порог операционный, не
+        # параметр стратегии.
+        raise Incident(f'{p}: замеру {_age} дней — устарел, перегенерировать first_connect')
+    if sorted(meta.get('series') or []) != sorted(entries):
+        raise Incident(f'{p}: _meta.series {meta.get("series")} не совпадает с '
+                       f'содержимым замера {sorted(entries)} — файл правился мимо '
+                       f'first_connect')
+    _pin0 = _os.environ.get('ADDFUT_ACCOUNT')
+    if _pin0 and not (meta.get('account') or ''):
+        raise Incident(f'{p}: счёт замера пуст при пине {_pin0} — перегенерировать '
+                       f'first_connect')
     rp = _os.environ.get('ADDFUT_REGISTRY')
     rp = _P(rp) if rp else _P(__file__).resolve().parent / 'live' / 'instruments_live.csv'
     try:
@@ -169,6 +196,8 @@ class _CountBroker:
     кодом, который исполняет (семнадцатый круг, №10): прежняя формула «2 на лот» занижала
     на порядок — внутри лота лимит §8б дробит исполнение на десятки пар sell/buy."""
 
+    counting = True        # runtime-лимит §заявок в _run_lots пропускает СЧЁТНЫЙ прогон
+
     def __init__(self):
         self.n = 0
 
@@ -198,7 +227,12 @@ class _CountBroker:
 
 def plan_orders(plan, legs, lim):
     """Заявок за сессию перехода — прогоном плана через исполнителя на считающем брокере.
-    Потолок — плюс компенсация/откат по заявке на лот."""
+    Потолок — плюс компенсация/откат по заявке на лот.
+
+    ПРИЗНАННЫЙ ПРЕДЕЛ (восемнадцатый круг, №12): оценка предполагает ПОЛНОЕ исполнение
+    каждой заявки — partial-исполнения и компенсации порождают итерации сверх неё, и
+    оценка является НИЖНЕЙ границей. Денежную защиту держит runtime-счётчик в самом
+    _run_lots: упор в дневной лимит фиксируется ДО заявки, с MIXED и разбором."""
     import copy
     import tempfile
     br = _CountBroker()
@@ -495,6 +529,27 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         st = dict(tid=tid, postponed=0, done=[], executed_usd=0.0, order_ids=[],
                   snapshot=broker.net_positions(), log=[])
         _atomic(state_path, st)
+    if resume:
+        # ОТМЕНЫ РАНЬШЕ PREVIEW (восемнадцатый круг, №4): отказ preview со старой живой
+        # заявкой оставлял её исполняться весь «отложенный» период — вне траектории §8б.
+        # fail() здесь ещё не определён; неснятое при известном прогрессе — честный MIXED.
+        try:
+            _pre_open = list(broker.open_orders())
+        except Exception as ex:
+            hook('mixed'); _atomic(state_path, st)
+            raise Incident(f'resume: запрос заявок до preview не выполнен ({ex}) — MIXED')
+        for _oid in _pre_open:
+            try:
+                _r = broker.cancel_order(_oid)
+            except Exception as ex:
+                hook('mixed'); _atomic(state_path, st)
+                raise Incident(f'resume: отмена {_oid} до preview оборвана ({ex}) — MIXED')
+            if not (_r is True or (isinstance(_r, dict) and _r.get('terminal'))):
+                hook('mixed'); _atomic(state_path, st)
+                raise Incident(f'resume: отмена {_oid} до preview не подтверждена — MIXED')
+            st['log'].append(('cancel_on_resume', _oid, 0))
+        if _pre_open:
+            _atomic(state_path, st)
     if not broker.preview():
         st['postponed'] += 1; _atomic(state_path, st)
         if st['postponed'] >= 3:
@@ -509,6 +564,13 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
     if _otid0 == tid and not resume and not st.get('opened'):
         raise Incident('переход с этим tid уже захвачен в журнале — только resume')
     if not resume:
+        # БАРЬЕР ЖИВЫХ ЗАЯВОК (восемнадцатый круг, №3): осиротевшая заявка другого клиента
+        # или терминала исполнится поперёк плана и пробьёт лимит §8б — сверка позиций её
+        # не видит. Чужое снимать нельзя — только отказ до первой заявки.
+        _live0 = list(broker.open_orders())
+        if _live0:
+            raise Incident(f'живые заявки на счёте до перехода {_live0[:4]} — исполнение '
+                           f'запрещено до их разбора')
         snap0 = broker.net_positions()
         planned_src = {instr for spec in legs.values() for instr, _, _ in spec['src']}
         for name, spec in legs.items():
@@ -624,7 +686,12 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
                 except Exception as ex:
                     fail(f'{name}: восстановительная покупка {di} оборвана ({ex}) — '
                          f'исход недоказуем')
-                st['order_ids'].append(oid); diff -= _int_fill(f, di)*dp
+                st['order_ids'].append(oid)
+                try:
+                    _fi = _int_fill(f, di)
+                except Incident as ex:
+                    fail(f'{name}: восстановительная покупка исполнена дробно ({ex})')
+                diff -= _fi*dp
                 st['log'].append(('recover_buy', di, f))
             elif diff < -dp/2 - TOL:
                 try:
@@ -632,11 +699,18 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
                 except Exception as ex:
                     fail(f'{name}: восстановительная продажа {di} оборвана ({ex}) — '
                          f'исход недоказуем')
-                st['order_ids'].append(oid); diff += _int_fill(f, di)*dp
+                st['order_ids'].append(oid)
+                try:
+                    _fi = _int_fill(f, di)
+                except Incident as ex:
+                    fail(f'{name}: восстановительная продажа исполнена дробно ({ex})')
+                diff += _fi*dp
                 st['log'].append(('recover_sell', di, f))
             _atomic(state_path, st)
             if abs(diff) > dp + TOL:
-                raise Incident(f'{name}: рассинхрон не компенсирован своей ногой — ручная сверка')
+                # ЧЕРЕЗ fail() (восемнадцатый круг, №5): позиция уже менялась —
+                # сырой Incident оставлял журнал без MIXED.
+                fail(f'{name}: рассинхрон не компенсирован своей ногой — ручная сверка')
             total_unp += diff; total_abs += abs(diff)
             resume_unp[name] = diff
         if total_abs > lim + TOL:
@@ -677,8 +751,13 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
     for name, spec in legs.items():
         if abs(unp[name]) > spec['dst'][1] + TOL:
             fail(f'{name}: финальная |непарная| выше цены одной доли')
-    # полная сверка фактической книги с планом перехода
-    now = broker.net_positions(); snap = st['snapshot']
+    # полная сверка фактической книги с планом перехода — сбой самого ЧТЕНИЯ после
+    # исполненного перехода не смеет оставить журнал в OPEN (восемнадцатый круг, №5)
+    try:
+        now = broker.net_positions()
+    except Exception as ex:
+        fail(f'финальная сверка: позиции недоступны ({ex}) — исход недоказуем')
+    snap = st['snapshot']
     for name, spec in legs.items():
         di, dp = spec['dst'][0], spec['dst'][1]
         planned_usd = sum(n*u for _, n, u in spec['src'])
@@ -691,7 +770,10 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         for instr, units, u in spec['src']:
             if snap.get(instr, 0) - now.get(instr, 0) != units:
                 fail(f'{instr}: закрыто не по плану')
-    g = broker.gross()
+    try:
+        g = broker.gross()
+    except Exception as ex:
+        fail(f'финальная сверка: gross недоступен ({ex}) — исход недоказуем')
     if g > CLOSE_CAP + 1e-9:
         fail(f'плечо на закрытии {g:.4f} > {CLOSE_CAP}', cancel=False)
     st['log'].append(('complete', tid, g)); _atomic(state_path, st)
@@ -837,6 +919,13 @@ def _run_lots(broker, plan, st, state_path, lim, unp, dst_bought, fail, _M=None,
             # в КОРОТКУЮ позицию — ровно то, от чего защищает планировщик, но уже в цикле.
             if _frac(lot['src']):
                 step = min(step, remaining)
+            if (len(st['order_ids']) >= ORDERS_PER_DAY
+                    and not getattr(broker, 'counting', False)):
+                # RUNTIME-ЛИМИТ (восемнадцатый круг, №12): partial-исполнения плодят
+                # итерации сверх любой предстартовой оценки — упор в лимит фиксируется
+                # ДО заявки, с MIXED и разбором, а не отказами IB посреди книги.
+                fail(f'дневной лимит {ORDERS_PER_DAY} заявок исчерпан в исполнении '
+                     f'({len(st["order_ids"])}) — переход останавливается')
             oid, f = broker.sell_units(lot['src'], step)
             st['order_ids'].append(oid)
             try:

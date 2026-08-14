@@ -915,6 +915,10 @@ def restore_to(broker, target_book, route='F'):
                 # компенсирующая заявка могла исполниться позже — совпавший снимок после неё
                 # ничего не доказывает, и «восстановлено» объявлять нельзя.
                 unknown.append(f'{inst} {d:+}: исход неизвестен ({ex})')
+                # И ПОСЛЕ ПЕРВОЙ НЕИЗВЕСТНОСТИ — СТОП (восемнадцатый круг, №6): подача
+                # следующих компенсаций поверх неизвестного исхода создавала бы ВТОРУЮ
+                # неизвестную позицию вместо локализации первой.
+                break
     stuck += _cancel_all(broker)
     have2 = {k: float(v) for k, v in (broker.net_positions() or {}).items() if v}
     want2 = {k: float(v) for k, v in want.items()}
@@ -933,6 +937,16 @@ def execute_roll(broker, orders, book_before=None, route='F', ref_prices=None):
     """
     closes = [(i, q) for i, q in orders if q < 0]
     opens = [(i, q) for i, q in orders if q > 0]
+    # ПАРАМИ ПО НОГАМ (восемнадцатый круг, №8): «все закрытия, потом все открытия» держали
+    # книгу ПОЛНОСТЬЮ плоской до нескольких минут (ожидание до 120 с на заявку) — на
+    # $20 млн gross движение 0,5% в этой дыре стоит до сотни тысяч. Теперь дыра ограничена
+    # одной ногой: закрыл А — открыл А, затем то же для Б.
+    _leg = lambda i: 'А' if i.startswith(('ES', 'MES', 'CSPX')) else 'Б'
+    seq = []
+    for lg in ('А', 'Б'):
+        seq += [(i, q) for i, q in closes if _leg(i) == lg]
+        seq += [(i, q) for i, q in opens if _leg(i) == lg]
+    closes_opens = seq
     placed = []
 
     def bail(msg, known=True):
@@ -945,8 +959,14 @@ def execute_roll(broker, orders, book_before=None, route='F', ref_prices=None):
             raise RollGap(f'{msg}; восстановление НЕ ВЫПОЛНЕНО ({ex2}) — требуется ручной '
                           f'разбор (О-5)')
         if ok and known:
-            raise RollGap(f'{msg}; книга приведена к исходной ПО ДОСТУПНЫМ ДАННЫМ (подтверждение — сверкой следующей сессии), ролл переносится '
-                          f'на следующую сессию', provable=True)
+            # ЧЕСТНОЕ ОПИСАНИЕ ПЕРЕНОСА (восемнадцатый круг, №11): roll_pending сохранён,
+            # но автопилот ставит тревогу, а намерение остаётся до разбора — фактический
+            # повтор случится СЛЕДУЮЩЕЙ сессией ПОСЛЕ ручного снятия тревоги (О-5), и
+            # прежняя формулировка обещала автоматизм, которого по дисциплине нет.
+            raise RollGap(f'{msg}; книга приведена к исходной ПО ДОСТУПНЫМ ДАННЫМ '
+                          f'(подтверждение — сверкой следующей сессии); roll_pending '
+                          f'сохранён — перенос выполнится следующей сессией ПОСЛЕ ручного '
+                          f'снятия тревоги (О-5)', provable=True)
         if ok:
             # ИСХОД НЕИЗВЕСТЕН (шестнадцатый круг, №5): снимок совпал, но поздний отчёт
             # ещё возможен — «восстановлено» недоказуемо, автоперенос ролла запрещён.
@@ -956,7 +976,7 @@ def execute_roll(broker, orders, book_before=None, route='F', ref_prices=None):
         raise RollGap(f'{msg}; ВОССТАНОВИТЬ НЕ УДАЛОСЬ: у брокера {have}, неснятых заявок '
                       f'{len(stuck)} — требуется ручной разбор (О-5)')
 
-    for inst, qty in closes + opens:
+    for inst, qty in closes_opens:
         try:
             rec = broker.place(inst, qty, (ref_prices or {}).get(inst))
         except Exception as ex:
@@ -1115,6 +1135,14 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
         orders = (sorted(dec.orders.items(), key=lambda x: (x[1] > 0, x[0])) if route == 'E'
                   else book_to_orders(dec, book))
         placed = []
+        if dec.trade and not dry_run and ref_prices is not None:
+            # ОРИЕНТИР ОБЯЗАТЕЛЕН ДЛЯ КАЖДОЙ ЗАЯВКИ (восемнадцатый круг, №17): пропавший
+            # молча ориентир давал пустое поле px_order, строка выпадала из §7, и выборка
+            # редела выборочно — на дальней серии ролла это систематика, не случайность.
+            _no_ref = [i for i, _q in orders if ref_prices.get(i) is None]
+            if _no_ref:
+                raise RuntimeError(f'нет цен-ориентиров для {_no_ref} — торговля без '
+                                   f'ориентира запрещена, журнал §7 потерял бы наблюдение')
         if dec.trade and not dry_run:
             # ЖУРНАЛ §7 ПРОВЕРЯЕТСЯ ДО ЗАЯВОК (семнадцатый круг, №15): цепочка хэшей
             # доказывает нетронутость записанного, но не полноту — повреждённый журнал

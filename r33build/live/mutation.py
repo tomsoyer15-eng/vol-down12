@@ -374,6 +374,26 @@ def _adapter_mutations():
             return sorted(out)
         return orig, patched
 
+    def bare_order_ids():
+        """Ключ заявки — голый orderId (как было до восемнадцатого круга, №2): заявки
+        разных clientId схлопываются, отмена бьёт по первой найденной."""
+        orig = B.IBBroker.open_orders
+
+        def patched(self):
+            try:
+                self.ib.reqAllOpenOrders()
+                self.ib.sleep(1.0)
+            except Exception as ex:
+                raise B.BrokerError(f'запрос заявок: {ex}')
+            out = set()
+            for t in self.ib.openTrades():
+                acct = getattr(t.order, 'account', '') or ''
+                if self.account and acct and acct != self.account:
+                    continue
+                out.add(t.order.orderId)
+            return sorted(out)
+        return orig, patched
+
     def nan_cushion_ok():
         """NaN в тегах запаса принимается (как было до семнадцатого круга, №7):
         cushion=NaN, «NaN < 1,40» ложно — сокращение отключено молча."""
@@ -447,6 +467,7 @@ def _adapter_mutations():
             ('пустой ISIN реестра пропускается', 'verify_isin', isin_empty_ok),
             ('ошибка запроса заявок глотается', 'open_orders', orders_req_swallow),
             ('неизвестность компенсации глотается', 'restore_to', restore_swallows_unknown),
+            ('ключ заявки — голый orderId', 'open_orders', bare_order_ids),
             ('NaN-запас О-3-Е принимается', 'margin_cushion', nan_cushion_ok),
             ('Cancelled считается неисполнением', 'place', cancel_is_failure)]
 

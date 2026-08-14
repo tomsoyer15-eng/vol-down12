@@ -120,7 +120,9 @@ HS0
     log "шлюз не отвечает — запускаю"
     [ -f "$ENVF" ] || { log "ТРЕВОГА: нет $ENVF — запускать шлюз нечем"; return 1; }
     set -a; . "$ENVF"; set +a
-    ( cd "$LIVE/ibgw" && nohup ./start.sh >> "$ST/ibgw-launch.log" 2>&1 & )
+    # fd 9 (замок) НЕ наследуется шлюзом (восемнадцатый круг, №9): долгоживущий Gateway
+    # держал бы замок всё время жизни — все тики «занято», cron снова декоративный.
+    ( exec 9>&-; cd "$LIVE/ibgw" && nohup ./start.sh >> "$ST/ibgw-launch.log" 2>&1 & )
     for _ in $(seq 1 30); do
         sleep 10
         if exec 3<>/dev/tcp/127.0.0.1/4002 2>/dev/null; then exec 3<&-; break; fi
@@ -226,7 +228,18 @@ tick() {
         log "ТРЕВОГА: календарь не покрыт — автопилот остановлен"
         return 0
     fi
-    [ "$_td" -eq 0 ] || return 0
+    case "$_td" in
+        0) : ;;
+        2) return 0 ;;                      # выходной/праздник — штатно
+        *)  # поломка календарного подпроцесса (восемнадцатый круг, №10): молчаливый
+            # «выходной» прятал бы мёртвый контур неделями — только тревога.
+            if [ ! -e "$ST/ALARM-calendar-broken.txt" ]; then
+                echo "календарный подпроцесс вернул код $_td — контур не может определить торговый день" > "$ST/ALARM-calendar-broken.txt"
+                (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-calendar-broken.txt" >> "$ST/ALARM-calendar-broken.txt" 2>&1) || true
+                log "ТРЕВОГА: календарь сломан (код $_td)"
+            fi
+            return 0 ;;
+    esac
     if [ "$hm" -ge "$(trade_till)" ] && [ ! -e "$ST/traded-$day" ] && [ ! -e "$ST/ALARM-missed-$day.txt" ]; then
         # ДЕНЬ ПРОПУЩЕН: все тики до конца окна потеряны (машина спала). Торговать в 16:05
         # и тут же замыкать — значит оставить рыночные GTC на ночь; вместо этого тревога.
@@ -277,25 +290,10 @@ backup_state() {
     local day=$1 bdir=$HOME/.addfut-backups stamp
     stamp=$(date -u +%H%M%S)
     mkdir -p "$bdir"
-    if tar -czf "$bdir/.addfut-$day-$stamp.tmp" -C "$HOME" \
-        --exclude='.addfut/ibgw.env' --exclude='.addfut/zoneinfo' \
-        --exclude='.addfut/*.lock' .addfut 2>/dev/null \
-       && mv "$bdir/.addfut-$day-$stamp.tmp" "$bdir/addfut-$day-$stamp.tgz"; then
-        log "резервная копия состояния: addfut-$day-$stamp.tgz"
-        # WORM-ЯКОРЬ ВНЕ МАШИНЫ (решение заказчика 13.08.2026): корень цепочки §7 и
-        # digest книги — датированным файлом в репозиторий, коммитом до выгрузки; подмена
-        # прошлого потребует force-push с расхождением двух удалённых историй.
-        if wa=$(cd "$LIVE" && "$PY" worm_anchor.py "$day" 2>&1); then
-            log "WORM: $wa"
-            ( cd /home/alex/claude-projects/vol-down12 \
-              && git add anchors/ >/dev/null 2>&1 \
-              && git commit -q -m "WORM-якорь $day" >/dev/null 2>&1 ) || true
-        else
-            echo "WORM-якорь $day не создан: $wa" > "$ST/ALARM-worm-$day.txt"
-            (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-worm-$day.txt" >> "$ST/ALARM-worm-$day.txt" 2>&1) || true
-            log "ТРЕВОГА: WORM-якорь не создан — автопилот остановлен"
-            return 1
-        fi
+    # СОГЛАСОВАННЫЙ СНИМОК ПОД ЗАМКОМ КНИГИ (восемнадцатый круг, №19) + WORM-якорь того же
+    # поколения (№18: state.load, действующие пути, атомарная запись, git с проверкой).
+    if wa=$(cd "$LIVE" && "$PY" worm_anchor.py --snap "$day" "$bdir" 2>&1); then
+        log "снимок+WORM: $wa"
         # ВНЕШНЯЯ ВЫГРУЗКА ПОД ПРОВЕРКОЙ (пятнадцатый круг, №7): разовый сбой сети — не
         # тревога (локальная копия есть, догонит следующим замыканием), но три подряд
         # означают, что внешних копий давно нет, — стоим до ручного разбора.
@@ -314,8 +312,7 @@ backup_state() {
             fi
         fi
     else
-        rm -f "$bdir/.addfut-$day-$stamp.tmp"
-        echo "tar не создал копию состояния за $day" > "$ST/ALARM-backup-$day.txt"
+        echo "снимок состояния/WORM за $day не создан: $wa" > "$ST/ALARM-backup-$day.txt"
         (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-backup-$day.txt" >> "$ST/ALARM-backup-$day.txt" 2>&1) || true
         log "ТРЕВОГА: резервная копия $day не создана — автопилот остановлен"
         return 1

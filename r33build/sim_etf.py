@@ -36,7 +36,7 @@ def loan_spread_amt(debit):
 
 def sim_etf(days, re, rb, rfv, spy_close, dref, st_eq, st_bd,
             strict=True, cap0=10_000_000.0, cap=2.0, first_day='fixed', drag=DRAG_PHYS,
-            band=None, record=None):
+            band=None, record=None, record_pos=None):
     """band=None -> операционная полоса ред. 33 (S.BAND_OP = 0,10)."""
     bd = S.BAND_OP if band is None else band
     if strict:
@@ -111,6 +111,8 @@ def sim_etf(days, re, rb, rfv, spy_close, dref, st_eq, st_bd,
             if ratio < min_ratio: min_ratio = ratio
             if record is not None:
                 record.append(lc)      # плечо закрытия — для расчёта запаса маршрута Е
+        if record_pos is not None:
+            record_pos.append((n_e, n_b))   # книга на конец сессии — сверка replay (18-й, №20)
         prev_close_lev = lc
     s = pd.Series(nav, index=days); r = s.pct_change(); r.iloc[0] = nav[0]/cap0-1
     yrs = (days[-1]-days[0]).days/365.25

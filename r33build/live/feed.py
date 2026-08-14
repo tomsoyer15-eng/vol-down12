@@ -409,8 +409,12 @@ def reference_prices(ib, route='F'):
         try:
             px, _, _, _ = closes(ib, contract_of(ib, name, reg), today)
             out[name] = px
-        except FeedError:
-            continue                 # дальняя серия может ещё не торговаться — не повод падать
+        except FeedError as ex:
+            # НЕ МОЛЧА (восемнадцатый круг, №17): пропавший ориентир выбрасывал строку из
+            # §7 без следа — выборка редела выборочно. Пропуск объявляется; ТРЕБОВАТЬ
+            # ориентир обязан ВЫЗЫВАЮЩИЙ для тех инструментов, которыми торгует.
+            out[f'ОРИЕНТИР-НЕТ:{name}'] = str(ex)[:80]
+            continue
     return out
 
 

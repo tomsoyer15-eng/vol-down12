@@ -30,6 +30,7 @@ def replay(d, band=None, cap=2.0, spread_pp=0.5, cap0=10_000_000.0):
     book = DL.Book(d_fix=dref[0])
     e = cap0
     nav = np.empty(len(days)); pos = np.empty((len(days), 2), dtype=np.int64)
+    extras = []
     for i, dte in enumerate(days):
         j = max(i - 1, 0)
         m = DL.Market(date=dte, px_eq_prev=spy_close[j], dref_prev=dref[j],
@@ -39,6 +40,7 @@ def replay(d, band=None, cap=2.0, spread_pp=0.5, cap0=10_000_000.0):
         book = dec.book_after
         e = dec.capital_after_costs
         pos[i] = (book.n_e, book.n_b)
+        extras.append((book.ser_a, book.ser_b, book.es_held, book.roll_pending))
         if i == 0:
             nav[i] = e                       # first_day='fixed', как в ред. 4
         else:
@@ -48,7 +50,7 @@ def replay(d, band=None, cap=2.0, spread_pp=0.5, cap0=10_000_000.0):
             nav[i] = e
         # замыкание сессии по факту закрытия — в бою здесь читается NLV брокера
         book = DL.close_out(book, spy_close[i], dref[i], nav[i])
-    return pd.Series(nav, index=days), pos
+    return pd.Series(nav, index=days), pos, extras
 
 
 def positions_of_sim(d, band=None, cap=2.0):
@@ -67,6 +69,7 @@ def replay_e(d, band=None, cap=2.0, cap0=10_000_000.0):
     pb = 100.0 * np.cumprod(1.0 + np.asarray(rb))
     book = DL.BookE(); e = cap0
     nav = np.empty(len(days)); pos = np.empty((len(days), 2), dtype=np.int64)
+    extras = []
     for i, dte in enumerate(days):
         j = max(i - 1, 0)
         m = DL.MarketE(date=dte, px_eq_prev=spy_close[j], px_bd_prev=pb[j],
@@ -93,7 +96,7 @@ if __name__ == '__main__':
     ok = True
     for nm, d in (('современное окно 2003–2026', S.build_modern()),
                   ('склейка 1963–2026', S.build_splice())):
-        nav_live, pos = replay(d)
+        nav_live, pos, extras = replay(d)
         nav_sim, st, pos_sim = positions_of_sim(d)
         same_idx = nav_live.index.equals(nav_sim.index)
         close = np.allclose(nav_live.values, nav_sim.values, rtol=1e-12, atol=0.0)
@@ -111,20 +114,48 @@ if __name__ == '__main__':
         print(f"  КНИГИ: {'совпали на каждой сессии' if same_pos else f'РАЗОШЛИСЬ на {nbad} сессиях'}"
               f" ({len(pos):,} сессий)")
         print(f"  сессий с заявкой: {int((np.diff(pos, axis=0) != 0).any(axis=1).sum()) + 1}")
-        ok &= bool(same_idx and close and same_pos)
+        # СЕРИИ, УПАКОВКА, ПРИЗНАК РОЛЛА (восемнадцатый круг, №20): совпадение количеств
+        # не доказывает верную ПОСТАВКУ — контур, навсегда оставшийся в U26 при верных
+        # числах, печатал бы «КНИГИ совпали» и ехал в поставку. Симулятор серий не ведёт,
+        # поэтому серии сверяются с КАЛЕНДАРЁМ роллов, упаковка и признак — инвариантами.
+        _rolls = S.roll_days_calendar(d[0])
+        _ser_bad = _pack_bad = _pend_bad = 0
+        _prev = None
+        for _i, (_sa, _sb, _es, _rp) in enumerate(extras):
+            if _sa != _sb:
+                _ser_bad += 1
+            if _prev is not None:
+                _was_roll = d[0][_i] in _rolls
+                if _was_roll and _sa == _prev and pos[_i][0]:
+                    _ser_bad += 1            # день ролла не сменил серию
+                if not _was_roll and _sa != _prev and pos[_i - 1][0]:
+                    _ser_bad += 1            # серия сменилась вне дня ролла
+            _prev = _sa
+            if _es is not None and not (0 <= 10 * _es <= max(pos[_i][0], 0)):
+                _pack_bad += 1
+            if _rp:
+                _pend_bad += 1
+        print(f"  серии/упаковка/признак: {'ЧИСТО' if not (_ser_bad or _pack_bad or _pend_bad) else f'серии {_ser_bad}, упаковка {_pack_bad}, pending {_pend_bad}'}")
+        ok &= bool(same_idx and close and same_pos
+                   and not (_ser_bad or _pack_bad or _pend_bad))
 
     # --- маршрут Е: собственный контур против sim_etf ---
     from sim_etf import sim_etf as _se
     de = S.build_modern()
     nav_e, pos_e = replay_e(de)
-    r_s, nav_s, _st = _se(*de)
+    _sim_pos = []
+    r_s, nav_s, _st = _se(*de, record_pos=_sim_pos)
     rel_e = np.max(np.abs(nav_e.values / nav_s.values - 1))
     print(f"\n=== маршрут Е, современное окно ===")
     print(f"  NAV: расхождение {rel_e:.2e} -> "
           f"{'ЭКВИВАЛЕНТНО (1e-12)' if rel_e < 1e-12 else 'РАСХОЖДЕНИЕ'}")
     print(f"  контур Е: {S.met(nav_e.pct_change().fillna(0))[0]:.4f}%, "
           f"sim_etf: {S.met(nav_s.pct_change().fillna(0))[0]:.4f}%")
-    ok &= bool(rel_e < 1e-12)
+    _pe = np.array(_sim_pos, dtype=np.int64)
+    same_pos_e = pos_e.shape == _pe.shape and bool((pos_e == _pe).all())
+    print(f"  КНИГИ Е: {'совпали на каждой сессии' if same_pos_e else 'РАЗОШЛИСЬ'}"
+          f" ({len(_pe):,} сессий)")
+    ok &= bool(rel_e < 1e-12 and same_pos_e)
 
     # --- отказы §8 проверяются отдельно: в истории капитал 10 млн, они не срабатывают ---
     print("\n=== отказы §8 (проверяются на подставленных величинах) ===")

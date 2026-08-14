@@ -172,7 +172,11 @@ def do_trade(ib, route, dry):
     # журнал: молчаливый обход политики был бы ровно тем, ради чего этап и заведён.
     # ЦЕНЫ-ОРИЕНТИРЫ СНИМАЮТСЯ ДО ЗАЯВОК: без них журнал §7 не накапливает наблюдений.
     refs = FD.reference_prices(ib, route=route)
+    _miss = {k: v for k, v in refs.items() if k.startswith('ОРИЕНТИР-НЕТ:')}
+    refs = {k: v for k, v in refs.items() if not k.startswith('ОРИЕНТИР-НЕТ:')}
     print('ориентиры:', {k: round(v, 4) for k, v in refs.items()})
+    for _k, _v in _miss.items():
+        print(f'  {_k}: {_v}')
     kw = {}
     if route == 'E':
         # ЖИВОЙ ЗАПАС О-3-Е — ОТ БРОКЕРА (десятый круг, №2): расчётная прокси при капе 2,00
@@ -192,6 +196,21 @@ def do_trade(ib, route, dry):
         journal_path=str(state_dir() / f'journal-{route}.csv'), dry_run=dry,
         paper=paper_mode(),
         ref_prices=refs, book_path=str(bp), series_a=src.get('series'), **kw)
+    if route == 'E' and not dry and dec.trade and orders:
+        # ЗАПАС ПОСЛЕ ИСПОЛНЕНИЙ (восемнадцатый круг, №1): предторговый замер относится к
+        # СТАРОЙ книге; удвоение позиции могло увести фактический запас под порог, а
+        # состояние сохранялось успешным. Пост-фактум сокращать нельзя (повторная торговля
+        # в тот же запуск запрещена) — ставится ТРЕВОГА ФАЙЛОМ: ворота автопилота её видят
+        # независимо от кода возврата, benign-ветка «день отторгован» её не подавляет.
+        _pc = br.margin_cushion()
+        if _pc is not None and _pc < DL.O3E_MIN:
+            _day = f'{m.date:%Y-%m-%d}'
+            _af = state_dir() / f'ALARM-o3e-{_day}.txt'
+            _af.write_text(f'запас О-3-Е ПОСЛЕ исполнений {_pc:.2f}x ниже {DL.O3E_MIN} — '
+                           f'книга сохранена, сокращение до L=1 обязано пройти следующей '
+                           f'сессией; ручной разбор (О-5)\n', encoding='utf-8')
+            print(f'ТРЕВОГА: запас после исполнений {_pc:.2f}x < {DL.O3E_MIN} — '
+                  f'файл {_af.name}')
 
     print(f'\nрешение: плечо {dec.leverage:.4f}, книга '
           f'{getattr(dec.book_after, "n_e", "-")}/{getattr(dec.book_after, "n_b", "-")}')

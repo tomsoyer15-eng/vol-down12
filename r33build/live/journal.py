@@ -223,7 +223,15 @@ def reconcile(path):
     """Сопоставление факта с моделью, раздельно по штатным сделкам и роллам.
     Вывод не делается, пока наблюдений (РАЗЛИЧНЫХ СЕССИЙ) меньше двадцати."""
     verify(path)
-    rows = [r for r in read(path) if r['px_fill'] and r['px_order'] and r['qty']]
+    _all = read(path)
+    # ПОМЕТКИ ИСКЛЮЧЕНИЯ ЧИТАЮТСЯ (восемнадцатый круг, №15): итог «строки исполнения
+    # утрачены — исключить сессию» прежде никем не читался, и обрезанная сессия входила в
+    # выборку как полная. Строки ИТОГ — маркеры, в данные не попадают никогда.
+    _skip_dates = {r['date'] for r in _all
+                   if r.get('instrument') == 'ИТОГ' and 'исключ' in (r.get('note') or '')}
+    rows = [r for r in _all
+            if r['px_fill'] and r['px_order'] and r['qty']
+            and r.get('instrument') != 'ИТОГ' and r['date'] not in _skip_dates]
     sessions = {r['date'] for r in rows}
     if len(sessions) < MIN_OBS:
         return dict(n_rows=len(rows), n_sessions=len(sessions),
@@ -245,9 +253,31 @@ def reconcile(path):
     # ОБЫЧНОГО остатка (5 б.п.) попадала в выборку ролла (1 б.п.) — сверка §7 была
     # систематически искажена именно в сессиях «ролл + сигнал/полоса/кап».
     is_roll = lambda r: r['note'].startswith('ролл')
+    # НОМИНАЛ РОЛЛА — ОДНОСТОРОННИЙ (восемнадцатый круг, №16): перенос состоит из закрытия
+    # И открытия, но модель ROLL_BP описывает стоимость ПЕРЕНОСА ЭКСПОЗИЦИИ; деление
+    # суммарной потери двух сторон на их УДВОЕННЫЙ номинал занижало измеренную стоимость
+    # вдвое и могло «доказать» достаточность заниженного параметра. Потеря — по обеим
+    # сторонам, номинал — только закрывающая сторона.
+    def _roll_block(sub):
+        if not sub:
+            return dict(label='ролл', n=0, verdict='наблюдений нет')
+        bp2, _ = _cost_bp(sub)
+        closes = [r for r in sub if float(r['qty']) < 0]
+        _, notional_one = _cost_bp(closes)
+        if not notional_one:
+            _, notional_one = _cost_bp(sub)
+            notional_one /= 2.0
+        loss = bp2 / 1e4 * _cost_bp(sub)[1]
+        bp = loss / notional_one * 1e4 if notional_one else 0.0
+        ratio = bp / MODEL_ROLL_BP if MODEL_ROLL_BP else float('inf')
+        return dict(label='ролл', n=len(sub), bp=bp, model_bp=MODEL_ROLL_BP,
+                    notional=notional_one, ratio=ratio,
+                    verdict=('расхождение свыше двукратного — вопрос о параметре §2 '
+                             'ставится заново' if ratio > 2.0 or ratio < 0.5 else
+                             'в пределах двукратного — параметр не пересматривается'))
     out = dict(n_rows=len(rows), n_sessions=len(sessions),
                trade=block([r for r in rows if not is_roll(r)], MODEL_COST_BP, 'сделка'),
-               roll=block([r for r in rows if is_roll(r)], MODEL_ROLL_BP, 'ролл'))
+               roll=_roll_block([r for r in rows if is_roll(r)]))
     by = {}
     for r in rows:
         by.setdefault(root_of(r['instrument']), []).append(r)

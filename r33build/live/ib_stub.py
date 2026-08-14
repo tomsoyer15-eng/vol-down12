@@ -43,6 +43,14 @@ FIXTURE_ROWS = [
          con_id='900002', local_symbol='MESU6', expiry='20260918', multiplier='5', isin=''),
     dict(instrument='ZNU26', sec_type='FUT', pair_group='BOND', exchange='CBOT', currency='USD',
          con_id='900003', local_symbol='ZNU6', expiry='20260921', multiplier='1000', isin=''),
+    # ОБЕ серии, как в боевом реестре (first_connect пишет U и Z): ролловые кейсы требуют
+    # ориентиров дальней серии — фикстура без Z26 валила их гвардом «нет ориентира».
+    dict(instrument='ESZ26', sec_type='FUT', pair_group='EQ', exchange='CME', currency='USD',
+         con_id='900006', local_symbol='ESZ6', expiry='20261218', multiplier='50', isin=''),
+    dict(instrument='MESZ26', sec_type='FUT', pair_group='EQ', exchange='CME', currency='USD',
+         con_id='900007', local_symbol='MESZ6', expiry='20261218', multiplier='5', isin=''),
+    dict(instrument='ZNZ26', sec_type='FUT', pair_group='BOND', exchange='CBOT', currency='USD',
+         con_id='900008', local_symbol='ZNZ6', expiry='20261221', multiplier='1000', isin=''),
     # У IBKR фонды — 'STK': литерал 'ETF' в фикстуре скрывал от стендов дефект №14.
     # ISIN у STK обязателен (пятнадцатый круг, №6) — как в боевом реестре first_connect;
     # фьючерсам ISIN не положен, пустое поле для них штатно.

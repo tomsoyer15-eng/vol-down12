@@ -105,6 +105,19 @@ def main():
                 print(f'  {root}{tag}: КОНТРАКТ НЕ НАЙДЕН — проверить права или месяц поставки')
                 continue
             d = det[0]
+            # ПОСТАВКА СВЕРЯЕТСЯ, А НЕ КОПИРУЕТСЯ (восемнадцатый круг, №7): прежняя запись
+            # брала expiry/con_id из ответа биржи как есть — под именем U26 мог честно
+            # завериться декабрьский контракт, и все дальнейшие «проверки личности» шли по
+            # кругу против тех же скопированных полей. Буква серии выводится из ФАКТИЧЕСКОЙ
+            # экспирации и обязана совпасть с запрошенной; корень — с символом биржи.
+            _exp = str(d.contract.lastTradeDateOrContractMonth or '')
+            _mon = int(_exp[4:6]) if len(_exp) >= 6 else 0
+            _tagL = {3: 'H', 6: 'M', 9: 'U', 12: 'Z'}.get(_mon, '?')
+            _tag_actual = f'{_tagL}{_exp[2:4]}' if len(_exp) >= 6 else '??'
+            if _tag_actual != tag or d.contract.symbol != root:
+                raise SystemExit(
+                    f'{root}{tag}: биржа вернула {d.contract.symbol} с экспирацией {_exp} '
+                    f'(серия {_tag_actual}) — не запрошенная поставка, реестр не пишется')
             rows.append(dict(instrument=f'{root}{tag}', sec_type=d.contract.secType,
                              pair_group='EQ' if root in ('ES', 'MES') else 'BOND',
                              exchange=exch, currency=cur, con_id=d.contract.conId,
