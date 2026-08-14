@@ -211,11 +211,28 @@ class IBBroker:
             out.append(getattr(ex, 'permId', 0))
         return out
 
+    def _summary_barrier(self):
+        """СВЕЖИЙ request/end-барьер сводки счёта (девятнадцатый круг, №4).
+
+        ib_insync.accountSummary() шлёт запрос только при ПУСТОМ кэше, дальше отдаёт
+        значения подписки — IB обновляет её не чаще ~3 минут, и чтение сразу после
+        исполнения видело ДОторговые NLV и MaintMarginReq: обе ноги размерялись по старому
+        капиталу, а пост-трейд О-3-Е проверялся старым требованием. reqAccountSummary()
+        каждый раз открывает НОВЫЙ reqId и блокируется до accountSummaryEnd — сервер
+        отдаёт текущие значения на момент запроса. ПРИЗНАННЫЙ ПРЕДЕЛ: между End-барьером
+        и использованием значение может измениться; точнее IB не отдаёт (§12)."""
+        try:
+            self.ib.reqAccountSummary()
+        except Exception as ex:
+            raise BrokerError(f'сводка счёта не обновлена ({ex}) — NLV и запас О-3-Е '
+                              f'недостоверны, торговля запрещена')
+
     def margin_cushion(self):
         """Живой запас О-3-Е: EquityWithLoan / MaintMarginReq от брокера (десятый круг,
         №2). Без него step_e пользовался расчётной прокси, которая при капе 2,00 не
         опускается ниже порога 1,40 — аварийное сокращение маршрута Е было недостижимо в
         бою по построению."""
+        self._summary_barrier()               # свежий срез, а не кэш подписки (№4)
         vals = (self.ib.accountSummary(self.account) if self.account
                 else self.ib.accountSummary())
         ewl = maint = None
@@ -244,8 +261,10 @@ class IBBroker:
             raise BrokerError('связь с брокером потеряна — NLV недостоверен')
         # ОДНОРАЗОВЫЙ ЗАПРОС СВОДКИ, а не подписка на обновления счёта: reqAccountUpdates в
         # ib_insync ждёт полной выгрузки и на бумажном шлюзе НЕ ВОЗВРАЩАЕТСЯ вовсе —
-        # сессия висела до тайм-аута. accountSummary отвечает за доли секунды и, в отличие
-        # от чтения кэша, действительно ходит к брокеру.
+        # сессия висела до тайм-аута. И не кэш подписки (девятнадцатый круг, №4):
+        # accountSummary() после первого вызова ходит только в кэш — барьер даёт
+        # reqAccountSummary() с новым reqId и ожиданием accountSummaryEnd.
+        self._summary_barrier()
         vals = (self.ib.accountSummary(self.account) if self.account
                 else self.ib.accountSummary())
         for v in vals:
@@ -316,15 +335,37 @@ class IBBroker:
     def _rec(self, tr, instrument, qty, px_order):
         """Запись об исполнении в том же виде, что отдаёт макет."""
         filled = self._executed(tr)
-        px_fill = float(tr.orderStatus.avgFillPrice or 0) or None
+        perm = getattr(tr.order, 'permId', 0)
+        # ЦЕНА ИСПОЛНЕНИЯ — ИЗ ОТЧЁТОВ О СДЕЛКАХ (девятнадцатый круг, №16): статусное
+        # avgFillPrice обновляется отдельным сообщением и за exec-барьером не обязано
+        # поспевать; отчёты уже за барьером — цена берётся из них, взвешенно по объёму.
+        _num = _den = 0.0
+        for f in self.ib.fills():
+            e = f.execution
+            if (getattr(e, 'permId', 0) == perm and f.contract.conId == tr.contract.conId
+                    and (not self.account or e.acctNumber == self.account)):
+                _num += float(getattr(e, 'price', 0.0)) * abs(float(e.shares))
+                _den += abs(float(e.shares))
+        px_fill = (_num / _den) if _den and _num else \
+            (float(tr.orderStatus.avgFillPrice or 0) or None)
         # Комиссии — ПО permId, как и исполнения (№27): orderId переиспользуется между
         # clientId, и чужая комиссия попадала бы в нашу строку журнала.
-        perm = getattr(tr.order, 'permId', 0)
-        comm = sum(float(f.commissionReport.commission or 0) for f in self.ib.fills()
-                   if getattr(f.execution, 'permId', 0) == perm
-                   and f.contract.conId == tr.contract.conId)
+        # ТОЛЬКО ПРИШЕДШИЕ commissionReport (девятнадцатый круг, №16): exec-барьер — не
+        # барьер комиссий; отчёт без execId ещё не пришёл, и нулём его считать нельзя —
+        # поле остаётся ПУСТЫМ, и §7 честно не досчитывает строку, а не занижает издержки.
+        comm = 0.0
+        comm_ok = True
+        for f in self.ib.fills():
+            if (getattr(f.execution, 'permId', 0) == perm
+                    and f.contract.conId == tr.contract.conId):
+                cr = getattr(f, 'commissionReport', None)
+                if cr is None or not getattr(cr, 'execId', ''):
+                    comm_ok = False
+                    continue
+                comm += float(cr.commission or 0)
         rec = dict(order_id=tr.order.orderId, instrument=instrument, qty=qty, filled=filled,
-                   px_order=px_order, px_fill=px_fill, commission=comm,
+                   px_order=px_order, px_fill=px_fill,
+                   commission=(comm if comm_ok else ''),
                    status=tr.orderStatus.status)
         if abs(filled - qty) > 1e-9:
             rec['incident'] = ('недобор' if abs(filled) < abs(qty)

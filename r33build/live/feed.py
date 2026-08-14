@@ -401,13 +401,29 @@ def reference_prices(ib, route='F'):
     today = exchange_today()
     reg = registry()
     want = ('CSPX', 'CBU0') if route == 'E' else ('ES', 'MES', 'ZN')
+    # ТОЧНАЯ ПРЕДЫДУЩАЯ СЕССИЯ И ДЛЯ ОРИЕНТИРОВ (девятнадцатый круг, №16): без неё ориентир
+    # дальней MES/ZN-серии мог быть на сессию старше — пятидневный допуск это пропускал, и
+    # сверка §7 на роллах систематически мерила издержки от чужого закрытия.
+    if route == 'E':
+        try:
+            _hol = eu_holidays(today.year, today.year + 1)
+        except FeedError:
+            _hol = eu_holidays(today.year)
+    else:
+        import daily as _DL
+        try:
+            _hol = _DL.holidays_for(today.year, today.year + 1)
+        except RuntimeError:
+            _hol = _DL.holidays_for(today.year)
+    _exp_prev = prev_session(today, _hol)
     out = {}
     for name, r in reg.items():
         root = ''.join(ch for ch in name if not ch.isdigit())[:3]
         if not any(name.startswith(w) for w in want):
             continue
         try:
-            px, _, _, _ = closes(ib, contract_of(ib, name, reg), today)
+            px, _, _, _ = closes(ib, contract_of(ib, name, reg), today,
+                                 expected_prev=_exp_prev)
             out[name] = px
         except FeedError as ex:
             # НЕ МОЛЧА (восемнадцатый круг, №17): пропавший ориентир выбрасывал строку из

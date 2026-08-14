@@ -167,6 +167,44 @@ def _verify_fresh(ib, sym, primary, me, months):
                               f'TRADES-закрытием ({rel:+.3%}; допустимо от {-LEVEL_TOL:.1%} '
                               f'до +{bound:.2%} дивидендного окна) — закрытие источника '
                               f'недостоверно')
+    _verify_quotes(ib, c, sym, mt, months, dur)
+
+
+MID_TOL = 0.005    # котировочное закрытие против сделочного: спред SPY/IEF — центы, 0,5%
+                   # покрывает худший спред с запасом, но ловит порчу, менявшую знак у SMA
+
+
+def _verify_quotes(ib, c, sym, mt, months, dur):
+    """Срез КОТИРОВОК против среза СДЕЛОК (девятнадцатый круг, №5). ADJUSTED_LAST и
+    TRADES — производные ОДНОГО дневного бара сделок того же conId: общая порча печати
+    закрытия проходила их сверку с отношением около нуля, а _verify_border ловит лишь
+    близость к SMA — ошибка, далеко перебросившая цену ЧЕРЕЗ SMA, принималась увереннее
+    малой. MIDPOINT строится из потока котировок (bid/ask) — это другой ряд данных, и
+    порча сделочного закрытия в нём не воспроизводится. ПРИЗНАННЫЙ ПРЕДЕЛ: поставщик
+    один (IBKR); общесистемную порчу всех срезов изнутри не поймать — внешние источники
+    с этой машины недоступны (§12)."""
+    import pandas as pd
+    from ib_insync import util
+    if not months:
+        return
+    bars = ib.reqHistoricalData(c, endDateTime='', durationStr=dur,
+                                barSizeSetting='1 day', whatToShow='MIDPOINT', useRTH=True)
+    if not bars:
+        raise SignalError(f'{sym}: MIDPOINT-история пуста — котировочного подтверждения '
+                          f'месяцев {[f"{d:%Y-%m}" for d in months]} нет, обновление '
+                          f'запрещено')
+    dm = util.df(bars).set_index('date')['close']
+    dm.index = pd.to_datetime(dm.index)
+    mm = dm.resample('ME').last().dropna()
+    for d in months:
+        if d not in mm.index:
+            raise SignalError(f'{sym}: в MIDPOINT нет месяца {d:%Y-%m} — месяц без '
+                              f'котировочного подтверждения')
+        rel = float(mm.loc[d]) / float(mt.loc[d]) - 1.0
+        if abs(rel) > MID_TOL:
+            raise SignalError(f'{sym}: месяц {d:%Y-%m} — сделочное закрытие разошлось с '
+                              f'котировочным ({rel:+.3%} при допуске {MID_TOL:.1%}); общая '
+                              f'порча сделочного среза, знак сигнала недостоверен')
 
 
 def states(me):

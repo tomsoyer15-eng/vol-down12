@@ -235,9 +235,22 @@ def book_from_broker(cls, positions, route, *, ser_a=None, ser_b=None, unit_is_m
     Книга берётся у брокера, а не вычисляется, потому что после перехода истина именно там.
     """
     pos = {k: float(v) for k, v in (positions or {}).items() if float(v) != 0.0}
+    # ПРИЗНАК ОТЛОЖЕННОГО РОЛЛА — ПЕР-НОЖНЫЙ (девятнадцатый круг, №1): строка 'А'/'Б'/'АБ'
+    # переносится КАК ЕСТЬ; приведение к bool стирало ноги, и повтор роллил обе.
+    _pend = roll_pending if isinstance(roll_pending, str) else bool(roll_pending)
+    # ПОСТОРОННЯЯ ПОЗИЦИЯ НЕ ВЫБРАСЫВАЕТСЯ (девятнадцатый круг, №12): книга, построенная
+    # «только из знакомых инструментов», молча теряла чужую позицию, появившуюся во время
+    # перехода, — она оставалась неуправляемой при формально успешной передаче.
+    known = (('CSPX', 'CBU0') if route == 'E' else ('MES', 'ES', 'ZN'))
+    alien = [k for k in pos
+             if not any(str(k).startswith(w) for w in known)] if route != 'E' else \
+            [k for k in pos if k not in known]
+    if alien:
+        raise ValueError(f'посторонние позиции {alien} при построении книги маршрута '
+                         f'{route} — книга не строится, ручной разбор (О-5)')
     if route == 'E':
         return cls(n_eq=pos.get('CSPX', 0), n_bd=pos.get('CBU0', 0),
-                   prev_st_eq=st_eq, prev_st_bd=st_bd, roll_pending=bool(roll_pending))
+                   prev_st_eq=st_eq, prev_st_bd=st_bd, roll_pending=_pend)
     es = mes = zn = 0
     for k, v in pos.items():
         if k.startswith('MES'):
@@ -252,7 +265,7 @@ def book_from_broker(cls, positions, route, *, ser_a=None, ser_b=None, unit_is_m
     # поймал бы это лишь запрет входа в месяц поставки — то есть поздно и уже отказом.
     return cls(n_e=(es * 10 + mes) if unit_is_mes else es, n_b=zn, unit_is_mes=unit_is_mes,
                d_fix=d_fix, ser_a=ser_a, ser_b=ser_b, es_held=es if unit_is_mes else None,
-               prev_st_eq=st_eq, prev_st_bd=st_bd, roll_pending=bool(roll_pending))
+               prev_st_eq=st_eq, prev_st_bd=st_bd, roll_pending=_pend)
 
 
 def reconcile(book, route, broker_positions, open_orders=None):

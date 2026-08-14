@@ -100,8 +100,10 @@ ALLOW = ['ADD-FUT-v1_6_0-r33.pdf', 'ADD-FUT-v1_6_0-r33.txt', 'sim_v164.py', 'sim
          f'data/{n}' for n in sorted(os.listdir('data')) if n.endswith('.csv')]
 
 try:
+    # строки-комментарии (git-база выпуска, девятнадцатый круг, №22) — не записи манифеста
     entries = [(h, fn.strip()) for h, fn in
-               (line.strip().split(maxsplit=1) for line in open('MANIFEST-192.txt', encoding='utf-8') if line.strip())]
+               (line.strip().split(maxsplit=1) for line in open('MANIFEST-192.txt', encoding='utf-8')
+                if line.strip() and not line.lstrip().startswith('#'))]
     names = [fn for _, fn in entries]
     chk(f'уровень 0а: манифест = зашитый список ({len(ALLOW)} записей)',
         len(entries) == len(ALLOW) and sorted(names) == sorted(ALLOW) and len(set(names)) == len(names),
@@ -213,6 +215,19 @@ chk('контур: инварианты держатся на всём пере�
     _inv.returncode == 0,
     ' | '.join(l for l in _inv.stdout.splitlines() if l.startswith('состояний') or
                l.startswith('сессий')))
+# ВЫПУСКНОЙ БАРЬЕР ВКЛЮЧАЕТ REPLAY И СЦЕНАРНЫЕ ПРОВЕРКИ (девятнадцатый круг, №21): прежде
+# selfcheck гонял только invariants+mutation, и эквивалентность 1e-12 с книгами/сериями,
+# как и сценарии contour_test, не входили в «ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ» вовсе.
+_rep = _sp2.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 'live', 'replay_check.py')], capture_output=True, text=True)
+chk('контур: replay-эквивалентность (NAV, книги, серии, упаковка) в выпускном барьере',
+    _rep.returncode == 0 and 'ЭКВИВАЛЕНТНОСТЬ ДОКАЗАНА' in (_rep.stdout or ''),
+    ((_rep.stdout or _rep.stderr).strip().splitlines() or ['нет вывода'])[-1])
+_ct = _sp2.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                'live', 'contour_test.py')], capture_output=True, text=True)
+chk('контур: сценарные проверки contour_test в выпускном барьере',
+    _ct.returncode == 0,
+    ((_ct.stdout or _ct.stderr).strip().splitlines() or ['нет вывода'])[-1])
 chk('контур: состояние переживает перезапуск и ловит позднее исполнение',
         _b1 == _b0 and _s1 == 3 and _ST.reconcile(_b0, 'F', _exp) == []
         and len(_ST.reconcile(_b0, 'F', _late)) == 1)
@@ -439,6 +454,42 @@ b2 = _B(netpos={'MES': 4, 'CSPX': 0}, cancelnone=True, oo=['oX']); inc = False
 try: T.execute(b2, SP, 1e6, L4, signal_id='s1', resume=True, **KW)
 except T.Incident: inc = True
 chk('Исполнитель: cancel_order=None на resume = инцидент до новых заявок', inc and len(b2.calls) == 0)
+# --- Девятнадцатый круг: №11, №12, №14; долг пар восемнадцатого: №3 ---
+_cl(); _sig('E', grant=98565.0)
+_bLive = _B(netpos={'ZN': 1, 'CBU0': 0}, oo=['осиротевшая']); inc = False
+try: T.execute(_bLive, SP, 1e6, L1, signal_id='s1', **KW)
+except T.Incident as _ex: inc = 'живые заявки' in str(_ex)
+chk('Исполнитель: живые заявки до свежего перехода = отказ до ордеров (18-й, №3)',
+    inc and len(_bLive.calls) == 0)
+_cl(); _sig('E', grant=98565.0)
+_plan6 = T.plan_lots(L1, 1e6)
+_tid6 = T.transition_id('s1', 'F', 'E', 1e6, _plan6)
+M.append_event(JX, '2026-08-08', 'TRANSITION_OPEN', 'E|s1|' + _tid6)
+json.dump(dict(tid=_tid6, postponed=0, done=[], executed_usd=1.0, order_ids=[],
+               snapshot={'ZN': 1, 'CBU0': 0}, log=[], opened=True), open(SP, 'w'))
+class _BPrevRaise(_B):
+    def preview(s): raise RuntimeError('margin preview оборван связью')
+inc = False
+try: T.execute(_BPrevRaise(netpos={'ZN': 1, 'CBU0': 0}, oo=['oY']), SP, 1e6, L1,
+               signal_id='s1', resume=True, **KW)
+except T.Incident as _ex: inc = 'preview оборван' in str(_ex)
+chk('Исполнитель: обрыв preview на resume = MIXED, а не сырое исключение (19-й, №11)',
+    inc and M.derive_state(JX, date(2026, 8, 8))[2])
+_cl(); _sig('E', grant=98565.0)
+class _BAlien(_B):
+    def sell_units(s, i, u):
+        r = _B.sell_units(s, i, u)
+        s.np['NQ'] = 7                      # чужая позиция появилась ВО ВРЕМЯ перехода
+        return r
+inc = False
+try: T.execute(_BAlien(netpos={'ZN': 1, 'CBU0': 0}), SP, 1e6, L1, signal_id='s1', **KW)
+except T.Incident as _ex: inc = 'вне плана' in str(_ex)
+chk('Исполнитель: позиция, появившаяся во время перехода, запрещает COMPLETE (19-й, №12)',
+    inc and M.derive_state(JX, date(2026, 8, 8))[2])
+_retro = False
+try: M.append_event(JX, '2026-08-01', 'SWITCH_SIGNAL', 'F|s9')
+except ValueError: _retro = True
+chk('МР: ретро-датированная запись в журнал отклоняется (19-й, №14)', _retro)
 _cl(); _sig('E', grant=98565.0)
 L5 = {'BOND': dict(src=[('ZN', 2, 98560.0)], dst=('CBU0', 5.0, 'ETF'))}
 _plan = T.plan_lots(L5, 1e6)

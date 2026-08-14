@@ -204,19 +204,90 @@ def rows_from_decision(dec, nav, orders, fills=None):
     return out
 
 
+def _num(x, what):
+    """Число §7 обязано быть КОНЕЧНЫМ (девятнадцатый круг, №16): NaN проходил арифметику,
+    «nan > 2» и «nan < 0.5» ложны — и вердикт становился «в пределах двукратного», то есть
+    порча данных ДОКАЗЫВАЛА достаточность параметра. Нечисловое наблюдение — стоп сверки."""
+    import math
+    v = float(x)
+    if not math.isfinite(v):
+        raise ValueError(f'§7: нечисловое наблюдение {what}={x!r} — сверка остановлена, '
+                         f'журнал требует разбора')
+    return v
+
+
 def _cost_bp(rows):
     """Долларовая недостача против цены заявки, отнесённая к торгуемому номиналу."""
     loss = 0.0; notional = 0.0
     for r in rows:
-        q = float(r['qty']); po = float(r['px_order']); pf = float(r['px_fill'])
+        q = _num(r['qty'], 'qty'); po = _num(r['px_order'], 'px_order')
+        pf = _num(r['px_fill'], 'px_fill')
         mult = MULT[root_of(r['instrument'])]
         if po <= 0 or q == 0:
             continue
         loss += (pf - po) * q * mult                 # покупка дороже / продажа дешевле = потеря
         if r['commission']:
-            loss += abs(float(r['commission']))
+            loss += abs(_num(r['commission'], 'commission'))
         notional += abs(q) * pf * mult
     return (loss / notional * 1e4 if notional else 0.0), notional
+
+
+def _excluded_dates(rows):
+    """Сессии, ИСКЛЮЧАЕМЫЕ из выборки §7, с причинами (девятнадцатый круг, №16;
+    восемнадцатый, №15). Три основания: (1) пометка исключения в итоговой строке;
+    (2) счётчик «строк N» итога не совпал с фактом — часть строк исполнения утрачена;
+    (3) живая строка заявки без цены исполнения/ориентира — систематически пустая сторона
+    прежде исчезала из выборки МОЛЧА, а дата продолжала считаться по другой ноге."""
+    import re as _re
+    skip = {}
+    data = [r for r in rows if r.get('instrument') != 'ИТОГ']
+    per_date = {}
+    for r in data:
+        per_date[r['date']] = per_date.get(r['date'], 0) + 1
+    for r in rows:
+        if r.get('instrument') != 'ИТОГ':
+            continue
+        if 'исключ' in (r.get('note') or ''):
+            skip.setdefault(r['date'], 'пометка исключения в итоге')
+        m = _re.search(r'строк (\d+)', r.get('note') or '')
+        if m and per_date.get(r['date'], 0) != int(m.group(1)):
+            skip.setdefault(r['date'], f'итог обещает {m.group(1)} строк, '
+                                       f'в журнале {per_date.get(r["date"], 0)}')
+    for r in data:
+        if r['qty'] and (not r['px_fill'] or not r['px_order']):
+            skip.setdefault(r['date'], 'строка исполнения без цены — сессия неполна')
+    return skip
+
+
+def _verdict(ratio):
+    """Вердикт в ПОЛОЖИТЕЛЬНОЙ форме (девятнадцатый круг, №16): «в пределах» — только при
+    доказанном попадании в границы; прежняя форма «если ratio>2 или <0.5» на NaN давала
+    «в пределах» через ложные сравнения."""
+    if 0.5 <= ratio <= 2.0:
+        return 'в пределах двукратного — параметр не пересматривается'
+    return 'расхождение свыше двукратного — вопрос о параметре §2 ставится заново'
+
+
+def _roll_block(sub):
+    """НОМИНАЛ РОЛЛА — ОДНОСТОРОННИЙ (восемнадцатый круг, №16): перенос состоит из
+    закрытия И открытия, но модель ROLL_BP описывает стоимость ПЕРЕНОСА ЭКСПОЗИЦИИ;
+    деление суммарной потери двух сторон на их УДВОЕННЫЙ номинал занижало измеренную
+    стоимость вдвое и могло «доказать» достаточность заниженного параметра. Потеря — по
+    обеим сторонам, номинал — только закрывающая сторона. На уровне модуля — под стенд и
+    мутацию (девятнадцатый круг, долг пар)."""
+    if not sub:
+        return dict(label='ролл', n=0, verdict='наблюдений нет')
+    bp2, _ = _cost_bp(sub)
+    closes = [r for r in sub if float(r['qty']) < 0]
+    _, notional_one = _cost_bp(closes)
+    if not notional_one:
+        _, notional_one = _cost_bp(sub)
+        notional_one /= 2.0
+    loss = bp2 / 1e4 * _cost_bp(sub)[1]
+    bp = loss / notional_one * 1e4 if notional_one else 0.0
+    ratio = bp / MODEL_ROLL_BP if MODEL_ROLL_BP else float('inf')
+    return dict(label='ролл', n=len(sub), bp=bp, model_bp=MODEL_ROLL_BP,
+                notional=notional_one, ratio=ratio, verdict=_verdict(ratio))
 
 
 def reconcile(path):
@@ -224,17 +295,22 @@ def reconcile(path):
     Вывод не делается, пока наблюдений (РАЗЛИЧНЫХ СЕССИЙ) меньше двадцати."""
     verify(path)
     _all = read(path)
-    # ПОМЕТКИ ИСКЛЮЧЕНИЯ ЧИТАЮТСЯ (восемнадцатый круг, №15): итог «строки исполнения
-    # утрачены — исключить сессию» прежде никем не читался, и обрезанная сессия входила в
-    # выборку как полная. Строки ИТОГ — маркеры, в данные не попадают никогда.
-    _skip_dates = {r['date'] for r in _all
-                   if r.get('instrument') == 'ИТОГ' and 'исключ' in (r.get('note') or '')}
+    # ИСКЛЮЧЁННЫЕ СЕССИИ — С ПРИЧИНАМИ (восемнадцатый круг, №15; девятнадцатый, №16):
+    # пометка итога, несовпавший счётчик строк, живые строки без цены. Строки ИТОГ —
+    # маркеры, в данные не попадают никогда; исключение видно в ответе, а не молчит.
+    _skip = _excluded_dates(_all)
     rows = [r for r in _all
             if r['px_fill'] and r['px_order'] and r['qty']
-            and r.get('instrument') != 'ИТОГ' and r['date'] not in _skip_dates]
+            and r.get('instrument') != 'ИТОГ' and r['date'] not in _skip]
+    # КОНЕЧНОСТЬ — ДО ЛЮБОГО ВЕРДИКТА (девятнадцатый круг, №16): nan-строка не смеет ни
+    # пройти в арифметику, ни отсидеться за порогом «мало сессий» до его преодоления.
+    for r in rows:
+        _num(r['qty'], 'qty'); _num(r['px_order'], 'px_order'); _num(r['px_fill'], 'px_fill')
+        if r['commission']:
+            _num(r['commission'], 'commission')
     sessions = {r['date'] for r in rows}
     if len(sessions) < MIN_OBS:
-        return dict(n_rows=len(rows), n_sessions=len(sessions),
+        return dict(n_rows=len(rows), n_sessions=len(sessions), excluded=_skip,
                     verdict=f'сессий {len(sessions)} из {MIN_OBS} — вывод не делается')
 
     def block(sub, model_bp, label):
@@ -243,39 +319,14 @@ def reconcile(path):
         bp, notional = _cost_bp(sub)
         ratio = bp / model_bp if model_bp else float('inf')
         return dict(label=label, n=len(sub), bp=bp, model_bp=model_bp, notional=notional,
-                    ratio=ratio,
-                    verdict=('расхождение свыше двукратного — вопрос о параметре §2 '
-                             'ставится заново' if ratio > 2.0 or ratio < 0.5 else
-                             'в пределах двукратного — параметр не пересматривается'))
+                    ratio=ratio, verdict=_verdict(ratio))
 
     # КЛАСС СТОИМОСТИ — ТОЛЬКО ИЗ ПОМЕТКИ note, которую ставит разделение оборота.
     # Прежде слово искалось и в reason: в день ролла там всегда есть «ролл серии», и строка
     # ОБЫЧНОГО остатка (5 б.п.) попадала в выборку ролла (1 б.п.) — сверка §7 была
     # систематически искажена именно в сессиях «ролл + сигнал/полоса/кап».
     is_roll = lambda r: r['note'].startswith('ролл')
-    # НОМИНАЛ РОЛЛА — ОДНОСТОРОННИЙ (восемнадцатый круг, №16): перенос состоит из закрытия
-    # И открытия, но модель ROLL_BP описывает стоимость ПЕРЕНОСА ЭКСПОЗИЦИИ; деление
-    # суммарной потери двух сторон на их УДВОЕННЫЙ номинал занижало измеренную стоимость
-    # вдвое и могло «доказать» достаточность заниженного параметра. Потеря — по обеим
-    # сторонам, номинал — только закрывающая сторона.
-    def _roll_block(sub):
-        if not sub:
-            return dict(label='ролл', n=0, verdict='наблюдений нет')
-        bp2, _ = _cost_bp(sub)
-        closes = [r for r in sub if float(r['qty']) < 0]
-        _, notional_one = _cost_bp(closes)
-        if not notional_one:
-            _, notional_one = _cost_bp(sub)
-            notional_one /= 2.0
-        loss = bp2 / 1e4 * _cost_bp(sub)[1]
-        bp = loss / notional_one * 1e4 if notional_one else 0.0
-        ratio = bp / MODEL_ROLL_BP if MODEL_ROLL_BP else float('inf')
-        return dict(label='ролл', n=len(sub), bp=bp, model_bp=MODEL_ROLL_BP,
-                    notional=notional_one, ratio=ratio,
-                    verdict=('расхождение свыше двукратного — вопрос о параметре §2 '
-                             'ставится заново' if ratio > 2.0 or ratio < 0.5 else
-                             'в пределах двукратного — параметр не пересматривается'))
-    out = dict(n_rows=len(rows), n_sessions=len(sessions),
+    out = dict(n_rows=len(rows), n_sessions=len(sessions), excluded=_skip,
                trade=block([r for r in rows if not is_roll(r)], MODEL_COST_BP, 'сделка'),
                roll=_roll_block([r for r in rows if is_roll(r)]))
     by = {}

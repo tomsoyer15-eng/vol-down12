@@ -43,6 +43,22 @@ def mapped_book(instrument, units):
         return out
     return {instrument: units} if units else {}
 
+def _margin_of(v):
+    """Требование одной серии: INIT ПРЕЖДЕ MAINT (восемнадцатый круг, №13) — возможность
+    ОТКРЫТЬ книгу определяется начальным требованием; поддерживающее — запасной источник.
+    Отдельной функцией — чтобы порядок источников был мутируем и доказуем стендом."""
+    return float(v.get('init') or v.get('maint'))
+
+
+def _meta_age_ok(md):
+    """Давность замера (восемнадцатый круг, №13): старше 35 дней — неотличим от забытого.
+    35 дней: замер обновляется каждым first_connect и как минимум при квартальной смене
+    серий; порог операционный, не параметр стратегии."""
+    import datetime as _dt
+    _age = (_dt.datetime.now(_dt.timezone.utc).date() - md).days
+    return 0 <= _age <= 35, _age
+
+
 def _live_margins():
     """Фактические маржи из margins_live.json (пишет first_connect по замеру постановкой
     контракта). Двенадцатый круг, №4: preflight считал по константам, и при повышенном
@@ -66,9 +82,7 @@ def _live_margins():
     try:
         raw = _json.loads(raw_text)
         meta = raw.pop('_meta', None)
-        # INIT ПРЕЖДЕ MAINT (восемнадцатый круг, №13): возможность ОТКРЫТЬ книгу
-        # определяется начальным требованием; поддерживающее — лишь запасной источник.
-        entries = {k: float(v.get('init') or v.get('maint')) for k, v in raw.items()}
+        entries = {k: _margin_of(v) for k, v in raw.items()}
         for k, val in entries.items():
             if not (val == val and 0 < val < float('inf')):
                 raise Incident(f'{p}: маржа {k} = {val!r} — не конечное положительное '
@@ -88,11 +102,8 @@ def _live_margins():
     except ValueError:
         raise Incident(f'{p}: _meta.date {meta.get("date")!r} не разбирается — '
                        f'перегенерировать first_connect')
-    _age = (_dt.datetime.now(_dt.timezone.utc).date() - _md).days
-    if not (0 <= _age <= 35):
-        # 35 дней: замер обновляется каждым first_connect и как минимум при квартальной
-        # смене серий; более старый неотличим от забытого. Порог операционный, не
-        # параметр стратегии.
+    _ok_age, _age = _meta_age_ok(_md)
+    if not _ok_age:
         raise Incident(f'{p}: замеру {_age} дней — устарел, перегенерировать first_connect')
     if sorted(meta.get('series') or []) != sorted(entries):
         raise Incident(f'{p}: _meta.series {meta.get("series")} не совпадает с '
@@ -169,8 +180,14 @@ def book_margin(book, reg, prices=None):
             total += abs(int(units))*float(px)*ETF_MAINT
     return total
 
-def target_book(legs):
-    """Книга МАРШРУТА-ЦЕЛИ после перехода, в фактических инструментах брокера."""
+def target_book(legs, mapped=True):
+    """Книга МАРШРУТА-ЦЕЛИ после перехода, в фактических инструментах брокера.
+
+    mapped=True — нормативная упаковка ред. 32 (MES раскладывается в целые ES + остаток);
+    mapped=False — книга, которую ФАКТИЧЕСКИ покупает исполнитель (девятнадцатый круг, №2):
+    _run_lots подаёт заявки в единицах цели плана (MES-сетка — намеренно: зерно §8б), а
+    переупаковку в канон выполняет ежедневный контур СЛЕДУЮЩЕЙ сессией (это сделка — №3).
+    Preflight обязан выдержать ОБЕ физические книги, а не только отображённую."""
     book, prices = {}, {}
     for name, spec in legs.items():
         di, dp = spec['dst'][0], float(spec['dst'][1])
@@ -184,7 +201,8 @@ def target_book(legs):
         # считается по потолку, а не по полу.
         if usd - units*dp > TOL:
             units += 1
-        for k, v in mapped_book(di, units).items():
+        add = mapped_book(di, units) if mapped else ({di: units} if units else {})
+        for k, v in add.items():
             book[k] = book.get(k, 0) + v
         prices[di] = dp
         if di == 'MES':
@@ -252,7 +270,12 @@ def preflight_margin_orders(legs, plan, capital, reg, to_route, lim=None):
     lim — лимит §8б, УЖЕ ВЫЧИСЛЕННЫЙ исполнителем (с журнальным грантом): пересчёт здесь
     без гранта ронял preflight там, где исполнение законно (семнадцатый круг, №10)."""
     book, prices = target_book(legs)
-    margin = book_margin(book, reg, prices)
+    # МАРЖА — ПО ХУДШЕЙ ИЗ ДВУХ ФИЗИЧЕСКИХ КНИГ (девятнадцатый круг, №2): отображённая
+    # (норматив ред. 32) И фактическая книга исполнения (заявки идут в единицах цели плана,
+    # переупаковка — следующей сессией). Живой замер может дать MES дороже ES/10 — считать
+    # запас только по отображённой значило бы доказывать безопасность другой книги.
+    book_exec, _ = target_book(legs, mapped=False)
+    margin = max(book_margin(book, reg, prices), book_margin(book_exec, reg, prices))
     if margin <= 0:
         raise Incident('маржа целевой книги нулевая — план пуст либо книга не распознана')
     cushion = capital/margin
@@ -547,13 +570,34 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
             if not (_r is True or (isinstance(_r, dict) and _r.get('terminal'))):
                 hook('mixed'); _atomic(state_path, st)
                 raise Incident(f'resume: отмена {_oid} до preview не подтверждена — MIXED')
-            st['log'].append(('cancel_on_resume', _oid, 0))
+            # ОТМЕНА ЗАСТАЛА ИСПОЛНЕНИЕ (девятнадцатый круг, №11): filled терминального
+            # ответа — состоявшаяся сделка; книга уже изменилась, и дальнейший исход
+            # НЕ ИМЕЕТ ПРАВА на ABORT (учёт — структурный, снимает его ветка POSTPONED×3).
+            if isinstance(_r, dict) and _r.get('filled'):
+                st['cancel_fills'] = float(st.get('cancel_fills', 0.0)) + abs(float(_r['filled']))
+                st['log'].append(('cancel_filled_on_resume', _oid, float(_r['filled'])))
+            else:
+                st['log'].append(('cancel_on_resume', _oid, 0))
         if _pre_open:
             _atomic(state_path, st)
-    if not broker.preview():
+    # PREVIEW — ПОД АВАРИЙНОЙ ОБОЛОЧКОЙ (девятнадцатый круг, №11): после resume-отмен книга
+    # могла уже измениться (исполнение в отмене); исключение preview прежде уходило сырым —
+    # без перечтения позиций и без TRANSITION_MIXED, а журнал показывал OPEN.
+    try:
+        _pv = broker.preview()
+    except Exception as ex:
+        if resume or st.get('opened') or st.get('executed_usd', 0.0) > TOL \
+                or st.get('cancel_fills'):
+            hook('mixed'); _atomic(state_path, st)
+            raise Incident(f'margin preview оборван ({ex}) при возможно изменённой книге — '
+                           f'состояние MIXED, ручная сверка')
+        raise Incident(f'margin preview оборван ({ex}) — переход не начат')
+    if not _pv:
         st['postponed'] += 1; _atomic(state_path, st)
         if st['postponed'] >= 3:
-            if st['executed_usd'] > TOL:
+            if st['executed_usd'] > TOL or st.get('cancel_fills'):
+                # cancel_fills (№11): исполнение, пойманное отменой, — прогресс; прежний
+                # критерий по одному executed_usd писал бы ЛОЖНЫЙ ABORT при изменённой книге.
                 hook('mixed')
             else:
                 hook('open'); hook('abort')                    # честная пара OPEN+ABORT, pending снимается строго
@@ -681,6 +725,7 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
             _int_fill(db, di)
             diff = sold_leg - db*dp                       # компенсация СВОЕЙ ногой
             if diff > dp/2 + TOL:
+                _order_gate(st, broker, fail, f'восстановительная покупка {di}')   # №8
                 try:
                     oid, f = broker.buy_units(di, int(round(diff/dp)))
                 except Exception as ex:
@@ -694,6 +739,7 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
                 diff -= _fi*dp
                 st['log'].append(('recover_buy', di, f))
             elif diff < -dp/2 - TOL:
+                _order_gate(st, broker, fail, f'восстановительная продажа {di}')   # №8
                 try:
                     oid, f = broker.sell_units(di, int(round(-diff/dp)))
                 except Exception as ex:
@@ -770,6 +816,19 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         for instr, units, u in spec['src']:
             if snap.get(instr, 0) - now.get(instr, 0) != units:
                 fail(f'{instr}: закрыто не по плану')
+    # ПОЛНАЯ СВЕРКА СЧЁТА, А НЕ ТОЛЬКО ПЛАНОВЫХ ИНСТРУМЕНТОВ (девятнадцатый круг, №12):
+    # позиция, появившаяся ВО ВРЕМЯ перехода по инструменту вне плана (ручная или чужая
+    # заявка после стартового барьера), не смеет пройти в COMPLETE — дальше книга контура
+    # её выбросит, и она останется неуправляемой при формально завершённом переходе.
+    _planned_names = ({spec['dst'][0] for spec in legs.values()}
+                      | {i for spec in legs.values() for i, _, _ in spec['src']})
+    for _instr in sorted(set(list(now) + list(snap))):
+        if _instr in _planned_names:
+            continue
+        if abs(float(now.get(_instr, 0)) - float(snap.get(_instr, 0))) > 1e-9:
+            fail(f'{_instr}: позиция изменилась во время перехода '
+                 f'({snap.get(_instr, 0)} -> {now.get(_instr, 0)}) вне плана — '
+                 f'COMPLETE запрещён, ручная сверка')
     try:
         g = broker.gross()
     except Exception as ex:
@@ -786,13 +845,44 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         hand_over_book(broker, from_route, to_route)
     except Exception as _ex:
         hook('mixed')
+        # ТРЕВОГА ФАЙЛОМ (девятнадцатый круг, №13): публикация могла пройти ЧАСТИЧНО
+        # (книга записана, route.txt — нет); автопилот журнал МР не читает — без файла
+        # он продолжил бы торговать при MIXED в нормативном журнале.
+        _al = _alarm_transition(asof, f'книга НЕ передана после исполненного перехода '
+                                      f'{from_route}->{to_route} ({_ex}); журнал МР — MIXED')
         raise Incident(f'книга НЕ передана ежедневному контуру ({_ex}); COMPLETE НЕ записан, '
-                       f'переход остаётся незавершённым — состояние MIXED, ручная сверка')
+                       f'переход остаётся незавершённым — состояние MIXED, ручная сверка{_al}')
     if not hook('complete'):
         hook('mixed')
-        raise Incident('журнал отклонил COMPLETE — книга переведена, состояние MIXED, ручная сверка')
+        # route.txt И КНИГА УЖЕ ОПУБЛИКОВАНЫ (девятнадцатый круг, №13): ежедневный контур
+        # видит согласованное состояние и торговал бы дальше, пока нормативный журнал МР
+        # говорит MIXED. Автопилот читает только ~/.addfut/ALARM-* — тревога ставится ТУТ.
+        _al = _alarm_transition(asof, f'журнал МР отклонил COMPLETE перехода '
+                                      f'{from_route}->{to_route} tid={tid} ПОСЛЕ публикации '
+                                      f'книги и route.txt — состояние MIXED')
+        raise Incident('журнал отклонил COMPLETE — книга переведена, состояние MIXED, '
+                       'ручная сверка' + _al)
     return dict(status='COMPLETE', gross_close=g, lots=len(st['done']),
                 unpaired_usd=sum(unp.values()), tid=tid)
+
+
+def _alarm_transition(asof, reason):
+    """ТРЕВОГА ПЕРЕХОДА В КАТАЛОГЕ АВТОПИЛОТА (девятнадцатый круг, №13): MIXED после
+    публикации книги/route.txt не виден ежедневному контуру — сверка проходит, а
+    нормативный журнал МР автопилот не читает. Файл ALARM-* останавливает автопилот
+    целиком (О-5). Возвращает '' при успехе, иначе — текст в сообщение инцидента:
+    молча несписанная тревога хуже отсутствия функции."""
+    try:
+        import sys as _s, os as _o
+        _lv = _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), 'live')
+        if _lv not in _s.path:
+            _s.path.insert(0, _lv)
+        import state as _STa
+        p = _STa.lock_dir() / f'ALARM-transition-{asof}.txt'
+        p.write_text(f'{reason}; ручной разбор (О-5)\n', encoding='utf-8')
+        return ''
+    except Exception as ex:
+        return f' | ТРЕВОГА НЕ ЗАПИСАНА ({ex}) — остановить автопилот вручную'
 
 
 def hand_over_book(broker, from_route, to_route):
@@ -870,6 +960,18 @@ def hand_over_book(broker, from_route, to_route):
     return _bk
 
 
+def _order_gate(st, broker, fail, where=''):
+    """RUNTIME-ЛИМИТ ПЕРЕД КАЖДОЙ ЗАЯВКОЙ (девятнадцатый круг, №8): прежняя проверка
+    стояла только перед основной продажей — при 389 занятых заявках продажа №390 проходила,
+    а покупка №391 подавалась БЕЗ проверки; компенсации и восстановительные заявки resume
+    обходили ворота вовсе. Брокер отверг бы покупку после исполненной продажи источника —
+    непарная позиция и MIXED ровно на границе, ради которой лимит и введён."""
+    if (len(st['order_ids']) >= ORDERS_PER_DAY
+            and not getattr(broker, 'counting', False)):
+        fail(f'дневной лимит {ORDERS_PER_DAY} заявок исчерпан в исполнении '
+             f'({len(st["order_ids"])}) перед заявкой {where} — переход останавливается')
+
+
 def _run_lots(broker, plan, st, state_path, lim, unp, dst_bought, fail, _M=None, journal=None):
     for lot in plan:
         if _M is not None and journal is not None:
@@ -919,13 +1021,10 @@ def _run_lots(broker, plan, st, state_path, lim, unp, dst_bought, fail, _M=None,
             # в КОРОТКУЮ позицию — ровно то, от чего защищает планировщик, но уже в цикле.
             if _frac(lot['src']):
                 step = min(step, remaining)
-            if (len(st['order_ids']) >= ORDERS_PER_DAY
-                    and not getattr(broker, 'counting', False)):
-                # RUNTIME-ЛИМИТ (восемнадцатый круг, №12): partial-исполнения плодят
-                # итерации сверх любой предстартовой оценки — упор в лимит фиксируется
-                # ДО заявки, с MIXED и разбором, а не отказами IB посреди книги.
-                fail(f'дневной лимит {ORDERS_PER_DAY} заявок исчерпан в исполнении '
-                     f'({len(st["order_ids"])}) — переход останавливается')
+            # RUNTIME-ЛИМИТ (восемнадцатый круг, №12; девятнадцатый, №8 — перед КАЖДОЙ
+            # заявкой): partial-исполнения плодят итерации сверх любой предстартовой
+            # оценки — упор фиксируется ДО заявки, с MIXED, а не отказами IB посреди книги.
+            _order_gate(st, broker, fail, f'продажа {lot["src"]}')
             oid, f = broker.sell_units(lot['src'], step)
             st['order_ids'].append(oid)
             try:
@@ -951,6 +1050,7 @@ def _run_lots(broker, plan, st, state_path, lim, unp, dst_bought, fail, _M=None,
                 noop = 0
                 remaining -= sold if sold > 0 else 0
                 continue
+            _order_gate(st, broker, fail, f'покупка {lot["dst"]}')      # №8: и перед покупкой
             oid2, f2 = broker.buy_units(lot['dst'], want)
             st['order_ids'].append(oid2)
             try:
@@ -972,11 +1072,13 @@ def _run_lots(broker, plan, st, state_path, lim, unp, dst_bought, fail, _M=None,
             noop = 0
             u = unp[lot['leg']]
             if u > lot['dprice']/2 + TOL:       # недобор dst своей ноги — докупка
+                _order_gate(st, broker, fail, f'компенсация-покупка {lot["dst"]}')   # №8
                 oid3, f3 = broker.buy_units(lot['dst'], int(round(u/lot['dprice'])))
                 st['order_ids'].append(oid3); unp[lot['leg']] -= _int_fill(f3, lot['dst'])*lot['dprice']
                 st['log'].append(('compensate_buy', lot['dst'], f3)); _atomic(state_path, st)
             elif u < -lot['dprice']/2 - TOL:    # перебор — обратная продажа своей ноги (не глубже купленного)
                 _want = min(int(round(-u/lot['dprice'])), dst_bought.get(lot['dst'], 0))
+                _order_gate(st, broker, fail, f'компенсация-продажа {lot["dst"]}')   # №8
                 oid3, f3 = broker.sell_units(lot['dst'], _want)
                 st['order_ids'].append(oid3); _fs = _int_fill(f3, lot['dst']); unp[lot['leg']] += _fs*lot['dprice']
                 dst_bought[lot['dst']] = dst_bought.get(lot['dst'], 0) - _fs

@@ -77,6 +77,23 @@ log() { echo "$(date '+%F %T %Z') | $*" >> "$LOG"; }
 
 chicago() { TZ=America/Chicago date "+$1"; }
 
+env_guard() {
+    # ОДИН NAMESPACE ПУТЕЙ (девятнадцатый круг, №17): автопилот работает ТОЛЬКО с машинным
+    # каталогом ~/.addfut; переопределения ADDFUT_* — инструмент СТЕНДОВ. Тик с ними писал
+    # бы тревоги и книгу туда, где автопилот их не ищет, — торговый вход при активных
+    # переопределениях запрещается с тревогой (диагностика видна там, где её ищут).
+    [ -z "${ADDFUT_DIR:-}${ADDFUT_LOCK_DIR:-}${ADDFUT_BOOK_PATH:-}${ADDFUT_SIGNALS:-}" ] && return 0
+    if [ ! -e "$ST/ALARM-env.txt" ]; then
+        {
+            echo "автопилот запущен с переопределением ADDFUT_* — пути состояния раздвоены:"
+            echo "  ADDFUT_DIR='${ADDFUT_DIR:-}' ADDFUT_LOCK_DIR='${ADDFUT_LOCK_DIR:-}'"
+            echo "  ADDFUT_BOOK_PATH='${ADDFUT_BOOK_PATH:-}' ADDFUT_SIGNALS='${ADDFUT_SIGNALS:-}'"
+        } > "$ST/ALARM-env.txt"
+        log "ТРЕВОГА: переопределение ADDFUT_* в окружении автопилота — стоим"
+    fi
+    return 1
+}
+
 is_trade_day() {
     local dow; dow=$(chicago %u)                       # 6,7 — выходные
     [ "$dow" -ge 6 ] && return 1
@@ -154,12 +171,30 @@ HS
 }
 
 run_trade() {
-    local day=$1 out rc
+    local day=$1 out rc pre
+    # ДАТА КНИГИ ДО ЗАПУСКА (девятнадцатый круг, №9): benign-ветка «день уже отторгован»
+    # законна ТОЛЬКО если книга несла сегодняшнюю дату ещё ДО этого запуска. Книга,
+    # записанная текущим (аварийным) запуском, — не штатный повтор: сессия успела сохранить
+    # состояние и упала ПОСЛЕ (например, на пост-трейд проверке О-3-Е) — это тревога.
+    pre=$(cd "$LIVE" && "$PY" - <<'BK0' 2>/dev/null
+import sys
+from pathlib import Path
+import daily, state as ST
+rt = Path.home() / '.addfut' / 'route.txt'
+route = rt.read_text().strip() if rt.exists() else 'F'
+cls = daily.BookE if route == 'E' else daily.Book
+try:
+    b, _, _ = ST.load(ST.book_path(route), cls)
+except Exception:
+    b = None
+print((b.last_session or '') if b is not None else '')
+BK0
+    )
     out=$(cd "$LIVE" && timeout -k 30 500 "$PY" session.py --live --route "$(route)" 2>&1 | grep -vE '^Error [0-9]+'); rc=$?
     echo "$out" >> "$LOG"
     if [ $rc -eq 0 ]; then
         touch "$ST/traded-$day"; log "торговля $day: ок"
-    elif (cd "$LIVE" && "$PY" - "$day" <<'BK' >/dev/null 2>&1
+    elif [ "$pre" = "$day" ] && (cd "$LIVE" && "$PY" - "$day" <<'BK' >/dev/null 2>&1
 import sys
 from pathlib import Path
 import daily, state as ST
@@ -172,7 +207,9 @@ BK
     )
     then
         # ШТАТНОСТЬ — ПО КНИГЕ (пятнадцатый круг, №3): день считается отторгованным, если
-        # книга несёт СЕГОДНЯШНЮЮ дату. Фразы и коды возврата хрупки: реальный повтор дал
+        # книга несёт СЕГОДНЯШНЮЮ дату И несла её ДО запуска (девятнадцатый круг, №9: дату,
+        # записанную самим аварийным запуском, повторной не считаем — только тревога).
+        # Фразы и коды возврата хрупки: реальный повтор дал
         # rc=2 «не замкнута», а не ожидавшийся rc=1 «не новее».
         # ЕДИНСТВЕННЫЙ штатный отказ — «день уже отторгован». Первая попытка сужения не
         # применилась из-за несовпавшей строки, и это увидела ВНЕШНЯЯ рецензия, а не моя
@@ -229,8 +266,16 @@ tick() {
         return 0
     fi
     case "$_td" in
-        0) : ;;
-        2) return 0 ;;                      # выходной/праздник — штатно
+        0) : ;;                             # торговый день
+        1) return 0 ;;                      # выходной/праздник — ШТАТНО (девятнадцатый
+                                            # круг, №7: суббота — не поломка календаря)
+        2)  # непокрытый год таблиц — тревога, как и заявлял python-подпроцесс
+            if [ ! -e "$ST/ALARM-calendar.txt" ]; then
+                echo "календарь маршрута $(route) не покрывает текущий год" > "$ST/ALARM-calendar.txt"
+                (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-calendar.txt" >> "$ST/ALARM-calendar.txt" 2>&1) || true
+                log "ТРЕВОГА: календарь не покрывает год"
+            fi
+            return 0 ;;
         *)  # поломка календарного подпроцесса (восемнадцатый круг, №10): молчаливый
             # «выходной» прятал бы мёртвый контур неделями — только тревога.
             if [ ! -e "$ST/ALARM-calendar-broken.txt" ]; then
@@ -338,8 +383,9 @@ guard_manual() {
 }
 
 case "${1:-tick}" in
-    tick)   tick ;;
+    tick)   env_guard && tick ;;
     trade)
+        env_guard || exit 1
         guard_manual || exit 1
         hm=$(chicago %H%M); day=$(chicago %F)
         { [ "$hm" -ge "$(trade_from)" ] && [ "$hm" -lt "$(trade_till)" ]; } \
@@ -348,6 +394,7 @@ case "${1:-tick}" in
         [ -e "$ST/sigup-$mon" ] || { echo "сигнал месяца не обновлён (sigup-$mon)"; exit 1; }
         ensure_gw && run_trade "$day" ;;
     close)
+        env_guard || exit 1
         guard_manual || exit 1
         hm=$(chicago %H%M)
         [ "$hm" -ge "$(close_after)" ] || { echo "до окна замыкания маршрута $(route)"; exit 1; }

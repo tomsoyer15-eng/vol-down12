@@ -96,13 +96,17 @@ class _Exec:
 
 
 class _Commission:
-    def __init__(self, c): self.commission = c
+    """execId — признак ПРИШЕДШЕГО отчёта (девятнадцатый круг, №16): у настоящего шлюза
+    commissionReport с пустым execId означает «ещё не пришёл», и нулём его считать нельзя."""
+    def __init__(self, c, exec_id='X1'):
+        self.commission = c; self.execId = exec_id
 
 
 class _Fill:
     def __init__(self, contract, execution, commission=2.0):
         self.contract = contract; self.execution = execution
-        self.commissionReport = _Commission(commission)
+        self.commissionReport = (commission if isinstance(commission, _Commission)
+                                 else _Commission(commission))
 
 
 class _Bar(NamedTuple):
@@ -202,11 +206,24 @@ class StubIB:
         nlv = self._nlv * (0.5 if self.behaviour == 'stale_nlv' else 1.0)
         return [_Val('NetLiquidation', f'{nlv:.2f}')]
 
+    def reqAccountSummary(self):
+        """Свежий request/end-барьер сводки (девятнадцатый круг, №4): как у ib_insync,
+        новый запрос отдаёт ТЕКУЩИЕ значения сервера. Без него 'stale_nlv' продолжает
+        отдавать доторговый кэш подписки."""
+        self._summary_fresh = True
+
     def accountSummary(self, account=None):
-        """Одноразовая сводка. Адаптер берёт NLV именно так: подписка reqAccountUpdates на
-        бумажном шлюзе не возвращается вовсе и вешала сессию до тайм-аута. Отдаются и теги
-        запаса О-3-Е; при 'thin_cushion' запас 1,20 — ниже порога 1,40."""
-        out = self.accountValues(account)
+        """Сводка КАК У ib_insync (девятнадцатый круг, №4): после первого запроса отдаётся
+        кэш подписки; при 'stale_nlv' он устарел (NLV вдвое меньше), и свежее значение даёт
+        только reqAccountSummary(). Свежесть потребляется чтением: каждый следующий вызов
+        без нового барьера снова читает кэш. Отдаются и теги запаса О-3-Е; при
+        'thin_cushion' запас 1,20 — ниже порога 1,40."""
+        _fresh = getattr(self, '_summary_fresh', False)
+        self._summary_fresh = False
+        if self.behaviour == 'stale_nlv' and _fresh:
+            out = [_Val('NetLiquidation', f'{self._nlv:.2f}')]
+        else:
+            out = self.accountValues(account)
         # 'nan_cushion': шлюз временно отдаёт NaN в тегах запаса (семнадцатый круг, №7).
         if self.behaviour == 'nan_cushion':
             out.append(_Val('EquityWithLoanValue', 'nan'))
@@ -216,8 +233,15 @@ class StubIB:
         # Требование при ЖИВЫХ позициях ненулевое, как у настоящего шлюза (семнадцатый
         # круг, №7): нулевой maint при существующих позициях — неполный ответ, и сессия Е
         # обязана отказывать, а не брать прокси; пустой счёт честно отдаёт ноль.
+        # 'thin_after' — запас тонкий ТОЛЬКО когда позиции уже есть (пост-трейд путь,
+        # девятнадцатый круг, №10 / восемнадцатый, №1); 'no_maint' — требование не
+        # возвращается вовсе (неполный ответ после исполнения).
         if self.behaviour == 'thin_cushion':
             maint = self._nlv / 1.2
+        elif self.behaviour == 'no_maint':
+            maint = 0.0
+        elif self.behaviour == 'thin_after':
+            maint = self._nlv / 1.2 if any(self._pos.values()) else 0.0
         elif any(self._pos.values()):
             maint = self._nlv / 2.0
         else:
@@ -330,12 +354,16 @@ class StubIB:
         self._pos[contract.conId] = self._pos.get(contract.conId, 0) + done
         f = _Fill(contract, _Exec(order.orderId, order.permId, abs(done),
                                   'BOT' if done > 0 else 'SLD', self._acct,
-                                  orderRef=getattr(order, 'orderRef', '') or ''))
+                                  orderRef=getattr(order, 'orderRef', '') or ''),
+                  commission=(_Commission(2.0, exec_id='')
+                              if b == 'no_commission_report' else 2.0))
         if b in ('late_fills', 'late_cancelled', 'fill_after_end'):
             self._pending = getattr(self, '_pending', []) + [f]
         else:
             self._fills.append(f)
-        tr.orderStatus.avgFillPrice = 100.0
+        # 'no_avg_price': статусная средняя цена отстаёт (нулевая), правда — в отчётах
+        # (девятнадцатый круг, №16): цена исполнения обязана браться из exec-отчётов.
+        tr.orderStatus.avgFillPrice = 0.0 if b == 'no_avg_price' else 100.0
         if b == 'late_cancelled':
             # ХУДШИЙ НАБЛЮДЁННЫЙ СЛУЧАЙ ЦЕЛИКОМ: статус «отменена», собственный счётчик
             # заявки НУЛЕВОЙ, позиция изменена, а единственное свидетельство — отчёт о

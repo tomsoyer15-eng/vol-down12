@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ru" style="height:100%">
+<meta charset="utf-8">
+<title>Доходность по десятилетиям: 2 ноги против 3 ног</title>
+<style>
+  .viz-root{
+    --surface-1:#fcfcfb; --text-primary:#0b0b0b; --text-secondary:#52514e;
+    --grid:#e8e7e3; --s1:#2a78d6; --s2:#eb6834;
+    color-scheme:light;
+    background:var(--surface-1); color:var(--text-primary);
+    font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    min-height:100%; padding:28px 32px; box-sizing:border-box;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:where(:not([data-theme="light"])) .viz-root{
+      color-scheme:dark;
+      --surface-1:#1a1a19; --text-primary:#ffffff; --text-secondary:#c3c2b7;
+      --grid:#33322f; --s1:#3987e5; --s2:#d95926;
+    }
+  }
+  .viz-root h1{font-size:17px; margin:0 0 2px; font-weight:650}
+  .viz-root .sub{color:var(--text-secondary); margin:0 0 18px; font-size:13px}
+  .legend{display:flex; gap:18px; margin:0 0 10px; font-size:13px}
+  .legend .sw{display:inline-block; width:10px; height:10px; border-radius:3px;
+              margin-right:6px; vertical-align:-1px}
+  .tip{position:fixed; pointer-events:none; background:var(--text-primary);
+       color:var(--surface-1); padding:6px 9px; border-radius:6px; font-size:12.5px;
+       opacity:0; transition:opacity .08s; white-space:nowrap; z-index:9}
+  svg text{fill:var(--text-primary)}
+  svg .sec{fill:var(--text-secondary)}
+  svg .grid{stroke:var(--grid)}
+  svg .axis{stroke:var(--text-secondary)}
+  details{margin-top:14px; color:var(--text-secondary); font-size:13px}
+  table{border-collapse:collapse; margin-top:8px}
+  td,th{padding:3px 12px 3px 0; text-align:right; font-variant-numeric:tabular-nums}
+  th:first-child,td:first-child{text-align:left}
+</style>
+<body class="viz-root">
+  <h1>ADD-FUT против ADD-FUT с ногой золота — по десятилетиям</h1>
+  <p class="sub">Обе — ПОЛНАЯ стратегия: месячный сигнал 12-SMA на каждую ногу, цели по 1×,
+     общий кап плеча 2,00, полоса, роллы. Ряды ядра + LBMA, номинально.
+     * — неполное десятилетие.</p>
+  <div class="legend">
+    <span><span class="sw" style="background:var(--s1)"></span>ADD-FUT (2 ноги)</span>
+    <span><span class="sw" style="background:var(--s2)"></span>ADD-FUT + золото (3 ноги)</span>
+  </div>
+  <svg id="c" width="880" height="430" role="img"
+       aria-label="Сгруппированные столбцы доходности по десятилетиям"></svg>
+  <div class="tip" id="tip"></div>
+  <details><summary>Таблица значений</summary><div id="tbl"></div></details>
+<script>
+const DATA = [
+  {dec:"1960-е*", c2:-2.22, c3:-7.99,  span:"1969-04…1969-12 (0,8 г.)"},
+  {dec:"1970-е",  c2:6.00,  c3:28.98,  span:"1970…1979"},
+  {dec:"1980-е",  c2:20.03, c3:15.80,  span:"1980…1989"},
+  {dec:"1990-е",  c2:17.60, c3:12.92,  span:"1990…1999"},
+  {dec:"2000-е",  c2:9.62,  c3:13.53,  span:"2000…2009"},
+  {dec:"2010-е",  c2:8.20,  c3:7.61,   span:"2010…2019"},
+  {dec:"2020-е*", c2:12.55, c3:17.30,  span:"2020-01…2026-08 (6,6 г.)"},
+  {dec:"Всё окно",c2:11.99, c3:15.40,  span:"1969-04…2026-08 (57,3 г.)"},
+];
+const svg = document.getElementById('c'), tip = document.getElementById('tip');
+const W=880, H=430, m={t:14,r:12,b:30,l:44};
+const iw=W-m.l-m.r, ih=H-m.t-m.b;
+const ymin=-10, ymax=31;
+const y=v=>m.t+ih*(1-(v-ymin)/(ymax-ymin)), y0=y(0);
+const groupW=iw/DATA.length, barW=Math.min(26,(groupW-18)/2);
+const css=v=>getComputedStyle(document.body).getPropertyValue(v).trim();
+let s='';
+for(let g=ymin+1;g<=ymax;g++){ if(g%4!==0) continue;
+  s+=`<line class="grid" x1="${m.l}" x2="${W-m.r}" y1="${y(g)}" y2="${y(g)}"/>`+
+     `<text class="sec" x="${m.l-8}" y="${y(g)+4}" text-anchor="end" font-size="11">${g}%</text>`;}
+s+=`<line class="axis" x1="${m.l}" x2="${W-m.r}" y1="${y0}" y2="${y0}" stroke-width="1"/>`;
+function bar(x,v,color,name,d){
+  const h=Math.abs(y(v)-y0), top=v>=0?y(v):y0;
+  const rTop=v>=0?4:0, rBot=v>=0?0:4;
+  const path=`M${x},${top+rTop} q0,-${rTop} ${rTop},-${rTop} h${barW-2*rTop} q${rTop},0 ${rTop},${rTop} v${h-rTop-rBot} q0,${rBot} -${rBot},${rBot} h-${barW-2*rBot} q-${rBot},0 -${rBot},-${rBot} z`;
+  return `<path d="${path}" fill="${color}" data-name="${name}" data-dec="${d.dec}"
+           data-v="${v}" data-span="${d.span}"/>`+
+         `<text x="${x+barW/2}" y="${v>=0?top-5:top+h+13}" text-anchor="middle"
+           font-size="11.5" font-weight="600">${v.toFixed(1).replace('.',',')}</text>`;
+}
+DATA.forEach((d,i)=>{
+  const cx=m.l+groupW*i+groupW/2;
+  if(d.dec==="Всё окно")
+    s+=`<line class="grid" x1="${cx-groupW/2}" x2="${cx-groupW/2}" y1="${m.t}" y2="${H-m.b}" stroke-dasharray="3,3"/>`;
+  s+=bar(cx-barW-1,d.c2,css('--s1'),'ADD-FUT 2 ноги',d);
+  s+=bar(cx+1,     d.c3,css('--s2'),'+золото 3 ноги',d);
+  s+=`<text class="sec" x="${cx}" y="${H-8}" text-anchor="middle" font-size="12">${d.dec}</text>`;
+});
+svg.innerHTML=s;
+svg.addEventListener('pointermove',e=>{
+  const t=e.target.closest('path[data-name]');
+  if(!t){tip.style.opacity=0;return;}
+  tip.innerHTML=`<b>${t.dataset.dec}</b> · ${t.dataset.name}<br>`+
+    `${(+t.dataset.v).toFixed(2).replace('.',',')}% годовых<br>`+
+    `<span style="opacity:.75">${t.dataset.span}</span>`;
+  tip.style.opacity=1;
+  tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY-10)+'px';
+});
+svg.addEventListener('pointerleave',()=>tip.style.opacity=0);
+document.getElementById('tbl').innerHTML =
+ '<table><tr><th>Период</th><th>Две ноги</th><th>Три ноги</th><th>Окно</th></tr>'+
+ DATA.map(d=>`<tr><td>${d.dec}</td><td>${d.c2.toFixed(2).replace('.',',')}%</td>`+
+   `<td>${d.c3.toFixed(2).replace('.',',')}%</td><td style="text-align:left">${d.span}</td></tr>`).join('')+
+ '</table>';
+</script>
+</body></html>

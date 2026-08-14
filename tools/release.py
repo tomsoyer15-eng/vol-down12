@@ -15,9 +15,30 @@ Z = ROOT / 'paket-ADD-FUT-v1_6_0-r33.zip'
 MAN = R / 'MANIFEST-192.txt'
 
 
+def _git_base():
+    """СЛЕД ПРОИСХОЖДЕНИЯ ВЫПУСКА (девятнадцатый круг, №22). Манифест пересчитывается по
+    текущему дереву и потому аттестует лишь САМОСОГЛАСОВАННОСТЬ архива — внешнего эталона
+    до коммита не существует (порядок «выпуск -> коммит» нормативен после инцидента 14-го
+    круга). Записываются git-база и число изменённых относительно неё файлов: пересчёт
+    становится ВИДИМЫМ пост-фактум и сверяемым с историей git/releases/WORM — предел
+    признан в §12, след обязателен."""
+    r = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return '# git-base: недоступна (выпуск вне репозитория)'
+    head = r.stdout.strip()
+    d = subprocess.run(['git', '-C', str(ROOT), 'status', '--porcelain', '--', 'r33build'],
+                       capture_output=True, text=True)
+    dirty = len([l for l in d.stdout.splitlines() if l.strip()])
+    return (f'# git-base {head} (+{dirty} изменённых файлов r33build относительно HEAD '
+            f'на момент выпуска)')
+
+
 def refresh_manifest():
     out, miss = [], []
     for ln in MAN.read_text(encoding='utf-8').splitlines():
+        if ln.lstrip().startswith('# git-base'):
+            continue                       # след прошлого выпуска заменяется свежим
         m = re.match(r'^([0-9a-f]{64})\s+(\S+)$', ln.strip())
         if not m:
             out.append(ln); continue
@@ -27,7 +48,7 @@ def refresh_manifest():
         out.append(f'{hashlib.sha256(f.read_bytes()).hexdigest()}  {m.group(2)}')
     if miss:
         sys.exit(f'НЕТ ФАЙЛОВ ИЗ МАНИФЕСТА: {miss}')
-    MAN.write_text('\n'.join(out) + '\n', encoding='utf-8')
+    MAN.write_text('\n'.join([_git_base()] + out) + '\n', encoding='utf-8')
     return [l.split(None, 1)[1] for l in out if re.match(r'^[0-9a-f]{64}\s', l)]
 
 

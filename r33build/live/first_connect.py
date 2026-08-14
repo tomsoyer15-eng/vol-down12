@@ -63,6 +63,50 @@ def tag_from_expiry(expiry):
     return f'{mm[m]}{y % 100}' if m in mm else None
 
 
+def check_future_identity(contract, root, tag):
+    """Ответ биржи против ЗАПРОШЕННОЙ поставки (восемнадцатый круг, №7). Прежняя запись
+    копировала expiry/con_id из ответа как есть — под именем U26 мог честно завериться
+    декабрьский контракт, и все дальнейшие «проверки личности» шли по кругу против тех же
+    скопированных полей. Отдельной функцией — чтобы защита была под стендом и мутацией."""
+    errs = []
+    _exp = str(getattr(contract, 'lastTradeDateOrContractMonth', '') or '')
+    _mon = int(_exp[4:6]) if len(_exp) >= 6 else 0
+    _tagL = {3: 'H', 6: 'M', 9: 'U', 12: 'Z'}.get(_mon, '?')
+    _tag_actual = f'{_tagL}{_exp[2:4]}' if len(_exp) >= 6 else '??'
+    if _tag_actual != tag:
+        errs.append(f'{root}{tag}: биржа вернула экспирацию {_exp} (серия {_tag_actual}) — '
+                    f'не запрошенная поставка')
+    if getattr(contract, 'symbol', '') != root:
+        errs.append(f'{root}{tag}: символ биржи {getattr(contract, "symbol", "")!r} — '
+                    f'не запрошенный корень')
+    return errs
+
+
+def check_etf_line(contract, sym, ticker, prim, cur, isin_exch, want_isin):
+    """Листинговая ЛИНИЯ фонда против ОЖИДАНИЙ (девятнадцатый круг, №6). Один ISIN линии
+    не различает: тот же фонд листингован на нескольких площадках, и det[0] другой линии
+    становился «нормой» — фактическая площадка записывалась в реестр, а сверка личности
+    затем сравнивала контракт со своей же копией. Торговые окна и календарь при этом
+    остаются рассчитанными для LSE/SIX, а заявка ушла бы на другой рынок."""
+    errs = []
+    if not isin_exch:
+        errs.append(f'{sym}: биржа не вернула ISIN — личность фонда не подтверждена')
+    elif isin_exch != want_isin:
+        errs.append(f'{sym}: ISIN у биржи {isin_exch}, ожидался {want_isin} — другая '
+                    f'листинговая линия')
+    _pe = getattr(contract, 'primaryExchange', '') or ''
+    if _pe != prim:
+        errs.append(f'{sym}: primaryExchange у биржи {_pe!r}, ожидалась {prim!r} — другая '
+                    f'листинговая линия того же фонда')
+    _sy = getattr(contract, 'symbol', '') or ''
+    if _sy != ticker:
+        errs.append(f'{sym}: биржевой тикер {_sy!r}, ожидался {ticker!r}')
+    _cu = getattr(contract, 'currency', '') or ''
+    if _cu != cur:
+        errs.append(f'{sym}: валюта {_cu!r}, ожидалась {cur!r}')
+    return errs
+
+
 def tag_to_yyyymm(tag):
     import daily as DL
     m, y = DL.tag_month(tag)
@@ -105,19 +149,13 @@ def main():
                 print(f'  {root}{tag}: КОНТРАКТ НЕ НАЙДЕН — проверить права или месяц поставки')
                 continue
             d = det[0]
-            # ПОСТАВКА СВЕРЯЕТСЯ, А НЕ КОПИРУЕТСЯ (восемнадцатый круг, №7): прежняя запись
-            # брала expiry/con_id из ответа биржи как есть — под именем U26 мог честно
-            # завериться декабрьский контракт, и все дальнейшие «проверки личности» шли по
-            # кругу против тех же скопированных полей. Буква серии выводится из ФАКТИЧЕСКОЙ
-            # экспирации и обязана совпасть с запрошенной; корень — с символом биржи.
-            _exp = str(d.contract.lastTradeDateOrContractMonth or '')
-            _mon = int(_exp[4:6]) if len(_exp) >= 6 else 0
-            _tagL = {3: 'H', 6: 'M', 9: 'U', 12: 'Z'}.get(_mon, '?')
-            _tag_actual = f'{_tagL}{_exp[2:4]}' if len(_exp) >= 6 else '??'
-            if _tag_actual != tag or d.contract.symbol != root:
-                raise SystemExit(
-                    f'{root}{tag}: биржа вернула {d.contract.symbol} с экспирацией {_exp} '
-                    f'(серия {_tag_actual}) — не запрошенная поставка, реестр не пишется')
+            # ПОСТАВКА СВЕРЯЕТСЯ, А НЕ КОПИРУЕТСЯ (восемнадцатый круг, №7): буква серии
+            # выводится из ФАКТИЧЕСКОЙ экспирации и обязана совпасть с запрошенной;
+            # корень — с символом биржи. Проверка вынесена в check_future_identity —
+            # под стенд и мутацию.
+            _bad = check_future_identity(d.contract, root, tag)
+            if _bad:
+                raise SystemExit('; '.join(_bad) + ' — реестр не пишется')
             rows.append(dict(instrument=f'{root}{tag}', sec_type=d.contract.secType,
                              pair_group='EQ' if root in ('ES', 'MES') else 'BOND',
                              exchange=exch, currency=cur, con_id=d.contract.conId,
@@ -141,13 +179,13 @@ def main():
                            ((getattr(x, 'value', ''), getattr(x, 'tag', ''))
                             for x in (getattr(d, 'secIdList', None) or []))
                            if tg == 'ISIN'), '')
-        if not _isin_exch:
-            # ОТСУТСТВИЕ ПОДТВЕРЖДЕНИЯ — НЕ ПОДТВЕРЖДЕНИЕ (тринадцатый круг, №7).
-            raise SystemExit(f'{sym}: биржа не вернула ISIN — личность фонда не '
-                             f'подтверждена, реестр не пишется')
-        if _isin_exch != isin:
-            raise SystemExit(f'{sym}: ISIN у биржи {_isin_exch}, ожидался {isin} — '
-                             f'другая листинговая линия, реестр не пишется')
+        # ЛИНИЯ ФОНДА — ПРОТИВ ОЖИДАНИЙ, А НЕ КОПИИ ОТВЕТА (девятнадцатый круг, №6):
+        # ISIN один на все линии; площадка, тикер и валюта обязаны совпасть с ожидаемыми
+        # константами (LSEETF/EBS), иначе det[0] другой линии становился бы «нормой», а
+        # сверка личности потом сравнивала бы контракт со своей же копией.
+        _bad = check_etf_line(d.contract, sym, ticker, prim, cur, _isin_exch, isin)
+        if _bad:
+            raise SystemExit('; '.join(_bad) + ' — реестр не пишется')
         # secType — КАК ЕГО ВИДИТ БИРЖА (у IBKR фонды — 'STK'); литерал 'ETF' в реестре
         # заставлял сверку личности отвергать НАСТОЯЩИЕ контракты маршрута Е (№14).
         rows.append(dict(instrument=sym, sec_type=d.contract.secType,

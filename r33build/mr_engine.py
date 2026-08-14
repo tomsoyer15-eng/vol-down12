@@ -474,11 +474,19 @@ def append_event(journal, asof, event, detail):
     # журнал и превращать его в «повреждённый» для всех последующих запусков (№26).
     if event not in KNOWN_EVENTS:
         raise ValueError(f'событие {event!r} не входит в KNOWN_EVENTS — запись отклонена')
+    _d_new = date.fromisoformat(str(asof))
     # межпроцессная блокировка вокруг read-modify-write
-    try: body = open(journal, encoding='utf-8').read()
-    except FileNotFoundError: body = 'asof,event,detail\n'
-    if not body.startswith('asof'): body = 'asof,event,detail\n' + body
     with _locked(journal):
+        # ДАТЫ ЖУРНАЛА НЕ УБЫВАЮТ (девятнадцатый круг, №14): derive_state читает события в
+        # ФАЙЛОВОМ порядке, и ретро-датированная запись (запуск run со старым --asof после
+        # новых событий) обрабатывалась бы ПОСЛЕДНЕЙ — старый SWITCH_SIGNAL становился
+        # действующим pending, и OWNER_APPROVE перевёл бы счёт по устаревшему решению.
+        _rows = journal_rows(journal)
+        if _rows and _rows[-1][0] > _d_new:
+            raise ValueError(
+                f'событие {event} с датой {_d_new} РАНЬШЕ последней записи журнала '
+                f'({_rows[-1][0]}) — ретро-запись меняла бы действующее состояние, '
+                f'запись отклонена (№14)')
         _append_raw(journal, asof, event, detail)
 
 def write_state_cache(state_path, journal, asof):
@@ -726,6 +734,13 @@ def confirm_transition(journal, state_path, asof, target, kind='complete', tid='
         ev = {'open': 'TRANSITION_OPEN', 'complete': 'TRANSITION_COMPLETE', 'abort': 'TRANSITION_ABORT',
               'mixed': 'TRANSITION_MIXED', 'resolved': 'TRANSITION_RESOLVED'}[kind]
         det = f'{target}|{sid}|{tid}' if (sid or tid) else target
+        # ДАТЫ НЕ УБЫВАЮТ И ЗДЕСЬ (девятнадцатый круг, №14): подтверждение с историческим
+        # asof легло бы В КОНЕЦ файла и при текущем asof обрабатывалось бы последним.
+        _rows_all = journal_rows(journal)
+        if _rows_all and _rows_all[-1][0] > d:
+            print(f'confirm отклонён: дата {d} раньше последней записи журнала '
+                  f'({_rows_all[-1][0]}) — ретро-запись запрещена (№14)')
+            return False
         _append_raw(journal, asof, ev, det)
     write_state_cache(state_path, journal, d)
     return True

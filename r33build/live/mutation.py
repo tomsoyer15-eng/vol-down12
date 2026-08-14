@@ -454,7 +454,57 @@ def _adapter_mutations():
             return orig(ib, c, row)
         return orig, patched, CT
 
+    def summary_from_cache():
+        """Сводка счёта читается из кэша подписки (как было до девятнадцатого круга, №4):
+        request/end-барьер снят, доторговый NLV выдаётся за свежий."""
+        orig = B.IBBroker._summary_barrier
+        return orig, (lambda self: None)
+
+    def rec_from_status():
+        """Цена и комиссия — из статуса и без execId-фильтра (как было до девятнадцатого
+        круга, №16): нулевая статусная цена давала пустой px_fill, непришедшая комиссия
+        писалась нулём."""
+        orig = B.IBBroker._rec
+
+        def patched(self, tr, instrument, qty, px_order):
+            filled = self._executed(tr)
+            px_fill = float(tr.orderStatus.avgFillPrice or 0) or None
+            perm = getattr(tr.order, 'permId', 0)
+            comm = sum(float(f.commissionReport.commission or 0) for f in self.ib.fills()
+                       if getattr(f.execution, 'permId', 0) == perm
+                       and f.contract.conId == tr.contract.conId)
+            rec = dict(order_id=tr.order.orderId, instrument=instrument, qty=qty,
+                       filled=filled, px_order=px_order, px_fill=px_fill, commission=comm,
+                       status=tr.orderStatus.status)
+            if abs(filled - qty) > 1e-9:
+                rec['incident'] = 'недобор'
+            return rec
+        return orig, patched
+
+    def etf_line_isin_only():
+        """Линия ETF заверяется одним ISIN (как было до девятнадцатого круга, №6):
+        площадка и тикер копируются из ответа без сверки с ожиданиями."""
+        import first_connect as FC
+        orig = FC.check_etf_line
+
+        def patched(contract, sym, ticker, prim, cur, isin_exch, want_isin):
+            if isin_exch and isin_exch == want_isin:
+                return []
+            return [f'{sym}: ISIN не совпал']
+        return orig, patched, FC
+
+    def future_identity_copied():
+        """Поставка копируется из ответа биржи (как было до восемнадцатого круга, №7)."""
+        import first_connect as FC
+        orig = FC.check_future_identity
+        return orig, (lambda contract, root, tag: []), FC
+
     return [('дробная доля усекается до целого', 'place', truncating_place),
+            ('сводка счёта из кэша подписки', '_summary_barrier', summary_from_cache),
+            ('цена и комиссия из статуса', '_rec', rec_from_status),
+            ('линия ETF по одному ISIN', 'check_etf_line', etf_line_isin_only),
+            ('поставка копируется из ответа', 'check_future_identity',
+             future_identity_copied),
             ('исполнения по orderId, не по permId', '_executed', orderid_matching),
             ('позиции одним снимком', 'refresh', single_snapshot),
             ('счёт в позициях игнорируется', '_snapshot', ignore_account),
@@ -627,10 +677,33 @@ def _feed_mutations():
         orig = FD.MODEL_MULT
         return orig, {}, 'MODEL_MULT'
 
+    def refs_loose_age():
+        """Ориентиры без точной предыдущей сессии (как было до девятнадцатого круга,
+        №16): дальняя серия, отставшая на сессию, проходит пятидневный допуск."""
+        orig = FD.reference_prices
+
+        def patched(ib, route='F'):
+            today = FD.exchange_today()
+            reg = FD.registry()
+            want = ('CSPX', 'CBU0') if route == 'E' else ('ES', 'MES', 'ZN')
+            out = {}
+            for name, r in reg.items():
+                if not any(name.startswith(w) for w in want):
+                    continue
+                try:
+                    px, _, _, _ = FD.closes(ib, FD.contract_of(ib, name, reg), today)
+                    out[name] = px
+                except FD.FeedError as ex:
+                    out[f'ОРИЕНТИР-НЕТ:{name}'] = str(ex)[:80]
+                    continue
+            return out
+        return orig, patched, 'reference_prices'
+
     return [('множители биржи не сверяются с моделью', no_mult_check),
             ('цена ES без приведения к единице', raw_es_price),
             ('состояние ноги через bool()', loose_bool),
             ('даты баров не проверяются', no_date_check),
+            ('ориентиры без точной сессии', refs_loose_age),
             ('нет строки месяца — берётся последняя', fallback_last_row)]
 
 
@@ -750,6 +823,84 @@ def _run_mutations():
                 super().__init__(msg, provable=True)
         return orig, patched, DLm, 'RollGap'
 
+    def post_o3e_swallow_none():
+        """Пост-трейд None глотается (как было до девятнадцатого круга, №10): тревога
+        только при известно-низком запасе, неизвестный принимается молча."""
+        import daily as DLm
+        orig = SS.post_o3e_alarm
+        return orig, (lambda pc, ba: pc is not None and pc < DLm.O3E_MIN), SS, 'post_o3e_alarm'
+
+    def post_o3e_removed():
+        """Пост-трейд проверка О-3-Е удалена целиком (как было до восемнадцатого круга,
+        №1): запас после исполнений не смотрит никто."""
+        orig = SS.post_o3e_alarm
+        return orig, (lambda pc, ba: False), SS, 'post_o3e_alarm'
+
+    def dry_writes_journal():
+        """Наблюдение пишет строки §7 без итоговой (как было до девятнадцатого круга,
+        №15): следующая живая сессия видит незакрытый журнал и отказывает."""
+        import daily as DLm
+        import journal as JJ
+        orig = DLm.run_session
+
+        def patched(broker, market, **kw):
+            out = orig(broker, market, **kw)
+            if kw.get('dry_run') and kw.get('journal_path'):
+                JJ.append(kw['journal_path'], dict(
+                    date=f'{market.date:%Y-%m-%d}', leg='А', instrument='ESU26', qty=1,
+                    px_order='7747.5', px_fill='', commission='', reason='наблюдение',
+                    nav='', leverage='', roll_spread_near='', roll_spread_far='', note=''))
+            return out
+        return orig, patched, DLm, 'run_session'
+
+    def statedir_own_home():
+        """Каталог журнала/тревог живёт своей жизнью (как было до девятнадцатого круга,
+        №17): без ADDFUT_DIR — жёсткий ~/.addfut вместо каталога замка."""
+        import os as _os
+        from pathlib import Path as _P
+        orig = SS.state_dir
+        return (orig,
+                (lambda: _P(_os.environ.get('ADDFUT_DIR', _os.path.expanduser('~/.addfut')))),
+                SS, 'state_dir')
+
+    def worm_missing_ok():
+        """Отсутствие обязательного файла — строка «ФАЙЛА НЕТ» при успешном снимке
+        (как было до девятнадцатого круга, №18)."""
+        import worm_anchor as WA
+        import hashlib as _hl
+        from pathlib import Path as _P
+        orig = WA._sha
+
+        def patched(p, required=False):
+            try:
+                return _hl.sha256(_P(p).read_bytes()).hexdigest()
+            except OSError:
+                return 'ФАЙЛА НЕТ'
+        return orig, patched, WA, '_sha'
+
+    def worm_git_name_only():
+        """HEAD проверяется по ИМЕНИ файла (как было до девятнадцатого круга, №19):
+        подмена содержимого pre-commit hook'ом проходит заверение."""
+        import subprocess as _sp
+        import worm_anchor as WA
+        orig = WA._git_commit_verified
+
+        def patched(out):
+            rel = out.relative_to(WA.ROOT)
+            r1 = _sp.run(['git', '-C', str(WA.ROOT), 'add', str(rel)],
+                         capture_output=True, text=True)
+            if r1.returncode != 0:
+                raise RuntimeError('git add отказал')
+            r2 = _sp.run(['git', '-C', str(WA.ROOT), 'commit', '-q', '-m', 'w'],
+                         capture_output=True, text=True)
+            if r2.returncode != 0:
+                raise RuntimeError('git commit отказал')
+            r3 = _sp.run(['git', '-C', str(WA.ROOT), 'ls-tree', '--name-only', 'HEAD',
+                          str(rel)], capture_output=True, text=True)
+            if r3.returncode != 0 or not r3.stdout.strip():
+                raise RuntimeError('якорь не виден в HEAD')
+        return orig, patched, WA, '_git_commit_verified'
+
     return [('книга после перехода пишется мимо контура', handover_wrong_path),
             ('входная сверка книги отключена', no_reconcile),
             ('наблюдение подаёт заявки', dry_trades),
@@ -759,6 +910,12 @@ def _run_mutations():
             ('цель О-3-Е от старого капитала', o3e_stale_target),
             ('итог сессии не пишется', no_session_total),
             ('журнал не проверяется перед торговлей', no_journal_verify),
+            ('пост-трейд None глотается', post_o3e_swallow_none),
+            ('пост-трейд проверка О-3-Е удалена', post_o3e_removed),
+            ('наблюдение пишет строки §7', dry_writes_journal),
+            ('каталог тревог живёт своей жизнью', statedir_own_home),
+            ('нет файла — «ФАЙЛА НЕТ» при успехе', worm_missing_ok),
+            ('HEAD проверяется по имени', worm_git_name_only),
             ('маршрут игнорируется', force_route_f)]
 
 
@@ -887,6 +1044,39 @@ def _transition_mutations():
                         _M, journal)
         return orig, patched, '_run_lots'
 
+    def gate_sell_only():
+        """Лимит 390 — только перед продажей (как было до девятнадцатого круга, №8):
+        покупка №391 и компенсации уходят брокеру без проверки."""
+        orig = TRN._order_gate
+
+        def patched(st, broker, fail, where=''):
+            if str(where).startswith('продажа'):
+                return orig(st, broker, fail, where)
+        return orig, patched, '_order_gate'
+
+    def mapped_only():
+        """Маржа preflight — только по отображённой книге (как было до девятнадцатого
+        круга, №2): безопасность доказывается для ДРУГОЙ физической книги."""
+        orig = TRN.target_book
+        return orig, (lambda legs, mapped=True: orig(legs, True)), 'target_book'
+
+    def maint_first():
+        """Требование серии — maint прежде init (как было до восемнадцатого круга, №13):
+        поддерживающее занижает маржу открытия."""
+        orig = TRN._margin_of
+        return orig, (lambda v: float(v.get('maint') or v.get('init'))), '_margin_of'
+
+    def age_unchecked():
+        """Давность замера не проверяется (как было до восемнадцатого круга, №13)."""
+        orig = TRN._meta_age_ok
+        return orig, (lambda md: (True, 0)), '_meta_age_ok'
+
+    def alarm_silent():
+        """Тревога перехода не пишется (как было до девятнадцатого круга, №13): MIXED
+        после публикации книги остаётся невидимым автопилоту."""
+        orig = TRN._alarm_transition
+        return orig, (lambda asof, reason: ''), '_alarm_transition'
+
     return [('дробность источника не признаётся', no_frac),
             ('лимит непарной дельты снят', limit_off),
             ('дробный остаток округляется вверх', round_up_tail),
@@ -895,6 +1085,11 @@ def _transition_mutations():
             ('дыры замера добираются константами', margin_gap_constants),
             ('частичный прогресс лота выбрасывается', partial_ignored),
             ('остаток непарной дельты обнуляется', resume_unp_zeroed),
+            ('лимит 390 только перед продажей', gate_sell_only),
+            ('маржа только по отображённой книге', mapped_only),
+            ('maint прежде init', maint_first),
+            ('давность замера не проверяется', age_unchecked),
+            ('тревога перехода не пишется', alarm_silent),
             ('завершённые лоты исполняются повторно', replay_done)]
 
 
@@ -983,7 +1178,56 @@ def _roll_mutations():
             return d
         return orig, patched, DL, 'step'
 
+    def pending_global():
+        """Признак отложенного ролла — ОБЩИЙ для ног (как было до девятнадцатого круга,
+        №1): pending='Б' на повторе роллит и исправную А — Z26 уезжает в H27."""
+        orig = DL.step
+
+        def patched(book, m, capital, **kw):
+            rp = getattr(book, 'roll_pending', False)
+            if isinstance(rp, str) and rp:
+                import dataclasses as dc
+                book = dc.replace(book, roll_pending=True)
+            return orig(book, m, capital, **kw)
+        return orig, patched, DL, 'step'
+
+    def pack_not_trade():
+        """Смена упаковки не считается сделкой (как было до девятнадцатого круга, №3):
+        заявок нет, финальная сверка падает каждую сессию."""
+        orig = DL.Decision.trade
+        patched = property(lambda self: bool(self.orders or self.roll_pairs))
+        return orig, patched, DL.Decision, 'trade'
+
+    def aliens_swallowed():
+        """Посторонняя позиция выбрасывается при построении книги (как было до
+        девятнадцатого круга, №12): чужой инструмент остаётся неуправляемым."""
+        orig = ST.book_from_broker
+
+        def patched(cls, positions, route, *, ser_a=None, ser_b=None, unit_is_mes=True,
+                    d_fix=0.0, st_eq=None, st_bd=None, roll_pending=False):
+            pos = {k: float(v) for k, v in (positions or {}).items() if float(v) != 0.0}
+            _pend = roll_pending if isinstance(roll_pending, str) else bool(roll_pending)
+            if route == 'E':
+                return cls(n_eq=pos.get('CSPX', 0), n_bd=pos.get('CBU0', 0),
+                           prev_st_eq=st_eq, prev_st_bd=st_bd, roll_pending=_pend)
+            es = mes = zn = 0
+            for k, v in pos.items():
+                if k.startswith('MES'):
+                    mes += int(v); ser_a = ser_a or k[3:]
+                elif k.startswith('ES'):
+                    es += int(v); ser_a = ser_a or k[2:]
+                elif k.startswith('ZN'):
+                    zn += int(v); ser_b = ser_b or k[2:]
+            return cls(n_e=(es * 10 + mes) if unit_is_mes else es, n_b=zn,
+                       unit_is_mes=unit_is_mes, d_fix=d_fix, ser_a=ser_a, ser_b=ser_b,
+                       es_held=es if unit_is_mes else None,
+                       prev_st_eq=st_eq, prev_st_bd=st_bd, roll_pending=_pend)
+        return orig, patched, ST, 'book_from_broker'
+
     return [('просрочка одной ноги роллит обе', global_overdue),
+            ('roll_pending общий для ног', pending_global),
+            ('смена упаковки не сделка', pack_not_trade),
+            ('посторонняя позиция глотается', aliens_swallowed),
             ('навёрстывание видит только ногу А', ser_a_only),
             ('стоимость ролла списывается с обеих ног', roll_cost_both),
             ('признак отложенного ролла теряется', pending_lost),
@@ -1068,14 +1312,107 @@ def _signal_mutations():
                 raise
         return orig, patched, '_check_levels'
 
+    def quotes_off():
+        """Срез котировок не сверяется (как было до девятнадцатого круга, №5): общая
+        порча сделочных срезов (ADJUSTED и TRADES — один бар) проходит молча."""
+        orig = SU._verify_quotes
+        return orig, (lambda ib, c, sym, mt, months, dur: None), '_verify_quotes'
+
     return [('сверка уровней отключена', levels_off),
             ('частичный сайдкар принимается', partial_ok),
             ('сверка свежего месяца отключена', fresh_off),
+            ('срез котировок не сверяется', quotes_off),
             ('сверяется только последний месяц', fresh_last_only),
             ('короткая база уровней принимается', short_base_ok),
             ('пограничная зона не расширена', border_fixed),
             ('сверка перекрытия отключена', overlap_off),
             ('потерянный хвост месяца принимается', tail_off)]
+
+
+def _j7_mutations():
+    """Мутации СВЕРКИ §7 (девятнадцатый круг, №16; долг пар восемнадцатого, №15/№16):
+    каждая воспроизводит поведение до правки."""
+    import journal as J
+
+    def _excl(mark=True, counter=True, empty=True):
+        import re as _re
+
+        def patched(rows):
+            skip = {}
+            data = [r for r in rows if r.get('instrument') != 'ИТОГ']
+            per_date = {}
+            for r in data:
+                per_date[r['date']] = per_date.get(r['date'], 0) + 1
+            for r in rows:
+                if r.get('instrument') != 'ИТОГ':
+                    continue
+                if mark and 'исключ' in (r.get('note') or ''):
+                    skip.setdefault(r['date'], 'пометка')
+                m = _re.search(r'строк (\d+)', r.get('note') or '')
+                if counter and m and per_date.get(r['date'], 0) != int(m.group(1)):
+                    skip.setdefault(r['date'], 'счётчик')
+            if empty:
+                for r in data:
+                    if r['qty'] and (not r['px_fill'] or not r['px_order']):
+                        skip.setdefault(r['date'], 'пустая цена')
+            return skip
+        return patched
+
+    def marks_unread():
+        """Пометки исключения не читаются (как было до восемнадцатого круга, №15)."""
+        return J._excluded_dates, _excl(mark=False), '_excluded_dates'
+
+    def counter_unchecked():
+        """Счётчик строк ИТОГ не сверяется (как было до девятнадцатого круга, №16)."""
+        return J._excluded_dates, _excl(counter=False), '_excluded_dates'
+
+    def empty_dropped_silently():
+        """Пустые цены отбрасываются молча, дата остаётся в выборке (как было)."""
+        return J._excluded_dates, _excl(empty=False), '_excluded_dates'
+
+    def nan_passes():
+        """NaN проходит арифметику (как было до девятнадцатого круга, №16)."""
+        return J._num, (lambda x, what: float(x)), '_num'
+
+    def roll_two_sided():
+        """Ролловый номинал двусторонний (как было до восемнадцатого круга, №16):
+        измеренная ставка занижается вдвое."""
+        orig = J._roll_block
+
+        def patched(sub):
+            if not sub:
+                return dict(label='ролл', n=0, verdict='наблюдений нет')
+            bp, notional = J._cost_bp(sub)
+            ratio = bp / J.MODEL_ROLL_BP if J.MODEL_ROLL_BP else float('inf')
+            return dict(label='ролл', n=len(sub), bp=bp, model_bp=J.MODEL_ROLL_BP,
+                        notional=notional, ratio=ratio, verdict=J._verdict(ratio))
+        return orig, patched, '_roll_block'
+
+    return [('пометки исключения не читаются', marks_unread),
+            ('счётчик итога не сверяется', counter_unchecked),
+            ('пустые цены отбрасываются молча', empty_dropped_silently),
+            ('NaN проходит арифметику', nan_passes),
+            ('ролловый номинал двусторонний', roll_two_sided)]
+
+
+def run_j7_mutations():
+    import journal as J
+    import invariants as I
+    miss = _clean_baseline('сверка §7', lambda: I.run_j7())
+    if miss:
+        return miss
+    print(f"\n{'мутация сверки §7':<40}{'поймана':>9}  какими утверждениями")
+    for label, make in _j7_mutations():
+        orig, patched, attr = make()
+        setattr(J, attr, patched)
+        try:
+            _, bad = I.run_j7()
+        finally:
+            setattr(J, attr, orig)
+        print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
+        if not bad:
+            miss.append(label)
+    return miss
 
 
 def run_signal_mutations():
@@ -1400,7 +1737,7 @@ if __name__ == '__main__':
               + run_session_mutations() + run_feed_mutations()
               + run_run_mutations() + run_transition_mutations()
               + run_roll_mutations() + run_signal_mutations()
-              + run_refusal_mutations())
+              + run_refusal_mutations() + run_j7_mutations())
     if miss_a:
         print(f"\nМУТАЦИИ АДАПТЕРА, КОТОРЫХ НЕ ПОЙМАЛ НИКТО ({len(miss_a)}):")
         for m_ in miss_a:

@@ -260,17 +260,24 @@ class Decision:
     cap_before: tuple = None      # книга ДО обрезки капом: без неё глубину среза не проверить
     cushion: float = float('inf')                  # маршрут Е: запас к поддерживающему требованию
     daily_costs: dict = field(default_factory=dict)
+    # СМЕНА УПАКОВКИ ES/MES БЕЗ ИЗМЕНЕНИЯ ЭКСПОЗИЦИИ (девятнадцатый круг, №3): n_e/n_b не
+    # меняются, roll_pairs пуст, но физическая книга у брокера другая (например 29 MES ->
+    # 2 ES + 9 MES после перехода Е->Ф). Без признака решение считалось «без сделки», заявки
+    # не подавались, а финальная сверка падала на рассинхронизации КАЖДУЮ сессию.
+    pack_change: bool = False
 
     @property
     def trade(self):
         """Есть ли что подавать брокеру. РОЛЛ УЧИТЫВАЕТСЯ: при чистом переносе серии число
         контрактов не меняется и orders пуст, но две заявки подать обязаны — иначе книга
-        останется в старой серии, а учёт будет считать её перенесённой."""
+        останется в старой серии, а учёт будет считать её перенесённой. СМЕНА УПАКОВКИ
+        ES/MES — ТОЖЕ СДЕЛКА (девятнадцатый круг, №3): экспозиция та же, но физическая
+        книга другая, и без заявок контур зацикливается на расхождении с брокером."""
         # НЕ завязано на refusals: step() уже оставил только разрешённое (сокращение риска
         # и перенос серии), а полный запрет выражается пустыми orders и roll_pairs. Прежняя
         # редакция при отказе НЕ подавала спасительных заявок, но состояние сохраняла как
         # исполненное — брокер оставался с опасной позицией, а книга считала её закрытой.
-        return bool(self.orders or self.roll_pairs)
+        return bool(self.orders or self.roll_pairs or self.pack_change)
 
 
 def units(book, m):
@@ -347,19 +354,28 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
     # сессиями. Кто вызывает — тот и обязан знать календарь биржи; наша проверка лишь
     # выявляет расхождение и записывает его в причины решения.
     cal_roll = is_roll_day(m.date, getattr(m, 'holidays', ()) or ())
-    roll_now = m.roll_today or b.roll_pending
+    # ОТЛОЖЕННЫЙ РОЛЛ — ПЕР-НОЖНЫЙ (девятнадцатый круг, №1): признак несёт НОГИ, чей перенос
+    # откатился ('А', 'Б', 'АБ'); True — обе (наследие и квартальный ролл целиком). Прежний
+    # ОБЩИЙ признак при смешанной книге (А уже в Z26, у Б откат U26->Z26) на повторе роллил
+    # и исправную А: Z26->H27 — дальняя серия, лишний оборот и одноногая дыра порядка NLV.
+    _rp = b.roll_pending
+    pend_a = _rp is True or (isinstance(_rp, str) and 'А' in _rp)
+    pend_b = _rp is True or (isinstance(_rp, str) and 'Б' in _rp)
+    roll_now_a = m.roll_today or pend_a
+    roll_now_b = m.roll_today or pend_b
+    roll_now = roll_now_a or roll_now_b
     # ПРОПУЩЕННЫЙ ДЕНЬ РОЛЛА НАВЁРСТЫВАЕТСЯ (девятая рецензия, №6). Если день ролла целиком
     # пропущен (остановка машины), назавтра roll_today уже ложен, а прежний код держал
     # старую серию до месяца поставки и получал лишь отказ. Признак: ролл цикла пройден, а
     # удерживаемая серия всё ещё та, которую календарь велел покинуть.
     # ПО КАЖДОЙ НОГЕ (тринадцатый круг, №1): просрочка ноги Б не повод роллить исправную
     # ногу А на квартал вперёд — у каждой серии свой срок.
-    missed_a = (not roll_now) and leg_roll_overdue(b.ser_a, m)
-    missed_b = (not roll_now) and leg_roll_overdue(b.ser_b, m)
+    missed_a = (not roll_now_a) and leg_roll_overdue(b.ser_a, m)
+    missed_b = (not roll_now_b) and leg_roll_overdue(b.ser_b, m)
     missed_roll = missed_a or missed_b
-    roll_a = roll_now or missed_a
-    roll_b = roll_now or missed_b
-    roll_any = roll_now or missed_roll
+    roll_a = roll_now_a or missed_a
+    roll_b = roll_now_b or missed_b
+    roll_any = roll_a or roll_b
     eq_switch = (m.st_eq != b.prev_st_eq)
     bd_switch = (m.st_bd != b.prev_st_bd)
     # d_fix — свойство НОГИ Б (четырнадцатый круг, №4; уточнение пятнадцатого, №1):
@@ -513,7 +529,8 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
     # Поставочный отказ не зависит от количеств — считается РОВНО ОДИН РАЗ, до возможного
     # пересчёта размеров.
     for leg, held in (('А', b.ser_a), ('Б', b.ser_b)):
-        _rolling_this_leg = roll_now or (missed_a if leg == 'А' else missed_b)
+        # пер-ножно (девятнадцатый круг, №1): роллящаяся нога — ровно roll_a / roll_b
+        _rolling_this_leg = roll_a if leg == 'А' else roll_b
         if held is not None and delivery_risk(held, m.date) and not _rolling_this_leg:
             d.refusals.append(f'нога {leg}: удерживается серия {held}, наступил её месяц '
                               f'поставки — сессия ролла пропущена, требуется ручной разбор (§1)')
@@ -544,6 +561,15 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
     d.book_after = replace(b, n_e=n_e, n_b=n_b, prev_close_lev=float('nan'),
                            prev_st_eq=m.st_eq, prev_st_bd=m.st_bd,
                            ser_a=tgt_a, ser_b=tgt_b, es_held=es_after, roll_pending=False)
+    # СМЕНА УПАКОВКИ — СДЕЛКА (девятнадцатый круг, №3): при неизменных n_e/n_b и пустых
+    # roll_pairs физическая книга может отличаться (es_held сменился, напр. 29 MES ->
+    # 2 ES + 9 MES после Е->Ф). Заявки строятся разностью книг и обязаны уйти брокеру.
+    # При отказе §8 упаковка НЕ трогается: repack — не сокращение риска и не перенос серии.
+    if (not d.refusals) and not d.orders and not d.roll_pairs \
+            and orders_from_books(book, d.book_after):
+        d.pack_change = True
+        d.reasons.append('смена упаковки ES/MES: физическая книга приводится к целевой, '
+                         'экспозиция не меняется')
     d.capital_after_costs = e
     d.exposure = {'А': exp_e, 'Б': exp_b}
     d.leverage = (exp_e + exp_b) / e if e else 0.0
@@ -1174,9 +1200,12 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                     # ТОЛЬКО ДОКАЗУЕМОЕ восстановление (шестнадцатый круг, №5): признак —
                     # структурный provable, а не подстрока сообщения; неизвестный исход
                     # не переносится автоматически — О-5 без записи состояния.
+                    # ПЕР-НОЖНО (девятнадцатый круг, №1): запоминаются РОВНО те ноги, чей
+                    # перенос откатился; общий True на повторе роллил и исправную ногу.
                     if getattr(gap, 'provable', False):
-                        ST.save(bp, replace(book, roll_pending=True), route, sess + 1,
-                                note=f'ролл отложен: {gap}')
+                        _legs = ''.join(sorted({p['leg'] for p in dec.roll_pairs})) or True
+                        ST.save(bp, replace(book, roll_pending=_legs), route, sess + 1,
+                                note=f'ролл отложен (ноги {_legs}): {gap}')
                     raise
             else:
                 # СВЕРКА НА КАЖДОЙ ЗАЯВКЕ. Прежде обычный путь подавал все заявки подряд и
@@ -1235,9 +1264,13 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                         raise RuntimeError(
                             f'{inst}: заявка {qty:+d}, исполнено {rec.get("filled")}; '
                             + note)
-        if journal_path:
+        # dry_run НЕ ПИШЕТ §7 (девятнадцатый круг, №15): строки наблюдения без итоговой
+        # оставляли журнал «незакрытым», и следующая ЖИВАЯ сессия отказывала — штатный
+        # режим П-2 детерминированно блокировал торговлю. Пишутся только сессии с заявками:
+        # им же ставится итоговая строка, и пара «строки+итог» не рвётся.
+        if journal_path and not dry_run:
             fills = {r['instrument']: r for r in placed}
-            _rows = J.rows_from_decision(dec, nlv, orders, fills)
+            _rows = J.rows_from_decision(dec, nlv, orders, fills) if dec.trade else []
             for row in _rows:
                 J.append(journal_path, row)
             # ИТОГОВАЯ СТРОКА СЕССИИ (семнадцатый круг, №15): маркер полноты. Обрыв между
