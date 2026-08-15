@@ -2646,7 +2646,11 @@ def _tr_run(case):
                 'expiry,multiplier,primary_exchange,isin\n'
                 'ESU26,FUT,EQ,CME,USD,1,ESU6,20260918,50,,\n'
                 'ZNU26,FUT,BOND,CBOT,USD,2,ZNU6,20260921,1000,,\n', encoding='utf-8')
-            _today = __import__('datetime').date.today().isoformat()
+            # ДАТА ЗАМЕРА — БИРЖЕВАЯ, НЕ МАШИННАЯ (грабли §7 CLAUDE.md). Проверка возраста
+            # считает от биржевого «сегодня»; фикстура штамповала машинной датой, и на
+            # смене суток в Чикаго возраст выходил −1 день — «замер из будущего».
+            import feed as _FDm
+            _today = _FDm.exchange_today().strftime('%Y-%m-%d')
             if case == 'битый замер маржи':
                 mp.write_text('{оборвано', encoding='utf-8')
             elif case == 'замер с нечисловой маржой':
@@ -2811,7 +2815,8 @@ def _tr_run(case):
                 'expiry,multiplier,primary_exchange,isin\n'
                 'ESU26,FUT,EQ,CME,USD,1,ESU6,20260918,50,,\n'
                 'MESU26,FUT,EQ,CME,USD,2,MESU6,20260918,5,,\n', encoding='utf-8')
-            _today2 = __import__('datetime').date.today().isoformat()
+            import feed as _FDm2
+            _today2 = _FDm2.exchange_today().strftime('%Y-%m-%d')   # биржевая дата
             mp2.write_text(_json.dumps({'_meta': {'date': _today2, 'account': 'DUTEST01',
                                                   'series': ['ESU26', 'MESU26']},
                                         'ESU26': {'init': 40000.0},
