@@ -236,6 +236,16 @@ def do_trade(ib, route, dry):
     if alien:
         raise Refused(f'на счёте посторонние позиции {alien} — сессия не считается')
 
+    # АКТИВНЫЙ МАРШРУТ СВЕРЯЕТСЯ (двадцать седьмой круг, №1). Маршрут брался из аргумента
+    # и не проверялся НИЧЕМ: `--route E` при действующем Ф открывал book-E.json или
+    # создавал пустую BookE и торговал её — до 2x CSPX/CBU0 в обход OWNER_APPROVE и всего
+    # переходного исполнителя. Источников истины два, и оба обязаны совпасть: route.txt
+    # (его читает автопилот) и маршрут нормативного журнала МР.
+    _active = ST.active_route()
+    if _active != route:
+        raise Refused(
+            f'запрошен маршрут {route}, а действующий — {_active}: смена маршрута идёт '
+            f'ТОЛЬКО через transition.py с одобрением заказчика, а не ключом сессии')
     bp = _book_path(route)
     cls = DL.BookE if route == 'E' else DL.Book
     book, sess, _ = ST.load(bp, cls)

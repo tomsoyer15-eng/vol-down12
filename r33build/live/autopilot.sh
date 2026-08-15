@@ -22,9 +22,22 @@ LIVE=$ROOT/r33build/live
 ST=$HOME/.addfut
 LOG=$ST/autopilot.log
 ENVF=$ST/ibgw.env
-ROUTE_F=$ST/route.txt            # действующий маршрут пишет hand_over_book; нет файла — Ф
+ROUTE_F=$ST/route.txt            # маршрут пишет hand_over_book; нет файла — ТРЕВОГА (№1)
 
-route() { cat "$ROUTE_F" 2>/dev/null || echo F; }
+route() {
+    # ПОТЕРЯ route.txt — НЕ ПОВОД ВЫБРАТЬ Ф (двадцать седьмой круг, №1). Молчаливый выбор
+    # маршрута по умолчанию означал бы торговлю книгой, которая может быть неактивной:
+    # после Ф→Е файл несёт E, и его исчезновение вернуло бы контур к фьючерсам поверх
+    # фондовой позиции. Нет файла — тревога и остановка.
+    if [ -s "$ROUTE_F" ]; then
+        cat "$ROUTE_F"
+    else
+        alarm_write "$ST/ALARM-route-$(chicago %F).txt" \
+            "нет $ROUTE_F — действующий маршрут неизвестен, торговля запрещена (О-5)" \
+            2>/dev/null || true
+        echo NONE
+    fi
+}
 
 # ОКНА ПО МАРШРУТУ (десятый круг, №8): фонды маршрута Е торгуются в Европе (LSE/EBS,
 # закрытие ~10:30 Чикаго). Торговать Е в 15:00 Чикаго значит вешать рыночные GTC на ночь
@@ -486,6 +499,10 @@ except Exception as ex:
             OK\ *) : ;;
             *) echo "$_rh" > "$_wr"; log "ВНИМАНИЕ: $_rh" ;;
         esac
+    fi
+    if [ "$(route)" = NONE ]; then
+        log "ТРЕВОГА: действующий маршрут неизвестен — торговля и замыкание запрещены"
+        return 0
     fi
     is_trade_day; _td=$?
     if [ "$_td" -eq 2 ]; then

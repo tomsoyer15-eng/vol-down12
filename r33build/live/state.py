@@ -25,6 +25,41 @@ from pathlib import Path
 STATE_VERSION = 1
 LOCK_NAME = 'addfut-book.lock'      # ОДНО имя для daily и transition
 
+def active_route():
+    """ДЕЙСТВУЮЩИЙ маршрут по ДВУМ источникам (двадцать седьмой круг, №1).
+
+    route.txt читает автопилот, нормативный журнал МР ведёт переходный исполнитель. Оба
+    обязаны говорить одно и то же: расхождение означает оборванный переход, а потеря
+    route.txt — не повод молча выбрать Ф (именно так ошибочный ручной запуск мог открыть
+    вторую книгу в обход одобрения заказчика).
+    """
+    import os as _o
+    rt = lock_dir() / 'route.txt'
+    _file = rt.read_text(encoding='utf-8').strip() if rt.exists() else None
+    _jrn = None
+    try:
+        import sys as _s
+        _root = Path(__file__).resolve().parent.parent
+        if str(_root) not in _s.path:
+            _s.path.insert(0, str(_root))
+        import mr_engine as _M
+        import datetime as _dt
+        _jp = _o.environ.get('ADDFUT_MR_JOURNAL') or (_root / 'mr_journal.csv')
+        if Path(_jp).exists():
+            _jrn = _M.derive_state(str(_jp), _dt.date.today())[0]
+    except Exception:
+        _jrn = None
+    if _file is None and _jrn is None:
+        raise RuntimeError(f'{rt}: файла маршрута нет и журнал МР недоступен — действующий '
+                           f'маршрут неизвестен, торговля запрещена (О-5)')
+    if _file is None:
+        return _jrn
+    if _jrn is not None and _jrn != _file:
+        raise RuntimeError(f'route.txt говорит {_file}, журнал МР — {_jrn}: переход '
+                           f'оборван или состояние подменено, торговля запрещена (О-5)')
+    return _file
+
+
 def lock_dir(hint=None):
     """ЕДИНСТВЕННЫЙ каталог блокировки. Прежде daily брал его из своего dirpath, а
     transition — из каталога своего state_path; при разных путях «общая» блокировка

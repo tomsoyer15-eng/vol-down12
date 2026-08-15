@@ -21,6 +21,8 @@ import os as _os0
 import tempfile as _tf0
 if not _os0.environ.get('ADDFUT_LOCK_DIR'):
     _os0.environ['ADDFUT_LOCK_DIR'] = _tf0.mkdtemp(prefix='addfut-inv-')
+    import pathlib as _pl0
+    (_pl0.Path(_os0.environ['ADDFUT_LOCK_DIR']) / 'route.txt').write_text('F')
 for _v0 in ('ADDFUT_BOOK_PATH', 'ADDFUT_DIR', 'ADDFUT_SIGNALS'):
     _os0.environ.pop(_v0, None)
 
@@ -855,6 +857,7 @@ def _intent_full(kind):
                                     close_provisional=True), 'F', 8)
         keep = os.environ.get('ADDFUT_BOOK_PATH'), os.environ.get('ADDFUT_LOCK_DIR')
         os.environ['ADDFUT_BOOK_PATH'] = str(bp); os.environ['ADDFUT_LOCK_DIR'] = tmp
+        (Path(tmp) / 'route.txt').write_text('F', encoding='utf-8')   # №1
         out = dict(kind=kind, raised=False, error='', dec=None, orders=None)
         # ОРИЕНТИРЫ И ЖУРНАЛ — КАК В БОЮ (двадцать второй круг, №17): живой вход обязан
         # нести оба, и фикстура без них проверяла путь, которого больше не существует.
@@ -1362,6 +1365,9 @@ def _session_run(case):
         real_now = pd.Timestamp.now
         os.environ['ADDFUT_DIR'] = tmp
         os.environ['ADDFUT_LOCK_DIR'] = tmp
+        # МАРШРУТ ЕСТЬ ВСЕГДА (двадцать седьмой круг, №1): его пишет hand_over_book, а
+        # пилот стартовал на Ф. Стенд без route.txt описывает состояние, которого нет.
+        (Path(tmp) / 'route.txt').write_text(route, encoding='utf-8')
         os.environ['ADDFUT_REGISTRY'] = str(reg)
         os.environ.pop('ADDFUT_BOOK_PATH', None)
         # ПИН ТОРГОВОГО СЧЁТА (двадцатый круг, №5). Контур обязан знать свой счёт, поэтому
@@ -1426,6 +1432,9 @@ def _session_run(case):
                           last_session='2026-08-11', close_provisional=False,
                           prev_close_lev=1.99)
             ST.save(Path(tmp) / 'book-E.json', b0, 'E', 3); _seed_j7('E', 3)
+            # СЛУЧАЙ ГОНЯЕТ МАРШРУТ Е (двадцать седьмой круг, №1): действующий
+            # маршрут обязан совпадать с запрошенным, иначе сессия честно отказывает.
+            (Path(tmp) / 'route.txt').write_text('E', encoding='utf-8')
             ib._pos = {cspx: 1195.0, cbu0: 6538.0}
             ib._shown = dict(ib._pos)
         if case == 'отказ дня по §8':
@@ -1826,6 +1835,9 @@ def _session_days(days=('2026-08-12', '2026-08-13', '2026-08-14')):
         FD.signal_state = lambda t, path=None, **kw: _sig(t, path=sig, **kw)
         os.environ['ADDFUT_DIR'] = tmp
         os.environ['ADDFUT_LOCK_DIR'] = tmp
+        # МАРШРУТ ЕСТЬ ВСЕГДА (двадцать седьмой круг, №1): его пишет hand_over_book, а
+        # пилот стартовал на Ф. Стенд без route.txt описывает состояние, которого нет.
+        (Path(tmp) / 'route.txt').write_text('F', encoding='utf-8')
         os.environ['ADDFUT_REGISTRY'] = str(reg)
         os.environ.pop('ADDFUT_BOOK_PATH', None)
         # ПИН ТОРГОВОГО СЧЁТА (двадцатый круг, №5): контур обязан знать свой счёт, и
@@ -1933,6 +1945,9 @@ def _session_late_fill():
         FD.signal_state = lambda t, path=None, **kw: _sig(t, path=sig, **kw)
         os.environ['ADDFUT_DIR'] = tmp
         os.environ['ADDFUT_LOCK_DIR'] = tmp
+        # МАРШРУТ ЕСТЬ ВСЕГДА (двадцать седьмой круг, №1): его пишет hand_over_book, а
+        # пилот стартовал на Ф. Стенд без route.txt описывает состояние, которого нет.
+        (Path(tmp) / 'route.txt').write_text('F', encoding='utf-8')
         os.environ['ADDFUT_REGISTRY'] = str(reg)
         os.environ.pop('ADDFUT_BOOK_PATH', None)
         # ПИН ТОРГОВОГО СЧЁТА (двадцатый круг, №5): контур обязан знать свой счёт, и
@@ -2057,6 +2072,9 @@ def _session_lock():
         # под selfcheck (свой ADDFUT_LOCK_DIR) родитель запирал каталог самопроверки, а
         # ребёнок — tmp: снова два файла. Оба обязаны смотреть в ОДИН каталог.
         os.environ['ADDFUT_LOCK_DIR'] = tmp
+        # МАРШРУТ ЕСТЬ ВСЕГДА (двадцать седьмой круг, №1): его пишет hand_over_book, а
+        # пилот стартовал на Ф. Стенд без route.txt описывает состояние, которого нет.
+        (Path(tmp) / 'route.txt').write_text('F', encoding='utf-8')
         with ST.hold_book_lock(tmp):
             r1 = subprocess.run(child, env=env, capture_output=True, text=True, timeout=30)
             out['held'] = (r1.stdout or '').strip()
@@ -2068,6 +2086,9 @@ def _session_lock():
         os.environ.pop('ADDFUT_LOCK_DIR', None)
         if keep_env is not None:
             os.environ['ADDFUT_LOCK_DIR'] = keep_env
+            # МАРШРУТ ЕСТЬ ВСЕГДА (двадцать седьмой круг, №1): его пишет hand_over_book, а
+            # пилот стартовал на Ф. Стенд без route.txt описывает состояние, которого нет.
+            (Path(keep_env) / 'route.txt').write_text('F', encoding='utf-8')
     return out
 
 
@@ -2084,6 +2105,9 @@ def _session_statedir():
     try:
         os.environ.pop('ADDFUT_DIR', None)
         os.environ['ADDFUT_LOCK_DIR'] = tmp
+        # МАРШРУТ ЕСТЬ ВСЕГДА (двадцать седьмой круг, №1): его пишет hand_over_book, а
+        # пилот стартовал на Ф. Стенд без route.txt описывает состояние, которого нет.
+        (Path(tmp) / 'route.txt').write_text('F', encoding='utf-8')
         out['ok'] = str(SS.state_dir()) == tmp
     except Exception as ex:
         out['raised'] = True; out['error'] = f'{type(ex).__name__}: {ex}'
@@ -2114,6 +2138,9 @@ def _worm_case(kind):
              'ADDFUT_BOOK_PATH', 'ADDFUT_DIR', 'ADDFUT_MARGINS')}
     try:
         os.environ['ADDFUT_LOCK_DIR'] = tmp
+        # МАРШРУТ ЕСТЬ ВСЕГДА (двадцать седьмой круг, №1): его пишет hand_over_book, а
+        # пилот стартовал на Ф. Стенд без route.txt описывает состояние, которого нет.
+        (Path(tmp) / 'route.txt').write_text('F', encoding='utf-8')
         for k in ('ADDFUT_BOOK_PATH', 'ADDFUT_DIR'):
             os.environ.pop(k, None)
         os.environ['ADDFUT_REGISTRY'] = str(ib_stub.fixture_registry(tmp))
@@ -2286,6 +2313,9 @@ def _session_route_switch():
         FD.signal_state = lambda t, path=None, **kw: _sig(t, path=sig, **kw)
         os.environ['ADDFUT_DIR'] = tmp
         os.environ['ADDFUT_LOCK_DIR'] = tmp
+        # МАРШРУТ ЕСТЬ ВСЕГДА (двадцать седьмой круг, №1): его пишет hand_over_book, а
+        # пилот стартовал на Ф. Стенд без route.txt описывает состояние, которого нет.
+        (Path(tmp) / 'route.txt').write_text('F', encoding='utf-8')
         os.environ['ADDFUT_REGISTRY'] = str(reg)
         os.environ.pop('ADDFUT_BOOK_PATH', None)
         # ПИН ТОРГОВОГО СЧЁТА (двадцатый круг, №5): контур обязан знать свой счёт, и
@@ -2817,6 +2847,7 @@ def _tr_run(case):
             td = tempfile.mkdtemp(prefix='addfut-al-')
             keepl = _os.environ.get('ADDFUT_LOCK_DIR')
             _os.environ['ADDFUT_LOCK_DIR'] = td
+            (__import__('pathlib').Path(td) / 'route.txt').write_text('F')
             try:
                 out['alarm_extra'] = TRN._alarm_transition('2026-08-14', 'проверка стендом')
                 out['alarm_file'] = (Path(td) /

@@ -621,16 +621,31 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
             # изменения ноги А уже не равнялся исходному _grid. Книга проходила проверку
             # 2,00 по ЗАВЫШЕННОМУ капиталу и после реальных заявок оставалась выше капа,
             # причём журнал писал «экспозиция не меняется», что стало неправдой.
+            # РЕШЕНИЕ ПРИНИМАЕТСЯ ПО ФАКТИЧЕСКОМУ ОБОРОТУ (двадцать седьмой круг, №4 и №5).
+            # Прежде цикл резал книгу, опираясь на капитал, из которого уже вычтен ИСХОДНЫЙ
+            # _grid плюс поштучная плата, а фактический _grid2 применялся ПОСЛЕ того, как
+            # n_e/n_b необратимо уменьшены: на границе капа продавался лишний контракт, и
+            # поздний возврат денег позицию не восстанавливал. Плюс комиссия среза ноги Б
+            # возвращалась, но повторно не списывалась — _grid2 считает только сетку А.
+            # Теперь на каждом шаге капитал пересчитывается ПОЛНОСТЬЮ от исходного: цена
+            # фактической перекладки плюс комиссии срезанных ZN.
+            _e0 = e + repack_cost(_grid, u_e)          # капитал ДО любых списаний перекладки
             _cut = []
+            def _e_at(ne, nb, cut):
+                _bk = replace(d.book_after, n_e=ne, n_b=nb,
+                              es_held=pack_es(b.es_held, ne, b.unit_is_mes, roll_a))
+                _g = repack_grid(orders_from_books(book, _bk), b.unit_is_mes)
+                _zn = sum(1 for x in cut if x == 'Б')
+                return _e0 - repack_cost(_g, u_e) - S.COST * u_b * _zn
+            e = _e_at(n_e, n_b, _cut)
             while (exp_e + exp_b) > cap * e and (n_e > 0 or n_b > 0):
                 if n_e > 0 and (u_e >= u_b or n_b == 0):
                     n_e -= 1; exp_e = n_e * u_e
-                    e -= S.COST * u_e                  # продажа единицы сетки ноги А
                     _cut.append('А')
                 else:
                     n_b -= 1; exp_b = n_b * u_b
-                    e -= S.COST * u_b                  # продажа одного ZN
                     _cut.append('Б')
+                e = _e_at(n_e, n_b, _cut)
             if _cut:
                 d.book_after = replace(d.book_after, n_e=n_e, n_b=n_b,
                                        es_held=pack_es(b.es_held, n_e, b.unit_is_mes, roll_a))
@@ -668,11 +683,8 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
                 # капитал занижался, и кап продавал лишний контракт. Считаем ИТОГОВЫЙ
                 # оборот по фактическим заявкам и списываем ровно его, возвращая обе
                 # предыдущие оценки.
+                # капитал уже посчитан в _e_at по фактическому обороту и комиссиям ZN
                 _grid2 = repack_grid(orders_from_books(book, d.book_after), b.unit_is_mes)
-                e += repack_cost(_grid, u_e)                  # вернуть исходную оценку
-                for _leg_cut in _cut:                          # вернуть поштучную плату
-                    e += S.COST * (u_e if _leg_cut == 'А' else u_b)
-                e -= repack_cost(_grid2, u_e)                  # списать фактический оборот
                 d.capital_after_costs = e
                 d.reasons.append(
                     f'оборот пересчитан по фактическим заявкам после среза капом: '
@@ -1430,6 +1442,25 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                               f'дописано по намерению, повторного решения не было')
             return dd, [], []
 
+        # ПРЕДВАРИТЕЛЬНОСТЬ ЗАКРЫТИЯ ПЕРЕПРОВЕРЯЕТСЯ ПОД ЗАМКОМ (двадцать седьмой круг, №6).
+        # do_trade читает книгу и проверяет close_provisional ДО долгого сбора рынка, а под
+        # замком run_session перечитывает книгу, но проверку не повторял. Другой процесс за
+        # это время мог принять вчерашнее намерение и сохранить книгу с close_provisional=
+        # True и prev_close_lev=NaN — а сравнение `NaN > 2` ЛОЖНО, то есть обязательный
+        # cap-срез предыдущего закрытия просто отключался.
+        # ТОЧНОЕ УСЛОВИЕ: незамкнутая книга ПРОШЛОЙ сессии. Книга сегодняшнего дня бывает
+        # предварительной законно (замыкание идёт отдельным запуском после 16:00), и
+        # запрещать её значило бы ломать штатный ход. Опасен именно перенос: вчерашняя
+        # сессия не замкнута, prev_close_lev = NaN, а сравнение `NaN > 2` ЛОЖНО — то есть
+        # обязательный cap-срез предыдущего закрытия молча отключается.
+        _cur_day = f'{market.date:%Y-%m-%d}'
+        if (getattr(book, 'close_provisional', False)
+                and getattr(book, 'last_session', None)
+                and str(book.last_session) < _cur_day):
+            raise RuntimeError(
+                f'книга сессии {book.last_session} не замкнута (close_provisional), а '
+                f'сегодня {_cur_day}: торговать по незамкнутому закрытию нельзя — триггер '
+                f'капа §1 считался бы по NaN и не сработал бы (О-5)')
         _pos_in, _oo_in = _snapshot_consistent(broker)
         diff = ST.reconcile(book, route, _pos_in, open_orders=_oo_in)
         if diff:
