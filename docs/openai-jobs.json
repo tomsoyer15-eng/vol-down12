@@ -613,5 +613,27 @@
   "request_id": "req_5e61c62ed0744d869f298497b28f5b64",
   "finished": "2026-08-15T17:20:25+00:00",
   "seconds": 5.3
+ },
+ {
+  "created": "2026-08-15T18:01:23+00:00",
+  "label": "рецензия двадцать шестого круга",
+  "model": "gpt-5.6-sol",
+  "response_id": "resp_0242124d118a66d9006a80a972ef78819284888747f3d41954",
+  "status": "completed",
+  "chars": 995596,
+  "fingerprint": "94a81d84b44ea0225e1a7ed3e9069770e158fd7935ba3b59f324520a6f5a8832",
+  "request_id": "req_4f40d013b7a54f75a4b5f4df798bdb39",
+  "finished": "2026-08-15T18:28:18+00:00",
+  "seconds": 1615.0
+ },
+ {
+  "created": "2026-08-15T19:25:51+00:00",
+  "label": "рецензия двадцать седьмого круга",
+  "model": "gpt-5.6-sol",
+  "response_id": "resp_0d2ef3a0de6b459c006a80bd3dfda481a08b25914d29c50da2",
+  "status": "queued",
+  "chars": 1006683,
+  "fingerprint": "9700bb554b27cb1519f426445499e6af97046086003fab77df74f7624f0c2869",
+  "request_id": "req_795f3547c4d0417e8e24771ff83a5e0d"
  }
 ]

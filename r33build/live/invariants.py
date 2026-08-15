@@ -2577,10 +2577,10 @@ def _tr_run(case):
     out = dict(case=case, raised=False, error='', lots=None, peak=None,
                calls=None, second_calls=None, log=None)
     ZN_U = 98_560.0
-    legs_fut = {'Б': dict(src=[('ZN', 10, ZN_U)], dst=('CBU0', 5.0, 'ETF'))}
+    legs_fut = {'Б': dict(src=[('ZNU26', 10, ZN_U)], dst=('CBU0', 5.0, 'ETF'))}
     legs_frac = {'Б': dict(src=[('CBU0', 2_000_000.5, 5.0)], dst=('ZN', ZN_U, 'FUT'))}
-    legs_dup = {'Б': dict(src=[('ZN', 10, ZN_U), ('ZN', 5, ZN_U)], dst=('CBU0', 5.0, 'ETF'))}
-    legs_bad = {'Б': dict(src=[('ZN', 10.5, ZN_U)], dst=('CBU0', 5.0, 'ETF'))}
+    legs_dup = {'Б': dict(src=[('ZNU26', 10, ZN_U), ('ZNU26', 5, ZN_U)], dst=('CBU0', 5.0, 'ETF'))}
+    legs_bad = {'Б': dict(src=[('ZNU26', 10.5, ZN_U)], dst=('CBU0', 5.0, 'ETF'))}
 
     try:
         if case == 'переход задним числом запрещён':
@@ -2666,7 +2666,13 @@ def _tr_run(case):
             _os.environ['ADDFUT_MARGINS'] = str(mp)
             _os.environ['ADDFUT_REGISTRY'] = str(rp)
             try:
-                reg = {'ES': dict(sec_type='FUT'), 'ZN': dict(sec_type='FUT')}
+                # РЕЕСТР СТЕНДА НЕСЁТ СЕРИИ, КАК ЖИВОЙ (двадцать шестой круг, №21):
+                # корневой реестр из пяти строк не может одновременно обслуживать планы
+                # с ZNU26/MESU26 и проверку личности — и именно на этом расхождении
+                # ломался переход Е→Ф.
+                reg = {'ESU26': dict(sec_type='FUT'), 'ZNU26': dict(sec_type='FUT'),
+                       'MESU26': dict(sec_type='FUT'),
+                       'ES': dict(sec_type='FUT'), 'ZN': dict(sec_type='FUT')}
                 out['margin'] = TRN.book_margin({'ES': 1, 'ZN': 2}, reg)
             finally:
                 for k, v in (('ADDFUT_MARGINS', keepm), ('ADDFUT_REGISTRY', keepr),
@@ -2681,7 +2687,7 @@ def _tr_run(case):
             lim = TRN.unpaired_limit(legs_fut, 10e6)
             br = _TrBroker()
             st = dict(done=[], order_ids=[], log=[], executed_usd=0.0,
-                      partial={'ZN': 3})
+                      partial={'ZNU26': 3})     # №21: имя с серией, как в плане
             sp = Path(tempfile.mkdtemp(prefix='addfut-tr-')) / 'st.json'
             TRN._run_lots(br, lots, st, sp, lim, _Unp({k: 0.0 for k in legs_fut}), {},
                           lambda msg, cancel=True: (_ for _ in ()).throw(TRN.Incident(msg)))
@@ -2790,8 +2796,10 @@ def _tr_run(case):
             _os.environ['ADDFUT_REGISTRY'] = str(rp2)
             try:
                 legs2 = {'EQ': dict(src=[('CSPX', 199.0, 700.0)],
-                                    dst=('MES', 4802.0, 'FUT'))}
-                reg2 = {'MES': dict(sec_type='FUT'), 'ES': dict(sec_type='FUT'),
+                                    dst=('MESU26', 4802.0, 'FUT'))}
+                reg2 = {'MESU26': dict(sec_type='FUT'), 'ESU26': dict(sec_type='FUT'),
+                        'ZNU26': dict(sec_type='FUT'),
+                        'MES': dict(sec_type='FUT'), 'ES': dict(sec_type='FUT'),
                         'CSPX': dict(sec_type='STK')}
                 out['info'] = TRN.preflight_margin_orders(
                     legs2, TRN.plan_lots(legs2, 1e6), 1e6, reg2, 'F',
@@ -2843,7 +2851,10 @@ def _tr_run(case):
                 legs = legs_fut
             lots = TRN.plan_lots(legs, 10e6)
             lim = TRN.unpaired_limit(legs, 10e6)
-            frac = 'ZN' if case == 'дробное исполнение фьючерса' else None
+            # ИМЯ ДРОБЯЩЕГОСЯ ИНСТРУМЕНТА — ПОЛНОЕ (двадцать шестой круг, №21): ноги
+            # переведены на поставочные серии, и брокер, дробящий 'ZN', больше не совпадал
+            # ни с одним инструментом плана — стенд молчал, ничего не проверяя.
+            frac = 'ZNU26' if case == 'дробное исполнение фьючерса' else None
             br = _TrBroker(frac_of=frac)
             st = dict(done=[], order_ids=[], log=[], executed_usd=0.0)
             unp = _Unp({k: 0.0 for k in legs})
@@ -2985,12 +2996,15 @@ def _t_p2(r):
 @tinv('лимит 390 держит и ПОКУПКУ: заявка №391 не подаётся',
       needs=lambda r: r['case'] == 'лимит заявок: покупка №391 не подаётся')
 def _t_g1(r):
-    """Девятнадцатый круг, №8: ворота — перед КАЖДОЙ заявкой. Продажа №390 проходит,
-    покупка №391 упирается ДО подачи; у брокера ровно одна продажа и ни одной покупки."""
+    """Квота проверяется НА ПАРУ (двадцать шестой круг, №2).
+
+    Прежний стенд закреплял ДЕФЕКТ как ожидаемый исход: продажа №390 проходила, покупка
+    №391 отвергалась — источник продан, цель не куплена, непарная дельта жила до следующей
+    сессии. Правильный исход: НИ ОДНОЙ заявки, отказ ДО необратимой продажи.
+    """
     calls = r.get('calls') or []
     return (r['raised'] and 'дневной лимит' in r['error']
-            and sum(1 for k, *_ in calls if k == 'sell') == 1
-            and not any(k == 'buy' for k, *_ in calls))
+            and not any(k in ('sell', 'buy') for k, *_ in calls))
 
 
 @tinv('запас preflight — по худшей из отображённой и фактической книги',

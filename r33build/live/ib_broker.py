@@ -262,6 +262,11 @@ class IBBroker:
                 maint = float(v.value)
         # NaN НЕ ЧИСЛО (семнадцатый круг, №7): NaN/maint давал cushion=NaN, сравнение
         # «NaN < 1.40» ложно — аварийное сокращение молча отключалось.
+        # БЕСКОНЕЧНОСТЬ — НЕ ЧИСЛО (двадцать шестой круг, №16): проверялся только NaN, а
+        # EquityWithLoanValue=inf давало cushion=inf и МОЛЧА выключало О-3-Е.
+        if ewl is not None and (ewl == float('inf') or ewl == float('-inf')):
+            raise BrokerError(f'EquityWithLoanValue={ewl!r} — не конечное число, '
+                              f'запас О-3-Е непроверяем')
         if ewl is None or ewl != ewl:
             raise BrokerError('брокер не вернул числовой EquityWithLoanValue — запас '
                               'О-3-Е неизвестен')
@@ -289,7 +294,11 @@ class IBBroker:
         for v in vals:
             if v.tag == 'NetLiquidation' and v.currency == 'USD':
                 x = float(v.value)
-                if not (x == x) or x <= 0:
+                # КОНЕЧНОСТЬ, А НЕ ТОЛЬКО NaN И ЗНАК (двадцать шестой круг, №16):
+                # NetLiquidation=inf проходил `x == x` и `x > 0`, а в переходе сравнение
+                # `inf > inf` ложно — значит ЛЮБОЙ конечный capital считался сверенным
+                # с брокером, и все ворота считались от выдуманного числа.
+                if not (x == x) or x in (float('inf'), float('-inf')) or x <= 0:
                     raise BrokerError(f'NetLiquidation недостоверен: {v.value}')
                 return x
         raise BrokerError('брокер не вернул NetLiquidation в USD')
@@ -642,6 +651,19 @@ def SAME_API():
         for r, who in ((cl, 'живой'), (cm, 'макет')):
             if not isinstance(r, dict) or 'terminal' not in r or 'filled' not in r:
                 bad.append(f'cancel_order ({label}): {who} не отдаёт terminal/filled')
+        # ЗНАЧЕНИЯ ОТМЕНЫ (двадцать шестой круг, №17). В прошлый раз правка легла ТОЛЬКО на
+        # place, и это осталось незамеченным. Именно cancelled/filled решают, писать ABORT
+        # или MIXED и повторять ли заявку: подмена filled=5,cancelled=False на
+        # filled=0,cancelled=True оставляла сверку зелёной, а поздний fill приходил уже
+        # после снятого pending.
+        if isinstance(cl, dict) and isinstance(cm, dict):
+            for _k in ('terminal', 'cancelled', 'foreign'):
+                if bool(cl.get(_k)) != bool(cm.get(_k)):
+                    bad.append(f'cancel_order ({label}): поле {_k} — живой {cl.get(_k)!r}, '
+                               f'макет {cm.get(_k)!r}')
+            if abs(float(cl.get('filled') or 0) - float(cm.get('filled') or 0)) > 1e-9:
+                bad.append(f'cancel_order ({label}): filled — живой {cl.get("filled")!r}, '
+                           f'макет {cm.get("filled")!r}: на нём стоит ABORT против MIXED')
     return bad
 
 

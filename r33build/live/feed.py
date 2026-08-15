@@ -477,9 +477,15 @@ def build_market(ib, today, book, *, route='F', roll_today=None, roll_passed=Non
                                  min_prev=_exp_e)
         pb, db, pb_t, _ = closes(ib, contract_of(ib, 'CBU0', reg), d0, expected_prev=None,
                                  min_prev=_exp_e)
-        if de != db:
-            raise FeedError(f'даты закрытий не совпадают: CSPX {de:%d.%m.%Y}, '
-                            f'CBU0 {db:%d.%m.%Y} — один из источников отстал')
+        # РАЗНЫЕ ДАТЫ ЗАКОННЫ ПРИ ОДНОСТОРОННЕМ ПРАЗДНИКЕ (двадцать шестой круг, №9).
+        # Требование de == db отменяло исправление общей сессии: на 05.05.2026 у CSPX бар
+        # 01.05 (LSE работала), у CBU0 — 04.05 (SIX работала), общая сессия — 30.04, и
+        # маршрут Е вставал. Обе даты обязаны быть НЕ СТАРШЕ общей сессии — это уже
+        # проверено выше через min_prev; здесь остаётся запрет на РАЗБЕГ больше недели,
+        # который означал бы, что один источник действительно отстал.
+        if abs((de - db).days) > 7:
+            raise FeedError(f'даты закрытий разошлись более чем на неделю: CSPX '
+                            f'{de:%d.%m.%Y}, CBU0 {db:%d.%m.%Y} — источник отстал')
         # календарь ОБЪЕДИНЕНИЯ площадок (№13): проверка пропущенной сессии в run_session
         # обязана знать европейские праздники, иначе после Пасхи контур встал бы.
         try:
@@ -523,6 +529,13 @@ def build_market(ib, today, book, *, route='F', roll_today=None, roll_passed=Non
     # с реестром ежедневно — это дешёвый запрос и он ловит подмену задолго до поставки.
     if getattr(book, 'ser_b', None):
         contract_of(ib, f'ZN{book.ser_b}', reg)
+    # И ФАКТИЧЕСКИ УДЕРЖИВАЕМЫЙ MES (двадцать шестой круг, №8). Ежедневно сверялись ES и
+    # ZN, а MES — нет, хотя сетка ноги А держится именно в нём: ошибочный conId проходил
+    # сверку по внутреннему имени, получал last_session и замыкался по SPY вплоть до ролла
+    # или поставочной зоны. Ошибка в reference_prices превращалась лишь в «ОРИЕНТИР-НЕТ»,
+    # который сессия без заявок по MES игнорирует.
+    if getattr(book, 'ser_a', None) and getattr(book, 'unit_is_mes', False):
+        contract_of(ib, f'MES{book.ser_a}', reg)
     notional = S.ES_MULT * px_prev
     dref = dref_from_yield(y_p / 100.0)
     m = DL.Market(date=d0, px_eq_prev=px_prev, dref_prev=dref, dref_today=dref,
@@ -574,8 +587,11 @@ def reference_prices(ib, route='F'):
         if not any(name.startswith(w) for w in want):
             continue
         try:
+            # НИЖНЯЯ ГРАНИЦА, А НЕ ТОЧНОЕ РАВЕНСТВО (двадцать шестой круг, №9): здесь
+            # осталось точное expected_prev, и при одностороннем празднике оба СВЕЖИХ
+            # ориентира отбрасывались — маршрут Е получал «ОРИЕНТИР-НЕТ» на всё сразу.
             px, _, _, _ = closes(ib, contract_of(ib, name, reg), today,
-                                 expected_prev=_exp_prev)
+                                 expected_prev=None, min_prev=_exp_prev)
             out[name] = px
         except FeedError as ex:
             # НЕ МОЛЧА (восемнадцатый круг, №17): пропавший ориентир выбрасывал строку из

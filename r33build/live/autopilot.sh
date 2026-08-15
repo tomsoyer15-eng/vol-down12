@@ -496,7 +496,37 @@ except Exception as ex:
     fi
     case "$_td" in
         0) : ;;                             # торговый день
-        1) return 0 ;;                      # выходной/праздник — ШТАТНО (девятнадцатый
+        1)  # ОДНОСТОРОННИЙ ЕВРОПЕЙСКИЙ ПРАЗДНИК НЕ ВЫКЛЮЧАЕТ ВАХТУ О-3-Е (двадцать
+            # шестой круг, №10). HOLIDAYS_EU — ОБЪЕДИНЕНИЕ закрытий LSE и SIX: 1 и 4 мая
+            # 2026 одна площадка работает, стоимость маржинальной книги и MaintMarginReq
+            # меняются, а тик возвращался ДО внутридневной вахты — запас мог уйти ниже
+            # 1,40 без единого замера. Торговли в такой день нет (общего окна нет), но
+            # НАБЛЮДЕНИЕ за запасом обязано идти: это не заявка, а измерение.
+            if [ "$(route)" = E ] && [ ! -e "$ST/ALARM-o3e-blind-$day.txt" ]; then
+                _cw=$(cd "$LIVE" && timeout -k 10 90 "$PY" -c "
+import sys
+sys.path.insert(0, '.')
+from ib_insync import IB
+import ib_broker as IBB, daily as DL
+ib = IB()
+try:
+    ib.connect('127.0.0.1', 4002, clientId=95, timeout=15)
+    c = IBB.IBBroker(ib).margin_cushion()
+    ib.disconnect()
+except Exception as ex:
+    sys.stdout.write('SKIP %r' % (ex,)); raise SystemExit
+sys.stdout.write(('LOW %.3f' % c) if (c is not None and c < DL.O3E_MIN)
+                 else ('OK %.3f' % c if c is not None else 'SKIP запаса нет'))" 2>&1)
+                case "$_cw" in
+                    LOW\ *)
+                        alarm_write "$ST/ALARM-o3e-holiday-$day.txt" \
+                            "в НЕторговый день запас О-3-Е упал: $_cw (порог 1.40) — О-5" \
+                            || log "КРИТИЧНО: тревога О-3-Е праздничного дня не записана"
+                        log "ТРЕВОГА: запас О-3-Е ниже порога в неторговый день ($_cw)" ;;
+                    *) : ;;
+                esac
+            fi
+            return 0 ;;                     # выходной/праздник — торговли нет (девятнадцатый
                                             # круг, №7: суббота — не поломка календаря)
         2)  # непокрытый год таблиц — тревога, как и заявлял python-подпроцесс
             if [ ! -e "$ST/ALARM-calendar.txt" ]; then

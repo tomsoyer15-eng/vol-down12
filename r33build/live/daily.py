@@ -647,7 +647,7 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
                 d.reasons.append(
                     f'кап 2,00 пересчитан ПОСЛЕ издержек перекладки: сокращено '
                     f'{len(_cut)} единиц ({"".join(_cut)}), книга n_e={n_e}, n_b={n_b}; '
-                    f'издержки сокращения списаны, экспозиция ИЗМЕНЕНА')
+                    f'экспозиция ИЗМЕНЕНА')
             # СТРОКА ПИШЕТСЯ, ТОЛЬКО ЕСЛИ ЭКСПОЗИЦИЯ ДЕЙСТВИТЕЛЬНО НЕ МЕНЯЛАСЬ (двадцать
             # пятый круг, №10). Прежде она дописывалась БЕЗУСЛОВНО — даже после cap-среза,
             # где сразу выше уже сказано «экспозиция ИЗМЕНЕНА»: журнал §7 получал две
@@ -661,14 +661,23 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
                     f'экспозиция не меняется, оборот {_grid} единиц сетки '
                     f'(издержки ${repack_cost(_grid, u_e):,.0f} списаны)')
             else:
+                # ОБОРОТ СЧИТАЕТСЯ ОДИН РАЗ (двадцать шестой круг, №7). Прежде из капитала
+                # уходило: стоимость исходного _grid, ПЛЮС отдельная плата за каждую
+                # срезанную единицу, ПЛЮС поправка на _grid2 — а _grid2 уже включает
+                # физический оборот среза. Одна и та же продажа оплачивалась дважды,
+                # капитал занижался, и кап продавал лишний контракт. Считаем ИТОГОВЫЙ
+                # оборот по фактическим заявкам и списываем ровно его, возвращая обе
+                # предыдущие оценки.
                 _grid2 = repack_grid(orders_from_books(book, d.book_after), b.unit_is_mes)
-                _delta = repack_cost(_grid2, u_e) - repack_cost(_grid, u_e)
-                e -= _delta
+                e += repack_cost(_grid, u_e)                  # вернуть исходную оценку
+                for _leg_cut in _cut:                          # вернуть поштучную плату
+                    e += S.COST * (u_e if _leg_cut == 'А' else u_b)
+                e -= repack_cost(_grid2, u_e)                  # списать фактический оборот
                 d.capital_after_costs = e
                 d.reasons.append(
                     f'оборот пересчитан по фактическим заявкам после среза капом: '
-                    f'{_grid2} единиц сетки вместо {_grid} '
-                    f'(поправка издержек ${_delta:+,.0f})')
+                    f'{_grid2} единиц сетки вместо {_grid}; списан ОДИН раз '
+                    f'(${repack_cost(_grid2, u_e):,.0f})')
     d.capital_after_costs = e
     d.exposure = {'А': exp_e, 'Б': exp_b}
     d.leverage = (exp_e + exp_b) / e if e else 0.0
@@ -1115,11 +1124,25 @@ def restore_to(broker, target_book, route='F'):
     want = ST.expected_positions(target_book, route)
     have = {k: v for k, v in (broker.net_positions() or {}).items() if v}
     unknown = []
-    for inst in sorted(set(want) | set(have)):
-        d = want.get(inst, 0) - have.get(inst, 0)
-        if d:
+    # СНАЧАЛА ЗАКРЫТИЯ, ПОТОМ ОТКРЫТИЯ (двадцать шестой круг, №1). Инструменты обходились
+    # ЛЕКСИКОГРАФИЧЕСКИ: при откате ZNZ26 -> ZNU26 сначала ПОКУПАЛСЯ ZNU26, и на счёте
+    # какое-то время стояло 202 ZN вместо 101 — двойная экспозиция, а при отказе второй
+    # заявки она оставалась. Сокращения освобождают маржу и не увеличивают риск, поэтому
+    # идут первыми; ключ сортировки: сперва отрицательные дельты.
+    _plan = [(inst, want.get(inst, 0) - have.get(inst, 0))
+             for inst in sorted(set(want) | set(have))]
+    _plan = [(i, d) for i, d in _plan if d]
+    _plan.sort(key=lambda x: (x[1] > 0, x[0]))
+    for inst, d in _plan:
+        if True:
             try:
-                broker.place(inst, d)
+                _rec = broker.place(inst, d)
+                # ЧАСТИЧНАЯ КОМПЕНСАЦИЯ ОСТАНАВЛИВАЕТ ПОДАЧУ (№1): объём возврата не
+                # сверялся вовсе, и следующая заявка уходила поверх недобора.
+                if isinstance(_rec, dict) and not _filled(_rec, d):
+                    unknown.append(f'{inst}: заявка {d:+g}, исполнено '
+                                   f'{_rec.get("filled")!r} — подача остановлена')
+                    break
             except Exception as ex:
                 # НЕИЗВЕСТНОСТЬ КОМПЕНСАЦИИ НЕ ГЛОТАЕТСЯ (семнадцатый круг, №4): оборванная
                 # компенсирующая заявка могла исполниться позже — совпавший снимок после неё
