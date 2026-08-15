@@ -372,10 +372,37 @@ class IBBroker:
                                else 'исполнение больше заявки')
         return rec
 
+    def _quote_ref(self, instrument):
+        """КОТИРОВОЧНЫЙ ОРИЕНТИР В МОМЕНТ ЗАЯВКИ (двадцать второй круг, №20).
+
+        Прежний px_order — ВЧЕРАШНЕЕ закрытие: §7 считал «издержками» разницу fill−close,
+        то есть ночной гэп и всё движение до 08:45 записывались в торговые издержки, и
+        сверка 5 б.п. мерила не исполнение, а погоду. Ориентир обязан быть ценой,
+        существовавшей В МОМЕНТ подачи: снимок котировки (задержанной — у неё 15 минут
+        возраста против суток у закрытия). Сбой снимка НЕ блокирует заявку — ориентир
+        честно остаётся prev-close, и строка §7 помечается (это уже умеет _excluded_dates
+        по пустой цене не ловить, поэтому помечаем notе-ой на уровне вызывающего).
+        Возвращает (цена | None).
+        """
+        try:
+            t = self.ib.reqMktData(self._contract(instrument), '', True, False)
+            self.ib.sleep(2.0)
+            for v in (t.last, t.close, (t.bid + t.ask) / 2 if (t.bid and t.ask) else None):
+                v = float(v) if v is not None else float('nan')
+                if v == v and v > 0:
+                    return v
+        except Exception:
+            pass
+        return None
+
     def place(self, instrument, qty, px_order=None):
         from ib_insync import MarketOrder
         if not qty:
             raise BrokerError(f'{instrument}: нулевая заявка')
+        # ориентир момента заявки; вчерашнее закрытие — только запасной путь (№20)
+        _q_ref = self._quote_ref(instrument)
+        if _q_ref is not None:
+            px_order = _q_ref
         # ДРОБНЫЕ ДОЛИ ФОНДОВ НЕ УСЕКАЮТСЯ. abs(int(qty)) превращал 100,5 в 100, а 0,5 — в
         # НУЛЕВУЮ заявку, уже прошедшую проверку «if not qty»: весь код выше специально
         # хранит дроби, а адаптер уничтожал их на последнем шаге (маршрут Е).

@@ -657,9 +657,9 @@ def _feed_mutations():
         исправления конвенции): август торгуется июльским состоянием — на бумажном счёте
         это открыло ногу Б, которую августовское состояние выключает."""
         orig = FD.signal_state
-        def patched(today, path=None):
+        def patched(today, path=None, holidays=()):    # №23: совместимая сигнатура
             try:
-                return orig(today, path)
+                return orig(today, path, holidays)
             except FD.FeedError:
                 import pandas as pd
                 import os as _o
@@ -1116,7 +1116,19 @@ def _transition_mutations():
         return (TRN.compensation_ok,
                 (lambda filled, want, ostatok, dprice: ''), TRN, 'compensation_ok')
 
-    return [('край общего окна не проверяется', gate_no_window),
+    def asof_trusted():
+        """asof принимается от вызывающего без сверки с биржевым сегодня (как было до
+        двадцать второго круга, №1): вчерашняя дата отключает часы, праздники и барьер
+        «resume в той же сессии», позволяя продолжить старый план по старым ценам."""
+        import feed as _FDm
+        orig = _FDm.exchange_today
+        # подмена «сегодня» на дату стенда: проверка сойдётся при ЛЮБОМ asof стенда,
+        # то есть защита перестанет отличать вчерашний план от сегодняшнего
+        return orig, (lambda: __import__('pandas').Timestamp('2020-01-02').date()), \
+               _FDm, 'exchange_today'
+
+    return [('дата перехода принимается на веру', asof_trusted),
+            ('край общего окна не проверяется', gate_no_window),
             ('исполнение компенсации не сверяется', comp_unchecked),
             ('дробность источника не признаётся', no_frac),
             ('лимит непарной дельты снят', limit_off),
@@ -1332,7 +1344,9 @@ def _signal_mutations():
     def tail_off():
         """Проверка последней сессии месяца отключена: полумесячное «закрытие» проходит."""
         orig = SU._verify_month_tail
-        return orig, (lambda sym, df, me: None), '_verify_month_tail'
+        # СИГНАТУРА СОВМЕСТИМА (двадцать второй круг, №23): подмена без months= падала
+        # TypeError, и «мутация поймана» означало крах вызова, а не работу защиты.
+        return orig, (lambda sym, df, me, months=None: None), '_verify_month_tail'
 
     def levels_off():
         """Сверка уровней отключена: неоднородный пересчёт истории поставщиком проходит."""
@@ -1364,7 +1378,7 @@ def _signal_mutations():
         размером с купон, меняющее знак, дописывается без подтверждения."""
         orig = SU._verify_border
 
-        def patched(sym, me):
+        def patched(sym, me, covered=None):    # №23: совместимая сигнатура
             import os as _os
             sma = me.rolling(SU.SMA).mean()
             d = me.index[-1]
@@ -1604,12 +1618,26 @@ def run_transition_mutations():
     _ = []
     print(f"\n{'мутация перехода':<40}{'поймана':>9}  какими утверждениями")
     for label, make in _transition_mutations():
-        orig, patched, attr = make()
-        setattr(TRN, attr, patched)
+        # ДВА ВИДА КОРТЕЖА (двадцать второй круг, №21): часть мутаций указывает модуль явно
+        # четвёртым элементом. Прежде распаковка была безусловно тройной, и первая же
+        # четырёхэлементная роняла ВЕСЬ набор ValueError'ом — до остальных групп прогон не
+        # доходил, selfcheck получал ненулевой код, а сообщение при этом гласило «все
+        # мутации пойманы». Утверждение про «около 120 мутаций» этим файлом не
+        # воспроизводилось вовсе.
+        _got = make()
+        if len(_got) == 4:
+            orig, patched, _holder, attr = _got
+        else:
+            orig, patched, attr = _got
+            _holder = TRN
+        # МОДУЛЬ БЕРЁТСЯ ИЗ КОРТЕЖА, А НЕ ПОДРАЗУМЕВАЕТСЯ: патч в TRN при защите, живущей
+        # в другом модуле, уходит в пустоту и даёт тихое «НЕ ПОЙМАНО» без объяснения —
+        # ровно так три мутации оказались фиктивными (двадцатый круг, разбор 14.08).
+        setattr(_holder, attr, patched)
         try:
             _, bad = I.run_transition()
         finally:
-            setattr(TRN, attr, orig)
+            setattr(_holder, attr, orig)
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
         if not bad:
             miss.append(label)

@@ -839,10 +839,19 @@ def _intent_full(kind):
         keep = os.environ.get('ADDFUT_BOOK_PATH'), os.environ.get('ADDFUT_LOCK_DIR')
         os.environ['ADDFUT_BOOK_PATH'] = str(bp); os.environ['ADDFUT_LOCK_DIR'] = tmp
         out = dict(kind=kind, raised=False, error='', dec=None, orders=None)
+        # ОРИЕНТИРЫ И ЖУРНАЛ — КАК В БОЮ (двадцать второй круг, №17): живой вход обязан
+        # нести оба, и фикстура без них проверяла путь, которого больше не существует.
+        import journal as _J7i
+        _jp = Path(tmp) / 'journal-F.csv'
+        _J7i.append(_jp, dict(date='2026-08-25', leg='', instrument='ИТОГ', qty=0,
+                              px_order='-', px_fill='', commission='', reason='',
+                              nav='10000000', leverage='1.0', roll_spread_near='',
+                              roll_spread_far='', note='итог сессии 7: строк 0'))
         try:
             dec, ords, diff = DL.run_session(br, m, dirpath=tmp, route='F',
                                              capital=10_000_000.0, closing_nav=10_000_000.0,
-                                             book_path=str(bp))
+                                             book_path=str(bp), ref_prices=dict(prices),
+                                             journal_path=str(_jp))
             out['dec'] = dec; out['orders'] = ords
         except Exception as ex:
             out['raised'] = True; out['error'] = f'{type(ex).__name__}: {ex}'
@@ -1341,6 +1350,19 @@ def _session_run(case):
             (Path(tmp) / 'account.txt').write_text(ib.managedAccounts()[0], encoding='utf-8')
 
         bp = Path(tmp) / f'book-{route}.json'
+
+        def _seed_j7(rt, n_sess):
+            # ЖУРНАЛ ПРОШЛОЙ СЕССИИ (двадцать второй круг, №16): у торговавшей книги
+            # журнал есть ВСЕГДА; фикстура с session_no>0 без журнала — состояние,
+            # которого в жизни не бывает, и новая защита от «нового GENESIS» честно
+            # отказывала. Сеем закрытый итогом журнал там же, где сохраняем книгу.
+            import journal as _J7
+            _J7.append(Path(tmp) / f'journal-{rt}.csv', dict(
+                date='2026-08-11', leg='', instrument='ИТОГ', qty=0, px_order='-',
+                px_fill='', commission='', reason='', nav='1000000', leverage='1.0',
+                roll_spread_near='', roll_spread_far='',
+                note=f'итог сессии {n_sess}: строк 0'))
+
         cls = DL.BookE if route == 'E' else DL.Book
         if case == 'пропущен торговый день':
             # ДВАДЦАТЬ ПЕРВЫЙ КРУГ, №10: книга закрыта 10.08, сегодня 12.08, а предыдущая
@@ -1351,7 +1373,7 @@ def _session_run(case):
                          prev_st_bd=True, ser_a='U26', ser_b='U26', es_held=2,
                          last_session='2026-08-10', close_provisional=False,
                          prev_close_lev=1.99)
-            ST.save(bp, b0, route, 1)
+            ST.save(bp, b0, route, 1); _seed_j7(route, 1)
             ib._pos = {es: 2, 900002: 6, zn: 10}
             ib._shown = dict(ib._pos)
         if case == 'незамкнутая предыдущая' or case.startswith('замыкание'):
@@ -1361,7 +1383,7 @@ def _session_run(case):
                 last_session=('2026-08-10' if case == 'замыкание за чужую дату'
                               else ('2026-08-11' if case == 'незамкнутая предыдущая' else today)),
                 close_provisional=(case != 'замыкание повторное'), prev_close_lev=1.99)
-            ST.save(bp, b0, route, 1)
+            ST.save(bp, b0, route, 1); _seed_j7(route, 1)
             if case.startswith('замыкание'):
                 ib._pos = {es: 2, 900002: 6, zn: 10}
                 ib._shown = dict(ib._pos)
@@ -1380,7 +1402,7 @@ def _session_run(case):
             b0 = DL.BookE(n_eq=1195, n_bd=6538, prev_st_eq=True, prev_st_bd=True,
                           last_session='2026-08-11', close_provisional=False,
                           prev_close_lev=1.99)
-            ST.save(Path(tmp) / 'book-E.json', b0, 'E', 3)
+            ST.save(Path(tmp) / 'book-E.json', b0, 'E', 3); _seed_j7('E', 3)
             ib._pos = {cspx: 1195.0, cbu0: 6538.0}
             ib._shown = dict(ib._pos)
         if case == 'отказ дня по §8':
@@ -1394,7 +1416,7 @@ def _session_run(case):
                          prev_st_bd=True, ser_a='U26', ser_b='U26', es_held=2,
                          last_session='2026-08-11', close_provisional=False,
                          prev_close_lev=1.5, roll_pending=True)
-            ST.save(bp, b0, route, 2)
+            ST.save(bp, b0, route, 2); _seed_j7(route, 2)
             ib._pos = {es: 2, 900002: 6, zn: 10}
             ib._shown = dict(ib._pos)
             book_bytes0 = bp.read_bytes()
@@ -2474,7 +2496,8 @@ TR_CASES = ('план целых фьючерсов', 'план дробных �
             'замер с нечисловой маржой', 'замер устарел',
             'замер: init прежде maint', 'тревога перехода — файл в каталоге автопилота',
             'общее окно закрылось: заявка не подаётся',
-            'компенсация исполнена не полностью')
+            'компенсация исполнена не полностью',
+            'переход задним числом запрещён')
 
 
 class _Unp(dict):
@@ -2537,7 +2560,26 @@ def _tr_run(case):
     legs_bad = {'Б': dict(src=[('ZN', 10.5, ZN_U)], dst=('CBU0', 5.0, 'ETF'))}
 
     try:
-        if 'замер' in case:
+        if case == 'переход задним числом запрещён':
+            # ASOF — ЭТО СЕГОДНЯ (двадцать второй круг, №1). Вчерашняя дата отключала
+            # часы, праздники и барьер «resume в той же сессии»; проверка стоит РАНЬШЕ
+            # чтения журнала, поэтому стенд обходится фиктивными путями и не касается
+            # ни брокера, ни диска. Калитку стендов selfcheck (ADDFUT_ASOF_OVERRIDE)
+            # здесь снимаем НАМЕРЕННО: иначе защита была бы отключена во всём выпуске.
+            import os as _oe
+            _keep = _oe.environ.pop('ADDFUT_ASOF_OVERRIDE', None)
+            try:
+                TRN.execute(object(), '/nonexistent/state.json', 1e6, legs_fut,
+                            signal_id='s1', journal='/nonexistent/j.csv',
+                            mr_state='/nonexistent/s.csv', asof='2020-01-02')
+            except TRN.Incident as ex:
+                out['raised'] = True; out['error'] = str(ex)
+            except Exception as ex:
+                out['raised'] = True; out['error'] = f'{type(ex).__name__}: {ex}'
+            finally:
+                if _keep is not None:
+                    _oe.environ['ADDFUT_ASOF_OVERRIDE'] = _keep
+        elif 'замер' in case:
             # МАРЖА ПЕРЕХОДА (шестнадцатый круг, №4; закрыт и старый пробел: у защит
             # двенадцатого-тринадцатого кругов не было ни одного стенда). Замер обязан
             # нести _meta и относиться к сериям ТЕКУЩЕГО живого реестра; дыры существующего
@@ -3004,6 +3046,16 @@ def _t_m4(r):
       needs=lambda r: r['case'] == 'замер отсутствует')
 def _t_m5(r):
     return not r['raised'] and r.get('margin') == 34_800.0 + 2 * 2_160.0
+
+
+@tinv('переход задним числом запрещён',
+      needs=lambda r: r['case'] == 'переход задним числом запрещён')
+def _t_asof(r):
+    """asof обязан совпадать с биржевым сегодня: от него считаются окно, resume и
+    хронология журнала МР. Отказ обязан НАЗЫВАТЬ дату — иначе оператор не поймёт, что
+    именно не сошлось (и стенд не отличит эту защиту от любого другого падения)."""
+    return (r['raised'] and 'asof' in r['error']
+            and '2020-01-02' in r['error'] and 'сегодня' in r['error'])
 
 
 @tinv('живой замер используется вместо констант',
@@ -4013,13 +4065,26 @@ def run_sessions():
                                        if route == 'F' else _d0.orders)
             except Exception:
                 orders_expected = False
+            # ОРИЕНТИРЫ И ЖУРНАЛ — КАК В БОЮ (двадцать второй круг, №17): без них живой
+            # вход теперь отказывает ДО сценария, и ВСЕ повадки падали одинаково — _s1
+            # получал покрытие 0, а сценарные различия не проверялись вовсе.
+            import journal as _J7s
+            _jps = Path(tmp) / f'journal-{route}.csv'
+            if not _jps.exists():
+                _J7s.append(_jps, dict(date='2026-08-11', leg='', instrument='ИТОГ',
+                                       qty=0, px_order='-', px_fill='', commission='',
+                                       reason='', nav='10000000', leverage='1.0',
+                                       roll_spread_near='', roll_spread_far='',
+                                       note='итог сессии 1: строк 0'))
             try:
                 # ПУТЬ КНИГИ ПЕРЕДАЁТСЯ ЯВНО: контур больше не выводит его из окружения,
                 # и стенд обязан подавать тот же файл, который сам создал.
                 dec, planned, _ = DL.run_session(br, m, dirpath=tmp, route=route,
                                                  capital=10_000_000.0,
                                                  closing_nav=10_000_000.0,
-                                                 book_path=str(sp))
+                                                 book_path=str(sp),
+                                                 ref_prices=dict(prices),
+                                                 journal_path=str(_jps))
             except DL.RollGap as ex:
                 raised = True
                 rollback = ('приведена к исходной' in str(ex)

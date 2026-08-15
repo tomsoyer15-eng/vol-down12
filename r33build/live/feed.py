@@ -99,6 +99,56 @@ def calendar_horizon(route='F', today=None, days=CAL_HORIZON_DAYS):
     return True, f'календарь маршрута {route} покрывает {years}'
 
 
+REG_HORIZON_DAYS = 10      # за сколько дней до ролла требовать целевую серию в реестре
+
+
+def registry_horizon(book, today=None, days=REG_HORIZON_DAYS):
+    """Несёт ли реестр ЦЕЛЕВЫЕ серии ближайшего ролла (двадцать второй круг, №12).
+
+    Реестр пишет только first_connect, а автопилот его не запускает: после августовского
+    ролла в книге Z26, ноябрьский перенос потребует H27 — реестр её не знает, ориентиров
+    дальней серии не будет, и торговля встанет В ДЕНЬ РОЛЛА, оставив Z26 у декабрьской
+    поставки. Проверка смотрит вперёд на `days` дней и даёт оператору время запустить
+    first_connect утром, пока whatIf отдаёт и маржу.
+
+    Возвращает (ok, сообщение).
+    """
+    import pandas as pd
+    import daily as _DL
+    if today is None:
+        today = exchange_today()
+    d0 = pd.Timestamp(today)
+    held = [t for t in (getattr(book, 'ser_a', None), getattr(book, 'ser_b', None)) if t]
+    if not held:
+        return True, 'книга пуста — ролл не предстоит'
+    try:
+        hol = _DL.holidays_for(d0.year, d0.year + 1)
+    except RuntimeError:
+        hol = _DL.holidays_for(d0.year)
+    reg = registry()
+    problemy = []
+    for tag in sorted(set(held)):
+        try:
+            dl = _DL.roll_deadline(tag, hol)
+        except Exception as ex:
+            problemy.append(f'{tag}: срок ролла не вычислен ({ex})')
+            continue
+        if not (0 <= (dl - d0).days <= days):
+            continue                      # ролл не в горизонте — реестр ещё успеет
+        target = _DL.target_tag(tag, dl, True)
+        # серии книги не несут корня: одна и та же буква (U26) стоит у обеих ног, поэтому
+        # целевую серию требуем у ВСЕХ трёх корней — сетка ноги А держит ES и MES, нога Б
+        # держит ZN; лишний корень в требовании не вредит (реестр first_connect пишет все).
+        need = [f'{r}{target}' for r in ('ES', 'MES', 'ZN')]
+        miss = [x for x in need if x not in reg]
+        if miss:
+            problemy.append(f'ролл {tag} {dl:%d.%m} требует {need}, в реестре нет {miss}')
+    if problemy:
+        return False, ('реестр не готов к роллу: ' + '; '.join(problemy) +
+                       ' — запустить first_connect (утром: whatIf отдаёт и маржу)')
+    return True, f'реестр покрывает роллы ближайших {days} дней'
+
+
 DUR_MIN, DUR_MAX = 3.0, 12.0
 YIELD_MIN, YIELD_MAX = 0.0005, 0.25
 
@@ -319,8 +369,19 @@ def _series_of(book, today):
     import pandas as pd
     import daily as DL
     d0 = pd.Timestamp(today)
-    hol = DL.holidays_for(d0.year, d0.year + 1)
-    return getattr(book, 'ser_a', None) or DL.target_tag(
+    # УДЕРЖИВАЕМАЯ СЕРИЯ НЕ ТРЕБУЕТ КАЛЕНДАРЯ ВОВСЕ (двадцать второй круг, №14): прежний
+    # порядок сначала запрашивал holidays_for(год, год+1) и в 2028 валил и сбор рынка, и
+    # замыкание отсутствием таблицы 2029 — при уже ИЗВЕСТНОЙ ser_a. Календарь нужен
+    # только ветке вычисления серии с нуля; ей достаточно СВОЕГО года, если следующий не
+    # покрыт (расчёт серии смотрит вперёд не дальше ролловой границы своего года).
+    _known = getattr(book, 'ser_a', None)
+    if _known:
+        return _known
+    try:
+        hol = DL.holidays_for(d0.year, d0.year + 1)
+    except RuntimeError:
+        hol = DL.holidays_for(d0.year)
+    return DL.target_tag(
         None, d0, DL.is_roll_day(d0, hol), DL.roll_passed_for(d0, hol))
 
 
@@ -372,10 +433,16 @@ def build_market(ib, today, book, *, route='F', roll_today=None, roll_passed=Non
         if de != db:
             raise FeedError(f'даты закрытий не совпадают: CSPX {de:%d.%m.%Y}, '
                             f'CBU0 {db:%d.%m.%Y} — один из источников отстал')
+        # календарь ОБЪЕДИНЕНИЯ площадок (№13): проверка пропущенной сессии в run_session
+        # обязана знать европейские праздники, иначе после Пасхи контур встал бы.
+        try:
+            _hol_e = eu_holidays(d0.year, d0.year + 1)
+        except FeedError:
+            _hol_e = eu_holidays(d0.year)
         m = DL.MarketE(date=d0, px_eq_prev=pe, px_bd_prev=pb,
                        px_eq_today=pe_t if pe_t is not None else pe,
                        px_bd_today=pb_t if pb_t is not None else pb,
-                       st_eq=st_eq, st_bd=st_bd)
+                       st_eq=st_eq, st_bd=st_bd, holidays=tuple(_hol_e))
         src = dict(CSPX=(pe, str(de.date())), CBU0=(pb, str(db.date())),
                    signal_date=str(sig_date.date()), signal_age_d=age)
         return m, src

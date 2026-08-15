@@ -36,30 +36,40 @@ from typing import NamedTuple
 # принадлежит конкретному счёту, меняется каждый квартал вместе с con_id и в пакет не входит.
 # Первая же сборка это и показала — распакованный архив провалил проверки, работавшие в
 # рабочем каталоге. Здесь набор фиксирован и самодостаточен.
+# primary_exchange — ВО ВСЕХ строках (двадцать второй круг, №24): FIXTURE_COLS строится по
+# первой строке, и без этого поля ветка mismatches() для листинговой линии LSEETF/EBS в
+# прогонах живого адаптера не исполнялась НИКОГДА — регрессия отправила бы заявку на
+# рынок с другим календарём, и GTC осталась бы на ночь.
 FIXTURE_ROWS = [
     dict(instrument='ESU26', sec_type='FUT', pair_group='EQ', exchange='CME', currency='USD',
-         con_id='900001', local_symbol='ESU6', expiry='20260918', multiplier='50', isin=''),
+         con_id='900001', local_symbol='ESU6', expiry='20260918', multiplier='50',
+         primary_exchange='CME', isin=''),
     dict(instrument='MESU26', sec_type='FUT', pair_group='EQ', exchange='CME', currency='USD',
-         con_id='900002', local_symbol='MESU6', expiry='20260918', multiplier='5', isin=''),
+         con_id='900002', local_symbol='MESU6', expiry='20260918', multiplier='5',
+         primary_exchange='CME', isin=''),
     dict(instrument='ZNU26', sec_type='FUT', pair_group='BOND', exchange='CBOT', currency='USD',
-         con_id='900003', local_symbol='ZNU6', expiry='20260921', multiplier='1000', isin=''),
+         con_id='900003', local_symbol='ZNU6', expiry='20260921', multiplier='1000',
+         primary_exchange='CBOT', isin=''),
     # ОБЕ серии, как в боевом реестре (first_connect пишет U и Z): ролловые кейсы требуют
     # ориентиров дальней серии — фикстура без Z26 валила их гвардом «нет ориентира».
     dict(instrument='ESZ26', sec_type='FUT', pair_group='EQ', exchange='CME', currency='USD',
-         con_id='900006', local_symbol='ESZ6', expiry='20261218', multiplier='50', isin=''),
+         con_id='900006', local_symbol='ESZ6', expiry='20261218', multiplier='50',
+         primary_exchange='CME', isin=''),
     dict(instrument='MESZ26', sec_type='FUT', pair_group='EQ', exchange='CME', currency='USD',
-         con_id='900007', local_symbol='MESZ6', expiry='20261218', multiplier='5', isin=''),
+         con_id='900007', local_symbol='MESZ6', expiry='20261218', multiplier='5',
+         primary_exchange='CME', isin=''),
     dict(instrument='ZNZ26', sec_type='FUT', pair_group='BOND', exchange='CBOT', currency='USD',
-         con_id='900008', local_symbol='ZNZ6', expiry='20261221', multiplier='1000', isin=''),
+         con_id='900008', local_symbol='ZNZ6', expiry='20261221', multiplier='1000',
+         primary_exchange='CBOT', isin=''),
     # У IBKR фонды — 'STK': литерал 'ETF' в фикстуре скрывал от стендов дефект №14.
     # ISIN у STK обязателен (пятнадцатый круг, №6) — как в боевом реестре first_connect;
     # фьючерсам ISIN не положен, пустое поле для них штатно.
     dict(instrument='CSPX', sec_type='STK', pair_group='EQ', exchange='SMART', currency='USD',
          con_id='900004', local_symbol='CSPX', expiry='', multiplier='',
-         isin='IE00B5BMR087'),
+         primary_exchange='LSEETF', isin='IE00B5BMR087'),
     dict(instrument='CBU0', sec_type='STK', pair_group='BOND', exchange='SMART', currency='USD',
          con_id='900005', local_symbol='CSBGU0', expiry='', multiplier='',
-         isin='IE00B3VWN518'),
+         primary_exchange='EBS', isin='IE00B3VWN518'),
 ]
 FIXTURE_COLS = list(FIXTURE_ROWS[0])
 
@@ -282,6 +292,21 @@ class StubIB:
 
     AUX = {'SPY': 900010, 'IEF': 900011}     # инструменты сигналов и цены ноги А
 
+    def reqMktData(self, contract, tick_list='', snapshot=True, regulatory=False):
+        """Снимок котировки (двадцать второй круг, №20): px_order берётся из момента
+        заявки. По умолчанию котировки НЕТ (nan) — адаптер честно падает на запасной
+        prev-close, и прежние стенды видят прежние ориентиры. Повадка задаётся полем
+        quote_px: стенд котировочного ориентира выставляет цену явно."""
+        class _T:
+            pass
+        t = _T()
+        q = getattr(self, 'quote_px', None)
+        t.last = q if q is not None else float('nan')
+        t.close = float('nan')
+        t.bid = float('nan')
+        t.ask = float('nan')
+        return t
+
     def qualifyContracts(self, *cs):
         for c in cs:
             if not getattr(c, 'conId', 0) and getattr(c, 'symbol', '') in self.AUX:
@@ -300,6 +325,10 @@ class StubIB:
             c.currency = r.get('currency', 'USD')
             c.lastTradeDateOrContractMonth = str(r.get('expiry', ''))
             c.multiplier = str(r.get('multiplier', ''))
+            # ЛИСТИНГОВАЯ ЛИНИЯ (двадцать второй круг, №24): фикстура теперь несёт
+            # primary_exchange, значит стаб обязан отдавать его как биржа — иначе честная
+            # сверка mismatches валила бы все адаптерные стенды «площадка не подтверждена».
+            c.primaryExchange = r.get('primary_exchange', '') or ''
             if self.behaviour == 'wrong_contract':
                 # con_id указывает на ДРУГУЮ поставку: адаптер обязан отказать, а не подать.
                 c.lastTradeDateOrContractMonth = '20991231'

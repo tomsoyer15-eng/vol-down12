@@ -44,10 +44,29 @@ s = re.sub(r'(?m)^IbPassword=.*$', 'IbPassword=' + os.environ['IB_PASSWORD'], s)
 open(dst, 'w').write(s)
 PY
 
-Xvfb "$DISPLAY_NUM" -screen 0 1280x1024x24 -nolisten tcp >/dev/null 2>&1 &
-XVFB_PID=$!
-sleep 2
-kill -0 "$XVFB_PID" 2>/dev/null || { echo "ОШИБКА: Xvfb не поднялся" >&2; exit 4; }
+# ЖИВОЙ ДИСПЛЕЙ ПЕРЕИСПОЛЬЗУЕТСЯ (инцидент 14.08.2026; двадцать второй круг, №11).
+# Прежде скрипт БЕЗУСЛОВНО поднимал свой Xvfb на :97 и выходил кодом 4, если дисплей уже
+# занят. А занят он был с 12.08 — с первого запуска. Поэтому суточный перезапуск шлюза,
+# не поднявший API, оказался неисправимым: ensure_gw трижды звал start.sh, тот трижды
+# падал на «Xvfb не поднялся», и автопилот остановился тревогой. Позиция осталась бы без
+# ребаланса и ролла до ручного вмешательства.
+#
+# ЧУЖОЙ ДИСПЛЕЙ НЕ УБИВАЕМ И НЕ ЧИНИМ (О-5): если сервер на :97 жив — просто работаем на
+# нём, а свой не поднимаем и в cleanup не трогаем.
+if xdpyinfo -display "$DISPLAY_NUM" >/dev/null 2>&1 \
+   || ps -eo args= | grep -qE "^Xvfb $DISPLAY_NUM( |$)"; then
+  echo "экран $DISPLAY_NUM уже поднят — используем существующий (свой не запускаем)"
+else
+  # Осиротевший замок без процесса мешает старту: снимаем ТОЛЬКО если сервера нет.
+  if [ -e "/tmp/.X${DISPLAY_NUM#:}-lock" ]; then
+    echo "замок /tmp/.X${DISPLAY_NUM#:}-lock без живого Xvfb — снимаю" >&2
+    rm -f "/tmp/.X${DISPLAY_NUM#:}-lock"
+  fi
+  Xvfb "$DISPLAY_NUM" -screen 0 1280x1024x24 -nolisten tcp >/dev/null 2>&1 &
+  XVFB_PID=$!
+  sleep 2
+  kill -0 "$XVFB_PID" 2>/dev/null || { echo "ОШИБКА: Xvfb не поднялся" >&2; exit 4; }
+fi
 
 export DISPLAY="$DISPLAY_NUM"
 echo "экран $DISPLAY_NUM поднят (pid $XVFB_PID); шлюз $GW_VER, режим $MODE"

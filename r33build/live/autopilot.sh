@@ -320,7 +320,24 @@ BK2
 tick() {
     local day hm
     day=$(chicago %F); hm=$(chicago %H%M)
-    ls "$ST"/ALARM-*.txt >/dev/null 2>&1 && return 0     # тревога: стоим до ручного разбора
+    # ТРЕВОГА ОСТАНАВЛИВАЕТ ТОРГОВЛЮ, НО НЕ ЗАМЫКАНИЕ ОТТОРГОВАННОГО ДНЯ (двадцать
+    # второй круг, №7). Прежний полный стоп создавал тупик ровно на опасной книге: тревога
+    # О-3-Е ставится ПОСЛЕ исполненных заявок, отметка traded уже стоит — и замыкание
+    # запрещалось той же строкой; назавтра do_close отказывал по чужой дате книги, и книга
+    # с низким запасом застревала close_provisional НАВСЕГДА, а обещанное сокращение
+    # следующей сессией не могло даже начаться (для него нужен триггер капа замыкания).
+    # Замыкание НЕ подаёт заявок — это запись фактических цен и NLV, то есть наблюдение;
+    # О-5 не нарушается: лечить по-прежнему нечем и некому.
+    if ls "$ST"/ALARM-*.txt >/dev/null 2>&1; then
+        local _d0
+        _d0=$(chicago %F)
+        if [ -e "$ST/traded-$_d0" ] && [ ! -e "$ST/closed-$_d0" ] \
+           && [ "$(chicago %H%M)" -ge "$(close_after)" ]; then
+            log "тревога стоит, но день $_d0 отторгован и не замкнут — выполняю ТОЛЬКО замыкание"
+            ensure_gw && run_close "$_d0"
+        fi
+        return 0                                         # торговли под тревогой нет
+    fi
     # ГОРИЗОНТ КАЛЕНДАРЯ (двадцать первый круг, №12): таблицы праздников продлеваются
     # вручную, и обрыв обнаруживался в тот день, когда торговать уже нельзя — у маршрута Е
     # таблица кончается 2026 годом. Это ПРЕДУПРЕЖДЕНИЕ, а не тревога: ALARM-* останавливает
@@ -335,6 +352,28 @@ sys.stdout.write(('OK ' if ok else 'NO ') + msg)" 2>&1)
         case "$_h" in
             OK\ *) : ;;
             *) echo "$_h" > "$_wd"; log "ВНИМАНИЕ: $_h" ;;
+        esac
+    fi
+    # ГОРИЗОНТ РЕЕСТРА (двадцать второй круг, №12): реестр пишет только first_connect, и
+    # без предупреждения ноябрьский ролл встал бы В ДЕНЬ ролла без ориентиров H27, оставив
+    # Z26 у декабрьской поставки. Раз в день; ПРЕДУПРЕЖДЕНИЕ, не ALARM — оператору нужно
+    # утро, чтобы запустить first_connect, останавливать торговлю не за чем.
+    local _wr="$ST/WARN-registry-$(chicago %F).txt"
+    if [ ! -e "$_wr" ]; then
+        local _rh
+        _rh=$(cd "$LIVE" && "$PY" -c "
+import sys, feed, state, daily
+sys.path.insert(0, '.')
+try:
+    bk, _, rt = state.load(state.book_path('$(route)'),
+                           daily.BookE if '$(route)' == 'E' else daily.Book)
+    ok, msg = (True, 'книги нет') if bk is None else feed.registry_horizon(bk)
+    sys.stdout.write(('OK ' if ok else 'NO ') + msg)
+except Exception as ex:
+    sys.stdout.write('NO проверка горизонта реестра сломана: %r' % (ex,))" 2>&1)
+        case "$_rh" in
+            OK\ *) : ;;
+            *) echo "$_rh" > "$_wr"; log "ВНИМАНИЕ: $_rh" ;;
         esac
     fi
     is_trade_day; _td=$?
@@ -397,6 +436,44 @@ sys.stdout.write(('OK ' if ok else 'NO ') + msg)" 2>&1)
         else
             run_trade "$day"
         fi
+    fi
+    # ВАХТА О-3-Е МЕЖДУ ТОРГОВЛЕЙ И ЗАМЫКАНИЕМ (двадцать второй круг, №6): прежде запас
+    # наблюдался ровно один раз — при заявках; после traded-* тики его не смотрели, и
+    # провал ниже 1,40 позже в сессии (или на дне без ребаланса) не давал ни тревоги, ни
+    # сокращения. Только маршрут Е (О-3-Е — его ворота), только пока день не замкнут.
+    # Тревога = стоп и ручной разбор: автоматика по-прежнему ничего не сокращает сама.
+    if [ "$(route)" = E ] && [ -e "$ST/traded-$day" ] && [ ! -e "$ST/closed-$day" ] \
+       && [ ! -e "$ST/o3e-watch-fail-$day" ]; then
+        local _cw
+        _cw=$(cd "$LIVE" && timeout -k 10 90 "$PY" -c "
+import sys
+sys.path.insert(0, '.')
+import tz
+from ib_insync import IB
+import ib_broker as IBB
+import daily as DL
+ib = IB()
+try:
+    ib.connect('127.0.0.1', 4002, clientId=94, timeout=15)
+    c = IBB.IBBroker(ib).margin_cushion()
+    ib.disconnect()
+except Exception as ex:
+    sys.stdout.write('SKIP %r' % (ex,)); raise SystemExit
+if c is None:
+    sys.stdout.write('SKIP запаса нет (пустая книга или неполная сводка)')
+elif c < DL.O3E_MIN:
+    sys.stdout.write('LOW %.3f' % c)
+else:
+    sys.stdout.write('OK %.3f' % c)" 2>&1)
+        case "$_cw" in
+            LOW\ *)
+                echo "внутридневной запас О-3-Е упал: $_cw (порог 1.40) — О-5" > "$ST/ALARM-o3e-intraday-$day.txt"
+                (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-o3e-intraday-$day.txt" >> "$ST/ALARM-o3e-intraday-$day.txt" 2>&1) || true
+                log "ТРЕВОГА: внутридневной запас О-3-Е ($_cw) ниже порога — автопилот остановлен" ;;
+            OK\ *) : ;;
+            *) # сбой замера не тревожит каждый тик — раз в день пометка в лог
+               touch "$ST/o3e-watch-fail-$day"; log "вахта О-3-Е: замер не удался ($_cw) — до конца дня не повторяю" ;;
+        esac
     fi
     if [ "$hm" -ge "$(close_after)" ] && [ -e "$ST/traded-$day" ] && [ ! -e "$ST/closed-$day" ]; then
         ensure_gw && run_close "$day"
@@ -481,10 +558,23 @@ case "${1:-tick}" in
         ensure_gw && run_trade "$day" ;;
     close)
         env_guard || exit 1
-        guard_manual || exit 1
+        # ЗАМЫКАНИЕ ОТТОРГОВАННОГО ДНЯ РАЗРЕШЕНО И ПОД ТРЕВОГОЙ (двадцать второй круг,
+        # №7): guard_manual запрещал close после тревоги О-3-Е, и книга с исполненными
+        # заявками не могла зафиксировать триггер капа — тупик на самой опасной книге.
+        # Замыкание заявок не подаёт; торговый вход по-прежнему под полным guard_manual.
+        day=$(chicago %F)
+        if ls "$ST"/ALARM-*.txt >/dev/null 2>&1; then
+            if [ -e "$ST/traded-$day" ] && [ ! -e "$ST/closed-$day" ]; then
+                echo "тревога стоит, но день $day отторгован и не замкнут — замыкаю (только запись цен/NLV)"
+            else
+                echo "стоит ТРЕВОГА — сначала разбор"; exit 1
+            fi
+        else
+            guard_manual || exit 1
+        fi
         hm=$(chicago %H%M)
         [ "$hm" -ge "$(close_after)" ] || { echo "до окна замыкания маршрута $(route)"; exit 1; }
-        ensure_gw && run_close "$(chicago %F)" ;;
+        ensure_gw && run_close "$day" ;;
     diagnose)
         found=0
         for f in "$ST"/ALARM-*.txt; do

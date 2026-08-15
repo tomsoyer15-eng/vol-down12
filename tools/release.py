@@ -85,7 +85,22 @@ def main():
     print(f'SHA-256: {h}')
     print(f'распакованный архив: {tail[0] if tail else "нет вывода"}')
     if not ok:
-        print((r.stdout or '')[-3000:]); sys.exit('ВЫПУСК НЕ СОСТОЯЛСЯ: архив не проходит selfcheck')
+        # ПРИЧИНА ПРОВАЛА ПОКАЗЫВАЕТСЯ ЦЕЛИКОМ (двадцать второй круг; наблюдение 14.08.2026).
+        # Прежде печатались последние 3000 знаков stdout — а провалы уровня 0 и падения
+        # проверяющего лежат ВЫШЕ этого хвоста, stderr не печатался вовсе. Диагностика шла
+        # вслепую: «архив не проходит selfcheck» без единого слова о том, что именно.
+        _fails = [l for l in (r.stdout or '').splitlines()
+                  if l.startswith('[FAIL]') or l.startswith('ИТОГ:')]
+        if _fails:
+            print('ПРОВАЛЫ ПРОВЕРЯЮЩЕГО:')
+            for _l in _fails:
+                print('  ' + _l)
+        if r.stderr and r.stderr.strip():
+            print('STDERR ПРОВЕРЯЮЩЕГО (хвост):')
+            print('  ' + '\n  '.join(r.stderr.strip().splitlines()[-15:]))
+        if not _fails and not (r.stderr or '').strip():
+            print((r.stdout or '')[-3000:])
+        sys.exit('ВЫПУСК НЕ СОСТОЯЛСЯ: архив не проходит selfcheck')
     # ИСТОРИЯ ВЫПУСКОВ: архив прежде перезаписывался на месте, и предыдущий корень доверия
     # исчезал физически. Каждый выпуск теперь остаётся датированной копией.
     import datetime

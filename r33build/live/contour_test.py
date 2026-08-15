@@ -376,9 +376,13 @@ with tempfile.TemporaryDirectory() as tmp:
     bp = _Partial(prices={'ZNU26': 112.0, 'ESU26': 6000.0}, positions=dict(exp0))
     mk = DL.Market(date=days[-1], px_eq_prev=spy[-2], dref_prev=dref[-2], dref_today=dref[-1],
                    px_eq_today=spy[-1], roll_today=False, st_eq=False, st_bd=False)
+    # ОРИЕНТИРЫ И ЖУРНАЛ ОБЯЗАТЕЛЬНЫ (двадцать второй круг, №17): прежний вызов без них
+    # узаконивал слабый торговый вход — фикстура приведена к тому, как ходит бой.
+    _refs = {'ZNU26': 112.0, 'ESU26': 6000.0, 'MESU26': 600.0}
     try:
         DL.run_session(bp, mk, dirpath=tmp, route='F', capital=10_000_000.0,
-                       book_path=str(sp2)); caught = False
+                       book_path=str(sp2), ref_prices=_refs,
+                       journal_path=str(Path(tmp) / 'j7.csv')); caught = False
     except RuntimeError as ex:
         caught = any(t in str(ex) for t in ('разошлось с намерением', 'не совпадает',
                                             'исполнено', 'ВОССТАНОВИТЬ'))
