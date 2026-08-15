@@ -558,6 +558,15 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
     if n_b != n0_b:
         d.orders['Б'] = n_b - n0_b
     es_after = pack_es(b.es_held, n_e, b.unit_is_mes, roll_a)
+    # ПРИ ОТКАЗЕ §8 УПАКОВКА ДЕЙСТВИТЕЛЬНО НЕ ТРОГАЕТСЯ (двадцатый круг, №4). Обещание
+    # стояло в комментарии, но действовало только на ветку pack_change: pack_es вызывался
+    # безусловно, и на ветке отказа с сокращением книги (100 MES -> цель 50) канон
+    # перекладывал 4 ES, то есть слал ПРОДАЖУ 90 MES и ПОКУПКУ 4 ES вместо простой
+    # продажи 50 MES — лишний оборот и покупка ровно там, где наращивание запрещено;
+    # отказ второй заявки оставлял бы книгу резко недобранной.
+    # Исключение — отрицательный остаток (n_e < 10*es_held): держать 15 единиц сетки как
+    # 2 ES физически нельзя, и там перекладка вынужденная, а экспозиция всё равно падает.
+    es_after = keep_pack_on_refusal(bool(d.refusals), roll_a, b, n_e, es_after)
     d.book_after = replace(b, n_e=n_e, n_b=n_b, prev_close_lev=float('nan'),
                            prev_st_eq=m.st_eq, prev_st_bd=m.st_bd,
                            ser_a=tgt_a, ser_b=tgt_b, es_held=es_after, roll_pending=False)
@@ -565,11 +574,27 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
     # roll_pairs физическая книга может отличаться (es_held сменился, напр. 29 MES ->
     # 2 ES + 9 MES после Е->Ф). Заявки строятся разностью книг и обязаны уйти брокеру.
     # При отказе §8 упаковка НЕ трогается: repack — не сокращение риска и не перенос серии.
-    if (not d.refusals) and not d.orders and not d.roll_pairs \
-            and orders_from_books(book, d.book_after):
-        d.pack_change = True
-        d.reasons.append('смена упаковки ES/MES: физическая книга приводится к целевой, '
-                         'экспозиция не меняется')
+    # ОБОРОТ СЧИТАЕТСЯ ПО ФИЗИЧЕСКИМ ЗАЯВКАМ, А НЕ ПО ЧИСТОМУ ИЗМЕНЕНИЮ (двадцать первый
+    # круг, №4). Прежде издержки перекладки списывались ТОЛЬКО когда экспозиция не менялась
+    # (not d.orders). Но после Е->Ф книга бывает целиком в MES, и «260 MES -> цель 300»
+    # даёт физические заявки -250 MES и +29 ES: оборот 540 единиц сетки, а _size списал
+    # чистые 40. Недосписано ~500 единиц, при SPY=600 это около $7 500 на одной сессии.
+    if (not d.refusals) and not d.orders and not d.roll_pairs:
+        _repack = orders_from_books(book, d.book_after)
+        if _repack:
+            d.pack_change = True
+            # ИЗДЕРЖКИ СМЕНЫ УПАКОВКИ СПИСЫВАЮТСЯ (двадцатый круг, №3). Прежде при
+            # неизменном n_e функция размеров не меняла capital_after_costs вовсе, а
+            # pack_change слал брокеру ВСТРЕЧНЫЕ заявки: 260 MES -> 25 ES + 10 MES это
+            # продажа 250 MES и покупка 25 ES, около $15 млн оборота при SPY=600 и
+            # ~$7 500 модельных издержек. Кап и плечо считались так, будто расход нулевой,
+            # то есть позиция стояла выше фактического капа после заранее известных
+            # расходов. Оборот считается в единицах СЕТКИ: один ES = десять единиц.
+            _grid = repack_grid(_repack, b.unit_is_mes)
+            e -= repack_cost(_grid, u_e)
+            d.reasons.append('смена упаковки ES/MES: физическая книга приводится к целевой, '
+                             f'экспозиция не меняется, оборот {_grid} единиц сетки '
+                             f'(издержки ${repack_cost(_grid, u_e):,.0f} списаны)')
     d.capital_after_costs = e
     d.exposure = {'А': exp_e, 'Б': exp_b}
     d.leverage = (exp_e + exp_b) / e if e else 0.0
@@ -600,6 +625,36 @@ def finalize_close(book, px_eq_close, dref_close, nav_close, route='F', px_bd_cl
     closed = (close_out_e(book, px_eq_close, px_bd_close, nav_close) if route == 'E'
               else close_out(book, px_eq_close, dref_close, nav_close))
     return replace(closed, close_provisional=False)
+
+
+def keep_pack_on_refusal(refusals, roll_a, b, n_e, es_after):
+    """При отказе §8 упаковка НЕ трогается (двадцатый круг, №4). Отдельной функцией — под
+    парную мутацию, бьющую ровно в эту защиту, а не в соседнюю арифметику.
+
+    Исключение — отрицательный остаток (n_e < 10*es_held): держать 15 единиц сетки как
+    2 ES физически нельзя, там перекладка вынужденная, а экспозиция всё равно падает.
+    """
+    if refusals and not roll_a and b.es_held is not None and n_e - 10 * b.es_held >= 0:
+        return b.es_held
+    return es_after
+
+
+def repack_grid(repack, unit_is_mes=True):
+    """Оборот смены упаковки в единицах СЕТКИ.
+
+    Один ES равен десяти единицам сетки ТОЛЬКО когда единица — MES (с 06.05.2019). До
+    этого n_e считается прямо в ES, и множителя нет. Без этой оговорки оборот на всей
+    истории до 2019 раздувался вдесятеро — поймано replay_check расхождением 25% (двадцать
+    первый круг, №4).
+    """
+    k = 10 if unit_is_mes else 1
+    return sum(abs(q) * (k if i.startswith('ES') else 1)
+               for i, q in repack if i.startswith(('ES', 'MES')))
+
+
+def repack_cost(grid, u_e):
+    """Издержки смены упаковки (двадцатый круг, №3). Отдельной функцией — под мутацию."""
+    return S.COST * grid * u_e
 
 
 def pack_es(es_held, n_grid, unit_is_mes, roll_today):
@@ -879,6 +934,38 @@ class RollGap(RuntimeError):
         self.provable = provable
 
 
+class WindowClosed(RuntimeError):
+    """Торговое окно маршрута закрылось — заявка НЕ подаётся (двадцатый круг, №6)."""
+
+
+def _window_gate(deadline, what='', margin_min=False):
+    """Ворота торгового окна ПЕРЕД ЗАЯВКОЙ.
+
+    Заявки уходят брокеру с tif='GTC' и outsideRth=True: поданная за краем окна либо
+    висит до чужой сессии, либо исполняется отдельно от парной. Ворота проверяются не
+    один раз перед сессией, а перед КАЖДОЙ заявкой — ровно так же, как runtime-лимит 390
+    (девятнадцатый круг, №8): длинная сессия с ожиданиями терминального статуса переходит
+    край окна незаметно для любой предстартовой оценки.
+
+    margin_min=True требует запаса FD.TRADE_MARGIN_MIN до края — это проверка ПЕРЕД
+    первой заявкой, где отказ ничего не рвёт. Перед последующими заявками запас НЕ
+    требуется: там отказ уже оставляет неполную книгу, и меряется сам край.
+
+    deadline=None (стенды расчёта, dry, вызовы без окна) ворота не включает.
+    """
+    if deadline is None:
+        return
+    import pandas as pd
+    import feed as FD
+    now = pd.Timestamp.now(tz=FD.EXCHANGE_TZ)
+    lim = deadline - pd.Timedelta(minutes=FD.TRADE_MARGIN_MIN) if margin_min else deadline
+    if now >= lim:
+        raise WindowClosed(
+            f'торговое окно закрыто ({what}): сейчас {now:%H:%M:%S}, край окна '
+            f'{deadline:%H:%M}{f", требуется запас {FD.TRADE_MARGIN_MIN} мин" if margin_min else ""} '
+            f'— заявка не подаётся, tif=GTC ушла бы в ночь')
+
+
 def _filled(rec, want):
     """Исполнено ли РОВНО заявленное. Без усечения до целого: для дробных долей фондов
     int() отбрасывал остаток, и недобор 100,9 при заявке 100 проходил как точное."""
@@ -915,12 +1002,30 @@ def _cancel_all(broker):
 def restore_to(broker, target_book, route='F'):
     """Привести книгу брокера к целевой РАЗНОСТЬЮ ОТ ФАКТИЧЕСКОЙ, а не отменой своих шагов.
 
+    ВОССТАНОВЛЕНИЕ НАМЕРЕННО НЕ ПОД ВОРОТАМИ ОКНА (двадцать первый круг, №5). Замечание
+    верно фактически: сюда приходят после WindowClosed, и заявки уходят за краем окна —
+    заявление «ворота перед КАЖДОЙ заявкой» к этому пути не относится. Но подчинить его
+    воротам нельзя: восстановление вызывается, когда книга УЖЕ разорвана (часть заявок
+    исполнилась), и отказ оставил бы непарную позицию на ночь — то есть ровно тот исход,
+    от которого ворота защищают. Из двух зол выбрано меньшее, и выбор назван вслух:
+    факт подачи за краем окна попадает в причину О-5, а не замалчивается.
+
     ПОЧЕМУ ТАК. Прежняя компенсация откатывала записанные нами действия и объявляла книгу
     восстановленной по числу успешных отмен. Это ложь в трёх случаях: заявка исполнилась,
     а подтверждение потерялось; исполнение оказалось больше заявленного; после отката у
     брокера осталась живая заявка. Единственная надёжная опора — фактические позиции.
     """
     import state as ST
+    _late = ''
+    try:
+        import pandas as _pdr
+        import feed as _FDr
+        _dl = _FDr.trade_deadline(route)
+        if _pdr.Timestamp.now(tz=_FDr.EXCHANGE_TZ) >= _dl:
+            _late = (f' | ВНИМАНИЕ: восстановительные заявки поданы ЗА КРАЕМ окна '
+                     f'({_dl:%H:%M}) — возможны GTC до следующей сессии, проверить счёт')
+    except Exception:
+        pass
     stuck = _cancel_all(broker)
     if stuck:
         # ЖИВАЯ ЗАЯВКА = НИКАКИХ НОВЫХ ЗАЯВОК (четырнадцатый круг, №1): компенсация поверх
@@ -949,11 +1054,12 @@ def restore_to(broker, target_book, route='F'):
     have2 = {k: float(v) for k, v in (broker.net_positions() or {}).items() if v}
     want2 = {k: float(v) for k, v in want.items()}
     if unknown:
-        return False, have2, stuck + unknown
-    return (have2 == want2 and not stuck), have2, stuck
+        return False, have2, stuck + unknown + ([_late] if _late else [])
+    return (have2 == want2 and not stuck), have2, stuck + ([_late] if _late else [])
 
 
-def execute_roll(broker, orders, book_before=None, route='F', ref_prices=None):
+def execute_roll(broker, orders, book_before=None, route='F', ref_prices=None,
+                 deadline=None):
     """Перенос серии. Повторов НЕТ: исключение означает неизвестный статус заявки.
 
     Прежняя редакция повторяла открытие, если у брокера не осталось живых заявок. Но
@@ -1004,6 +1110,9 @@ def execute_roll(broker, orders, book_before=None, route='F', ref_prices=None):
 
     for inst, qty in closes_opens:
         try:
+            # ВОРОТА ОКНА ПЕРЕД КАЖДОЙ ЗАЯВКОЙ ПАРЫ (двадцатый круг, №6): пара ролла
+            # длинная, и её вторая нога легко переходит край окна.
+            _window_gate(deadline, what=f'ролл {inst} {qty:+g}')
             rec = broker.place(inst, qty, (ref_prices or {}).get(inst))
         except Exception as ex:
             bail(f'{inst} {qty:+d}: {ex} (статус заявки НЕИЗВЕСТЕН, повтор не выполняется)',
@@ -1091,7 +1200,7 @@ def _resume_intent(ST, bp, cls, route, book, sess, broker, dry_run):
 
 def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                 capital=None, closing_nav=None, journal_path=None, dry_run=False,
-                ref_prices=None, book_path=None, series_a=None, **kw):
+                ref_prices=None, book_path=None, series_a=None, deadline=None, **kw):
     """Одна торговая сессия. Возвращает (Decision, список заявок, список расхождений).
 
     dry_run=True считает и сверяет, но не подаёт заявок и не меняет состояние — режим
@@ -1153,6 +1262,25 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                 f'сессия {cur} не новее последней завершённой ({book.last_session}): '
                 f'повторный запуск за тот же день или торговля по устаревшим данным '
                 f'запрещены')
+        # ПРОПУЩЕННЫЙ ТОРГОВЫЙ ДЕНЬ — ТРЕВОГА, А НЕ «просто новее» (двадцать первый круг,
+        # №10). Прежнее условие требовало лишь cur > last_session, поэтому машина, не
+        # работавшая весь понедельник, во вторник спокойно торговала дальше: понедельник
+        # забывался молча. Сторож heartbeat этого не ловит — он смотрит давность ТОЛЬКО
+        # когда замок занят, а первый же тик после провала берёт замок и затирает улику.
+        # Здесь сверяется ТОЧНАЯ предыдущая биржевая сессия: пропуск = ручной разбор.
+        if book.last_session:
+            try:
+                import feed as _FDg
+                _prev = _FDg.prev_session(market.date, getattr(market, 'holidays', ()) or ())
+                _prev_s = _prev.strftime('%Y-%m-%d')
+            except Exception:
+                _prev_s = None
+            if _prev_s and book.last_session != _prev_s:
+                raise RuntimeError(
+                    f'между книгой ({book.last_session}) и сегодняшней сессией ({cur}) '
+                    f'пропущены торговые дни: предыдущая биржевая сессия {_prev_s}. '
+                    f'Пропущенный день мог нести ролл или переключение сигнала — '
+                    f'требуется ручной разбор (О-5)')
         nlv = float(broker.net_liquidation() if capital is None else capital)
         dec = (step_e(book, market, nlv, band=band, cap=cap, **kw) if route == 'E'
                else step(book, market, nlv, band=band, cap=cap, route=route, **kw))
@@ -1170,6 +1298,11 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                 raise RuntimeError(f'нет цен-ориентиров для {_no_ref} — торговля без '
                                    f'ориентира запрещена, журнал §7 потерял бы наблюдение')
         if dec.trade and not dry_run:
+            # ОКНО ПРОВЕРЯЕТСЯ ДО ПЕРВОЙ ЗАЯВКИ, С ЗАПАСОМ (двадцатый круг, №6). Автопилот
+            # смотрит часы ПЕРЕД запуском session.py, а дальше идут исторические запросы,
+            # ориентиры, снимки позиций и ожидания заявок до 120 с каждое. Отказ ЗДЕСЬ —
+            # чистый: ни одной заявки не подано, книга не разорвана.
+            _window_gate(deadline, what='начало подачи заявок', margin_min=True)
             # ЖУРНАЛ §7 ПРОВЕРЯЕТСЯ ДО ЗАЯВОК (семнадцатый круг, №15): цепочка хэшей
             # доказывает нетронутость записанного, но не полноту — повреждённый журнал
             # прежде молча продолжался, а сессия без итоговой строки означает, что часть
@@ -1193,7 +1326,7 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
             if dec.roll_pairs:
                 try:
                     placed = execute_roll(broker, orders, book_before=book, route=route,
-                                          ref_prices=ref_prices)
+                                          ref_prices=ref_prices, deadline=deadline)
                 except RollGap as gap:
                     # ОТКАЧЕННЫЙ РОЛЛ ДОЛЖЕН ПОВТОРИТЬСЯ. День ролла один; без отметки
                     # перенос не состоялся бы никогда, и книга дожила бы до поставки.
@@ -1215,6 +1348,7 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                     try:
                         # ЦЕНА-ОРИЕНТИР ИДЁТ В ЗАЯВКУ. Без неё журнал §7 пишет пустое поле,
                         # сверка такие строки отбрасывает, и наблюдения не копятся вовсе.
+                        _window_gate(deadline, what=f'заявка {inst} {qty:+g}')
                         rec = broker.place(inst, qty, (ref_prices or {}).get(inst))
                     except Exception as ex:
                         # ИСХОД НЕИЗВЕСТЕН (шестнадцатый круг, №5): совпавший снимок не
@@ -1293,15 +1427,21 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
             # прежде считались успехом, после чего сохранялась ЦЕЛЕВАЯ книга — немедленная
             # потеря синхронизации. Состояние сохраняется только если фактическая книга
             # брокера совпала с намеченной.
-            bad = [r for r in placed if r.get('filled') != r.get('qty')]
+            # ДОПУСК, А НЕ ТОЧНОЕ РАВЕНСТВО FLOAT (двадцатый круг, №14). Рядом уже стоял
+            # _filled() с допуском 1e-9, а здесь — сырое !=: у дробных долей фондов сумма
+            # нескольких исполнений (0.1+0.2) отличается от заказанного 0.3 только
+            # представлением. Все заявки исполнены, журнал закрыт итогом, но состояние НЕ
+            # сохранялось: автопилот ставил тревогу, замыкания не делал, и книга уходила
+            # в ночь старой. Две проверки одного и того же обязаны быть одной.
+            bad = [r for r in placed if not _filled(r, r.get('qty'))]
             after = ST.reconcile(dec.book_after, route, broker.net_positions(),
                                  open_orders=getattr(broker, 'open_orders', lambda: [])())
             if bad or after:
                 raise RuntimeError(
                     'исполнение разошлось с намерением — состояние НЕ сохранено, книга '
                     'у брокера требует ручного разбора (О-5):\n  ' +
-                    '\n  '.join([f"{r['instrument']}: заявка {r['qty']:+d}, исполнено "
-                                  f"{r.get('filled'):+d}" for r in bad] + after))
+                    '\n  '.join([f"{r['instrument']}: заявка {r['qty']:+g}, исполнено "
+                                  f"{r.get('filled'):+g}" for r in bad] + after))
             # ЗАМЫКАНИЕ СЕССИИ: без него prev_close_lev остаётся NaN, сравнение с капом
             # всегда ложно, и нормативный триггер «плечо фактического закрытия предыдущей
             # сессии» в бою просто не работает.

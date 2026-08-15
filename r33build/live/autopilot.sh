@@ -30,7 +30,27 @@ route() { cat "$ROUTE_F" 2>/dev/null || echo F; }
 # закрытие ~10:30 Чикаго). Торговать Е в 15:00 Чикаго значит вешать рыночные GTC на ночь
 # чужой биржи; замыкание Е возможно уже после европейского закрытия.
 trade_from()  { [ "$(route)" = E ] && echo 0845 || echo 0845; }
-trade_till()  { [ "$(route)" = E ] && echo 0945 || echo 1530; }
+# КОНЕЦ ОКНА — ИЗ ОДНОГО ИСТОЧНИКА С КОНТУРОМ (двадцатый круг, №6): те же feed.TRADE_TILL,
+# по которым сессия проверяет край перед КАЖДОЙ заявкой. Прежде значение жило только здесь,
+# и разъехаться две копии могли молча. Считается один раз на тик (каждый тик — свой
+# процесс); сбой вычисления — тревога и недостижимое время, то есть торговли не будет.
+_TRADE_TILL_CACHE=""
+trade_till() {
+    if [ -z "$_TRADE_TILL_CACHE" ]; then
+        local r t
+        r=$(route)
+        t=$(cd "$LIVE" && "$PY" -c "import sys,feed; sys.stdout.write(feed.trade_till('$r'))" 2>/dev/null)
+        case "$t" in
+            [0-9][0-9][0-9][0-9]) _TRADE_TILL_CACHE="$t";;
+            *)  echo "конец торгового окна маршрута $r не вычислен (ответ: '$t')" \
+                    > "$ST/ALARM-calendar-window.txt"
+                (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-calendar-window.txt" \
+                    >> "$ST/ALARM-calendar-window.txt" 2>&1) || true
+                _TRADE_TILL_CACHE="0000";;   # окно считается закрытым: торговли не будет
+        esac
+    fi
+    echo "$_TRADE_TILL_CACHE"
+}
 close_after() {
     # Маршрут Е: ворота ДИНАМИЧЕСКИЕ (семнадцатый круг, №5) — из того же feed.e_close_gate,
     # что у замыкателя; фиксированное 1040 в недели рассинхронизации DST давало отказ
@@ -51,7 +71,18 @@ close_after() {
 
 # Свой замок В САМОМ СКРИПТЕ: строка crontab с flock — внешняя договорённость, её можно
 # потерять при правке crontab; повторный вход должен быть невозможен независимо от неё.
-exec 9>"$ST/autopilot.lock" 2>/dev/null || true
+# ОТКАЗ ОТКРЫТЬ ЗАМОК — ГРОМКИЙ (двадцатый круг, №12). Прежде здесь стояло `|| true`, и оно
+# проглатывало ВСЁ: отсутствующий каталог состояния, права, read-only FS, ENOSPC. Дальше
+# `flock -n 9` получал «Bad file descriptor», то есть НЕуспех, скрипт считал замок занятым
+# и выходил с кодом 0 — а при отсутствующем сердцебиении даже без тревоги. Контур слеп
+# ровно так же, как при декоративном cron (§12, семнадцатый круг): позиция стоит без
+# торговли и без ролла вплоть до поставочной зоны.
+if ! exec 9>"$ST/autopilot.lock" 2>/dev/null; then
+    # Каталог состояния недоступен — тревожный файл писать НЕКУДА. Кричим в stderr (cron
+    # доставляет его письмом) и выходим НЕнулевым кодом: молчаливый успех запрещён.
+    echo "ADDFUT ТРЕВОГА: не открыть замок $ST/autopilot.lock — каталог состояния недоступен (нет каталога/прав/места); автопилот НЕ РАБОТАЕТ" >&2
+    exit 3
+fi
 if ! flock -n 9; then
     # СТОРОЖ ЗАМКА (семнадцатый круг, №14): зависший владелец делал контур слепым — все
     # тики молча выходили, пропущенный ролл не замечал никто. Сердцебиение пишет владелец
@@ -59,19 +90,41 @@ if ! flock -n 9; then
     hb="$ST/tick-heartbeat"
     if [ -f "$hb" ]; then
         age=$(( $(date +%s) - $(stat -c %Y "$hb" 2>/dev/null || echo 0) ))
-        if [ "$age" -gt 3600 ] && [ ! -e "$ST/ALARM-lock.txt" ]; then
-            {
-                echo "замок занят, сердцебиение владельца устарело на ${age}с — процесс завис"
-                echo "владелец замка (fuser):"
-                fuser -v "$ST/autopilot.lock" 2>&1 | tail -3
-            } > "$ST/ALARM-lock.txt"
-            (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-lock.txt" >> "$ST/ALARM-lock.txt" 2>&1) || true
-            echo "$(date '+%F %T %Z') | ТРЕВОГА: замок автопилота завис (${age}с)" >> "$LOG"
-        fi
+        why="сердцебиение владельца устарело на ${age}с — процесс завис"
+    else
+        # СЕРДЦЕБИЕНИЯ НЕТ ВОВСЕ (двадцатый круг, №12): владелец либо не дошёл до его
+        # записи, либо его не существует (замок держит чужой процесс, а fd открылся).
+        # Один тик ничего не доказывает — гонка между flock и первой записью законна;
+        # поэтому ставим метку и тревожим, если она переживёт час. Прежде эта ветка
+        # молчала НАВСЕГДА: нет файла — нет проверки — нет тревоги.
+        nohb="$ST/lock-nohb"
+        [ -f "$nohb" ] || date +%s > "$nohb" 2>/dev/null || true
+        age=$(( $(date +%s) - $(stat -c %Y "$nohb" 2>/dev/null || echo 0) ))
+        why="сердцебиения нет вовсе ${age}с — владелец замка не наш или не дошёл до записи"
+    fi
+    if [ "$age" -gt 3600 ] && [ ! -e "$ST/ALARM-lock.txt" ]; then
+        {
+            echo "замок занят, $why"
+            echo "владелец замка (fuser):"
+            fuser -v "$ST/autopilot.lock" 2>&1 | tail -3
+        } > "$ST/ALARM-lock.txt"
+        (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-lock.txt" >> "$ST/ALARM-lock.txt" 2>&1) || true
+        echo "$(date '+%F %T %Z') | ТРЕВОГА: замок автопилота завис (${age}с)" >> "$LOG"
     fi
     exit 0
 fi
 date +%s > "$ST/tick-heartbeat" 2>/dev/null || true
+rm -f "$ST/lock-nohb" 2>/dev/null || true      # замок взят — метка «нет сердцебиения» снимается
+
+# ПИН ТОРГОВОГО СЧЁТА В ОКРУЖЕНИЕ СЕССИИ (двадцатый круг, №5). Прежде ADDFUT_ACCOUNT не
+# задавался НИГДЕ: ibgw.env несёт только логин и пароль, и грузился он вдобавок лишь на
+# ветке подъёма шлюза — при уже работающем Gateway переменная не попадала в процесс сессии
+# вовсе. Пин в адаптере был мёртв, а вместе с ним и проверка счёта у замера маржи.
+# Отсутствие файла здесь НЕ тревожит: session.py откажет сам и с внятной причиной, а его
+# отказ — нештатный, то есть уже даёт ALARM по общему правилу.
+if [ -s "$ST/account.txt" ]; then
+    ADDFUT_ACCOUNT=$(tr -d ' \t\n\r' < "$ST/account.txt"); export ADDFUT_ACCOUNT
+fi
 
 log() { echo "$(date '+%F %T %Z') | $*" >> "$LOG"; }
 
@@ -99,17 +152,27 @@ is_trade_day() {
     [ "$dow" -ge 6 ] && return 1
     "$PY" - "$(route)" <<'PYEOF'
 import sys
-sys.path.insert(0, '/home/alex/claude-projects/vol-down12/r33build/live')
-sys.path.insert(0, '/home/alex/claude-projects/vol-down12/r33build')
-import pandas as pd, daily as DL, feed as FD, subprocess
-d = pd.Timestamp(subprocess.run(['date', '+%F'], env={'TZ': 'America/Chicago'},
-                                capture_output=True, text=True).stdout.strip())
-route = sys.argv[1] if len(sys.argv) > 1 else 'F'
+# ЛЮБАЯ НЕОЖИДАННАЯ ОШИБКА = КОД 2, А НЕ 1 (двадцать первый круг, №9). Код 1 означает
+# «праздник/выходной», и Python отдаёт ровно его при ЛЮБОМ необработанном исключении:
+# сломанный pandas, битый daily/feed, отсутствующий date — всё это заставляло тик молча
+# уходить в ветку «сегодня не торгуем», без тревоги, до самой поставочной зоны. Импорты и
+# создание Timestamp прежде стояли ВНЕ try, то есть именно они и давали ложный «праздник».
 try:
-    hol = (FD.eu_holidays(d.year) if route == 'E' else DL.holidays_for(d.year))
-except Exception:
-    sys.exit(2)          # непокрытый год: НЕ «выходной», а тревога у вызывающего
-sys.exit(1 if d.normalize() in set(hol) else 0)
+    sys.path.insert(0, '/home/alex/claude-projects/vol-down12/r33build/live')
+    sys.path.insert(0, '/home/alex/claude-projects/vol-down12/r33build')
+    import pandas as pd, daily as DL, feed as FD, subprocess
+    d = pd.Timestamp(subprocess.run(['date', '+%F'], env={'TZ': 'America/Chicago'},
+                                    capture_output=True, text=True).stdout.strip())
+    route = sys.argv[1] if len(sys.argv) > 1 else 'F'
+    try:
+        hol = (FD.eu_holidays(d.year) if route == 'E' else DL.holidays_for(d.year))
+    except Exception:
+        sys.exit(2)      # непокрытый год: НЕ «выходной», а тревога у вызывающего
+    sys.exit(1 if d.normalize() in set(hol) else 0)
+except SystemExit:
+    raise
+except BaseException:
+    sys.exit(2)          # поломка среды тоже тревога, а не молчаливый «выходной»
 PYEOF
 }
 
@@ -258,6 +321,22 @@ tick() {
     local day hm
     day=$(chicago %F); hm=$(chicago %H%M)
     ls "$ST"/ALARM-*.txt >/dev/null 2>&1 && return 0     # тревога: стоим до ручного разбора
+    # ГОРИЗОНТ КАЛЕНДАРЯ (двадцать первый круг, №12): таблицы праздников продлеваются
+    # вручную, и обрыв обнаруживался в тот день, когда торговать уже нельзя — у маршрута Е
+    # таблица кончается 2026 годом. Это ПРЕДУПРЕЖДЕНИЕ, а не тревога: ALARM-* останавливает
+    # контур целиком, а за три месяца до обрыва останавливать нечего. Раз в день.
+    local _wd="$ST/WARN-calendar-horizon-$(chicago %Y-%m).txt"
+    if [ ! -e "$_wd" ]; then
+        local _h
+        _h=$(cd "$LIVE" && "$PY" -c "
+import sys, feed
+ok, msg = feed.calendar_horizon('$(route)')
+sys.stdout.write(('OK ' if ok else 'NO ') + msg)" 2>&1)
+        case "$_h" in
+            OK\ *) : ;;
+            *) echo "$_h" > "$_wd"; log "ВНИМАНИЕ: $_h" ;;
+        esac
+    fi
     is_trade_day; _td=$?
     if [ "$_td" -eq 2 ]; then
         echo "календарь маршрута $(route) не покрывает текущий год" > "$ST/ALARM-calendar.txt"
@@ -324,6 +403,13 @@ tick() {
     fi
     find "$ST" -maxdepth 1 -name 'traded-*' -mtime +14 -delete 2>/dev/null
     find "$ST" -maxdepth 1 -name 'closed-*' -mtime +14 -delete 2>/dev/null
+    # АРХИВ НАМЕРЕНИЙ (двадцатый круг, №16): снятое намерение не удаляется, а
+    # переименовывается — оно единственное говорит, что НАМЕЧАЛОСЬ. Хранится две недели,
+    # как отметки торговли: дольше оно не нужно, а расти без предела не должно.
+    # МАСКА ПО РЕАЛЬНОМУ ИМЕНИ (двадцать первый круг, №17): файл называется
+    # book-F.json.intent-done-<ts>.json, и прежняя маска 'intent-*-done-*' не совпадала
+    # с ним НИКОГДА — уборка была декоративной, архив рос без предела.
+    find "$ST" -maxdepth 1 -name '*intent-done-*' -mtime +14 -delete 2>/dev/null
 }
 
 backup_state() {

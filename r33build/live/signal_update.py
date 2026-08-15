@@ -40,7 +40,7 @@ class SignalError(RuntimeError):
     pass
 
 
-def monthly_adjusted(ib, sym, primary):
+def monthly_adjusted(ib, sym, primary, daily_out=None):
     """Месячные закрытия по ADJUSTED_LAST; текущий незавершённый месяц отбрасывается."""
     import pandas as pd
     from ib_insync import Stock, util
@@ -64,20 +64,58 @@ def monthly_adjusted(ib, sym, primary):
     bad = [f'{d:%Y-%m}' for d, v in me.items() if not (math.isfinite(v) and v > 0)]
     if bad:
         raise SignalError(f'{sym}: недостоверные месячные закрытия {bad}')
-    _verify_month_tail(sym, df, me)
+    # Последний месяц проверяется ВСЕГДА (№16). Остальные ДОПИСЫВАЕМЫЕ месяцы проверяет
+    # _update_locked через daily_out: только там известно, какие месяцы не заморожены
+    # сайдкаром (двадцатый круг, №9). Вся история сюда не годится — праздничная таблица
+    # покрывает 2026-2028, и проверка старых лет отказала бы на каждом обновлении.
+    _verify_month_tail(sym, df, me, months=[me.index[-1]] if len(me) else [])
+    if daily_out is not None:
+        daily_out['df'] = df
     return me
 
 
-def _verify_month_tail(sym, df, me):
-    """ПОСЛЕДНИЙ МЕСЯЦ РЕШЕНИЯ ОБЯЗАН КОНЧАТЬСЯ ПОСЛЕДНЕЙ СЕССИЕЙ (№16): источник,
-    потерявший одну-две последние сессии месяца, дал бы «месячное закрытие» серединой
-    месяца, и из него записался бы сигнал."""
+def _verify_month_tail(sym, df, me, months=None):
+    """КАЖДЫЙ ПРОВЕРЯЕМЫЙ МЕСЯЦ ОБЯЗАН КОНЧАТЬСЯ ПОСЛЕДНЕЙ СЕССИЕЙ (№16; двадцатый
+    круг, №9): источник, потерявший одну-две последние сессии месяца, дал бы «месячное
+    закрытие» серединой месяца, и из него записался бы сигнал.
+
+    ДВАДЦАТЫЙ КРУГ, №9: прежде смотрелся ТОЛЬКО me.index[-1], хотя дописываться может до
+    двенадцати месяцев сразу (перерыв в работе, бутстрап). Дыра в промежуточном месяце
+    входила бы в SMA нетронутой, а перекрёстные срезы её не ловят: TRADES и MIDPOINT
+    приходят от ТОГО ЖЕ поставщика и имеют ту же дыру. Цена ошибки — переключение целой
+    ноги, то есть величина порядка NLV.
+    """
     import pandas as pd
     import daily as _DL
     import feed as _FD
     if not len(me):
         return
-    dm = me.index[-1]
+    _no_cal = []
+    for dm in (list(me.index) if months is None else list(months)):
+        # КАЛЕНДАРЬ СПРАШИВАЕТСЯ ОТДЕЛЬНО. Ловить RuntimeError вокруг всей проверки нельзя:
+        # SignalError — его НАСЛЕДНИК, и такой except глотал бы ровно тот отказ, ради
+        # которого проверка существует (поймано батареей на стенде «хвост месяца потерян»).
+        try:
+            # ДВАДЦАТЬ ПЕРВЫЙ КРУГ, №11: спрашивался год+1, и для любого месяца 2028
+            # падал запрос 2029 — весь 2028 объявлялся непокрытым, хотя он в таблице
+            # ЕСТЬ. Покрытие проверяется по СВОЕМУ году; заглядывание в следующий —
+            # забота _verify_one_month, у неё свой запасной путь.
+            _DL.holidays_for(dm.year)
+        except RuntimeError:
+            # ПРАЗДНИЧНАЯ ТАБЛИЦА ПОКРЫВАЕТ 2026-2028 (§8, признанный предел). Окно SMA
+            # уходит глубже, и требовать календарь на каждый месяц окна значит отказывать
+            # на КАЖДОМ обновлении. Непроверенный месяц не проглатывается молча: он
+            # называется вслух, а его достоверность держат независимые срезы TRADES и
+            # MIDPOINT (_verify_fresh). Предел записан в §12.
+            _no_cal.append(f'{dm:%Y-%m}')
+            continue
+        _verify_one_month(sym, df, dm, pd, _DL, _FD)
+    if _no_cal:
+        print(f'  {sym}: хвост месяцев {_no_cal} НЕ проверен — праздничный календарь их '
+              f'не покрывает; достоверность держат только срезы TRADES/MIDPOINT')
+
+
+def _verify_one_month(sym, df, dm, pd, _DL, _FD):
     try:
         hol = _DL.holidays_for(dm.year, dm.year + 1)
     except RuntimeError:
@@ -107,7 +145,7 @@ def _div_bound(d):
     return DIV_YIELD_CAP / 4.0 + DIV_YIELD_CAP * days / 365.0 + LEVEL_TOL
 
 
-def _verify_border(sym, me):
+def _verify_border(sym, me, covered=None):
     """ПОГРАНИЧНЫЙ НОВЫЙ МЕСЯЦ НЕ ДОВЕРЯЕТСЯ АВТОМАТИЧЕСКИ (тринадцатый круг, №8): самый
     свежий месяц отсутствует в сайдкаре и уровневой сверкой не покрыт; если его закрытие
     стоит к SMA ближе зоны неопределённости, знак решения неотличим от погрешности
@@ -119,6 +157,15 @@ def _verify_border(sym, me):
     sma = me.rolling(SMA).mean()
     d = me.index[-1]
     if sma.isna().loc[d]:
+        return
+    # УЖЕ ЗАМОРОЖЕННЫЙ МЕСЯЦ ПЕРЕПОДТВЕРЖДАТЬ НЕ НАДО (найдено ЖИВЫМ КОНТУРОМ 14.08.2026).
+    # Проверка стояла на последнем месяце решения БЕЗУСЛОВНО, в том числе когда он уже
+    # записан в ряд и заморожен сайдкаром уровней. Из-за этого пограничный месяц блокировал
+    # контур ВСЕ свои тридцать дней: 14.08 автопилот встал тревогой на июльском решении
+    # (IEF -1,268% при зоне 1,83%), хотя строка 2026-08-31 была записана 13.08, исполнена
+    # и подтверждена. Смысл защиты — не дать ДОПИСАТЬ сомнительный знак; к уже
+    # записанному она отношения не имеет.
+    if covered and d in covered:
         return
     zone = max(BORDER_TOL, _div_bound(d))
     margin = abs(me.loc[d] / sma.loc[d] - 1.0)
@@ -348,12 +395,17 @@ def _update_locked(ib, LIVE, pd):
     fresh = {}
     pending_levels = {}
     for col, sym, primary in LEGS:
-        me = monthly_adjusted(ib, sym, primary)
+        _daily = {}
+        me = monthly_adjusted(ib, sym, primary, daily_out=_daily)
         covered = _check_levels(sym, LIVE, me) or set()   # ПРОВЕРКА без записи (11-й, №10)
-        _verify_border(sym, me)            # пограничный свежий месяц (тринадцатый, №8)
+        _verify_border(sym, me, covered)   # пограничный свежий месяц (тринадцатый, №8)
         # ВСЕ месяцы SMA-окна вне замороженного сайдкара — под независимый срез TRADES
         # (шестнадцатый круг, №3; семнадцатый, №12 — пропуск нескольких месяцев).
         fresh_months = [d for d in me.index[-SMA:] if d not in covered]
+        # И КАЖДЫЙ ИЗ НИХ — ПОД КАЛЕНДАРНУЮ ПРОВЕРКУ ХВОСТА (двадцатый круг, №9): прежде
+        # смотрелся только последний месяц, а дыра в промежуточном входила в SMA целой.
+        # Перекрёстные срезы её не ловят: TRADES и MIDPOINT — тот же поставщик, та же дыра.
+        _verify_month_tail(sym, _daily['df'], me, months=fresh_months)
         _verify_fresh(ib, sym, primary, me, fresh_months)
         pending_levels[sym] = me
         st = states(me)

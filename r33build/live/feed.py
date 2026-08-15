@@ -68,6 +68,37 @@ def eu_holidays(*years):
         out.extend(pd.Timestamp(x) for x in HOLIDAYS_EU[y])
     return tuple(out)
 
+CAL_HORIZON_DAYS = 90      # за сколько дней до обрыва календаря начинать тревожить
+
+
+def calendar_horizon(route='F', today=None, days=CAL_HORIZON_DAYS):
+    """Покрыт ли календарь маршрута на ближайшие `days` дней (двадцать первый круг, №12).
+
+    Таблицы праздников продлеваются ВРУЧНУЮ по официальным календарям бирж, и обрыв
+    обнаруживался лишь в тот день, когда торговать уже нельзя: у маршрута Е таблица
+    кончается 2026 годом, и с первой сессии 2027 контур встал бы целиком — маржинальная
+    книга CSPX/CBU0 осталась бы без ежедневного О-3-Е, сигналов и замыкания.
+
+    Возвращает (ok, сообщение). Проверяется ГОРИЗОНТ, а не сегодняшний день: тревога
+    приходит за три месяца, когда её ещё можно спокойно закрыть.
+    """
+    import pandas as pd
+    import daily as _DL
+    if today is None:
+        today = exchange_today()
+    edge = pd.Timestamp(today) + pd.Timedelta(days=days)
+    years = sorted({pd.Timestamp(today).year, edge.year})
+    try:
+        if route == 'E':
+            eu_holidays(*years)
+        else:
+            _DL.holidays_for(*years)
+    except Exception as ex:
+        return False, (f'календарь маршрута {route} не покрывает горизонт {days} дней '
+                       f'(до {edge:%Y-%m-%d}): {ex}')
+    return True, f'календарь маршрута {route} покрывает {years}'
+
+
 DUR_MIN, DUR_MAX = 3.0, 12.0
 YIELD_MIN, YIELD_MAX = 0.0005, 0.25
 
@@ -446,6 +477,107 @@ def e_close_gate(today=None):
     lon = pd.Timestamp(f'{today:%Y-%m-%d} 16:35', tz='Europe/London').tz_convert(EXCHANGE_TZ)
     zur = pd.Timestamp(f'{today:%Y-%m-%d} 17:35', tz='Europe/Zurich').tz_convert(EXCHANGE_TZ)
     return max(lon, zur)
+
+
+def common_window_till(today=None):
+    """Край ОБЩЕГО окна LSE/SIX и CME для перехода между маршрутами (двадцатый круг, №7).
+
+    Симметрична e_close_gate и намеренно зеркальна ей: там max (обе площадки уже
+    закрылись — можно замыкать), здесь min (обе ещё открыты — можно переводить книгу).
+    Связывающее ограничение — европейская сторона: фьючерсы CME торгуются почти
+    круглосуточно, а CSPX (LSE, 16:30) и CBU0 (EBS/SIX, 17:30) закрываются первыми.
+
+    Прежде окно перехода было БУЛЕВЫМ аргументом in_common_window, проверенным ОДИН раз
+    до preview, preflight и сотен заявок; 15-минутный тайм-аут относился к отдельному
+    лоту, а не к закрытию площадки. Переход, начатый перед границей, продолжал продавать
+    фьючерсы и покупать фонды после закрытия европейской стороны — непарная рыночная
+    позиция ровно того рода, ради которой существует лимит §8б.
+    """
+    import pandas as pd
+    if today is None:
+        today = exchange_today()
+    lon = pd.Timestamp(f'{today:%Y-%m-%d} 16:30', tz='Europe/London').tz_convert(EXCHANGE_TZ)
+    zur = pd.Timestamp(f'{today:%Y-%m-%d} 17:30', tz='Europe/Zurich').tz_convert(EXCHANGE_TZ)
+    return min(lon, zur)
+
+
+def common_window(today=None):
+    """ОБЩЕЕ окно LSE/SIX и CME: (начало, конец) в биржевой зоне, либо отказ.
+
+    Двадцать первый круг, №2: прежде считался только ВЕРХНИЙ край, а нижний и торговый
+    день не проверялись вовсе — переход мог пойти в праздник, в выходной или до открытия
+    Европы, продав фьючерс и оставив GTC-покупку фонда до следующей сессии.
+
+    Начало — позднейшее из открытий (LSE 08:00 Лондона, SIX 09:00 Цюриха): работать можно,
+    когда открыты ОБЕ. Конец — ранейшее из закрытий (common_window_till). Праздник любой
+    из сторон или выходной — отказ, а не пустое окно.
+    """
+    import pandas as pd
+    import daily as _DL
+    if today is None:
+        today = exchange_today()
+    d = pd.Timestamp(today).normalize()
+    if d.weekday() >= 5:
+        raise FeedError(f'{d:%Y-%m-%d} — выходной: общего окна LSE/CME нет')
+    if d in {pd.Timestamp(x).normalize() for x in _DL.holidays_for(d.year)}:
+        raise FeedError(f'{d:%Y-%m-%d} — праздник CME: общего окна нет')
+    if d in {pd.Timestamp(x).normalize() for x in eu_holidays(d.year)}:
+        raise FeedError(f'{d:%Y-%m-%d} — праздник LSE/SIX: общего окна нет')
+    lon_o = pd.Timestamp(f'{d:%Y-%m-%d} 08:00', tz='Europe/London').tz_convert(EXCHANGE_TZ)
+    zur_o = pd.Timestamp(f'{d:%Y-%m-%d} 09:00', tz='Europe/Zurich').tz_convert(EXCHANGE_TZ)
+    return max(lon_o, zur_o), common_window_till(d)
+
+
+TRADE_TILL = {'F': '1530', 'E': '0945'}      # конец торгового окна по маршруту, Чикаго
+
+# СОКРАЩЁННЫЕ СЕССИИ (двадцать первый круг, №6). Календарь знает только ПОЛНЫЕ выходные, а
+# CME закрывается рано в ряд дней — после Дня благодарения, в сочельник, иногда 3 июля; у
+# ES и ZN часы при этом РАЗНЫЕ. После фактического раннего закрытия контур продолжал
+# считать окно открытым до 15:30, и заявка с tif=GTC + outsideRth могла дожить до вечерней
+# переоткрытой сессии или до следующего дня.
+#
+# ТАБЛИЦА ПУСТА НАМЕРЕННО. Часы сокращённых сессий — данные биржи, и выдумывать их по
+# памяти нельзя ровно по той же причине, что и праздники (см. HOLIDAYS_EU): ошибка на
+# полчаса означает заявку в закрытый рынок. Заполняется по официальному календарю
+# CME/CBOT перед живым этапом; до тех пор пробел назван в §12, а механизм уже работает.
+SHORT_SESSIONS = {}          # 'YYYY-MM-DD' -> 'HHMM' конца окна маршрута Ф
+
+
+def trade_till(route='F', today=None):
+    """Конец торгового окна маршрута в виде HHMM — ЕДИНЫЙ источник для автопилота и для
+    контура (двадцатый круг, №6).
+
+    Прежде окно жило ТОЛЬКО в autopilot.sh и проверялось один раз перед запуском
+    session.py, а внутри сессии идут исторические запросы, ориентиры, снимки позиций и
+    последовательные ожидания заявок до 120 с каждое. Заявка второй ноги могла уйти
+    брокеру уже за краем окна, и при tif=GTC + outsideRth она либо висела до чужой
+    сессии, либо исполнялась отдельно от первой — непарная позиция на ночь.
+
+    Сокращённая сессия (двадцать первый круг, №6) переопределяет край на свою дату.
+    """
+    t = TRADE_TILL.get(route)
+    if not t:
+        raise FeedError(f'неизвестный маршрут {route!r}: конец торгового окна не определён')
+    if route == 'F':
+        d = exchange_today() if today is None else today
+        short = SHORT_SESSIONS.get(f'{d:%Y-%m-%d}')
+        if short:
+            return short
+    return t
+# Запас до края окна, требуемый ПЕРЕД началом подачи заявок. Операционная величина (как
+# 35 дней давности замера маржи, 390 заявок в день и 15 минут на пару перехода), а не
+# параметр стратегии: сессия из нескольких последовательных заявок с ожиданием
+# терминального статуса не имеет права начинаться за минуту до края окна.
+TRADE_MARGIN_MIN = 3
+
+
+def trade_deadline(route='F', today=None):
+    """Момент конца торгового окна на СЕГОДНЯ в биржевой зоне (DST-безопасно)."""
+    import pandas as pd
+    if today is None:
+        today = exchange_today()
+    hhmm = trade_till(route, today)
+    return pd.Timestamp(f'{today:%Y-%m-%d} {hhmm[:2]}:{hhmm[2:]}', tz=EXCHANGE_TZ)
 
 
 def closing_values(ib, route, book):
