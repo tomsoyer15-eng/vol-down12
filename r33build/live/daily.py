@@ -648,9 +648,27 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
                     f'кап 2,00 пересчитан ПОСЛЕ издержек перекладки: сокращено '
                     f'{len(_cut)} единиц ({"".join(_cut)}), книга n_e={n_e}, n_b={n_b}; '
                     f'издержки сокращения списаны, экспозиция ИЗМЕНЕНА')
-            d.reasons.append('смена упаковки ES/MES: физическая книга приводится к целевой, '
-                             f'экспозиция не меняется, оборот {_grid} единиц сетки '
-                             f'(издержки ${repack_cost(_grid, u_e):,.0f} списаны)')
+            # СТРОКА ПИШЕТСЯ, ТОЛЬКО ЕСЛИ ЭКСПОЗИЦИЯ ДЕЙСТВИТЕЛЬНО НЕ МЕНЯЛАСЬ (двадцать
+            # пятый круг, №10). Прежде она дописывалась БЕЗУСЛОВНО — даже после cap-среза,
+            # где сразу выше уже сказано «экспозиция ИЗМЕНЕНА»: журнал §7 получал две
+            # взаимоисключающие причины подряд. И оборот пересчитывается по ФАКТИЧЕСКИМ
+            # заявкам: после среза 29 MES -> 2 ES + 9 MES превращается в 1 ES + 18 MES,
+            # то есть 21 единица сетки вместо 41, и списание по старому _grid занижало
+            # капитал, из-за чего кап мог продать лишний контракт.
+            if not _cut:
+                d.reasons.append(
+                    'смена упаковки ES/MES: физическая книга приводится к целевой, '
+                    f'экспозиция не меняется, оборот {_grid} единиц сетки '
+                    f'(издержки ${repack_cost(_grid, u_e):,.0f} списаны)')
+            else:
+                _grid2 = repack_grid(orders_from_books(book, d.book_after), b.unit_is_mes)
+                _delta = repack_cost(_grid2, u_e) - repack_cost(_grid, u_e)
+                e -= _delta
+                d.capital_after_costs = e
+                d.reasons.append(
+                    f'оборот пересчитан по фактическим заявкам после среза капом: '
+                    f'{_grid2} единиц сетки вместо {_grid} '
+                    f'(поправка издержек ${_delta:+,.0f})')
     d.capital_after_costs = e
     d.exposure = {'А': exp_e, 'Б': exp_b}
     d.leverage = (exp_e + exp_b) / e if e else 0.0
@@ -1351,6 +1369,26 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                 f'между публикацией и журналом; книга и брокер выглядят согласованно, но '
                 f'нормативный журнал остался в TRANSITION_OPEN (О-5)')
         book, done_date = _resume_intent(ST, bp, cls, route, book, sess, broker, dry_run)
+        # НАМЕРЕНИЕ ВЧЕРАШНЕГО ДНЯ НЕ ЗАКРЫВАЕТ СЕГОДНЯШНИЙ (двадцать пятый круг, №4).
+        # done_date не сравнивался с датой рынка: run_session возвращал успех, автопилот
+        # ставил traded-СЕГОДНЯ, и сегодняшние сигнал, полоса, кап и РОЛЛ не исполнялись,
+        # а do_close потом отвергал книгу как вчерашнюю. Особенно опасен обрыв накануне
+        # ролла или на границе месяца — позиция остаётся в старой серии/старом состоянии.
+        # Пустой done_date при принятой книге тоже недопустим: тот же запуск считал бы
+        # ЕЩЁ ОДНО решение по тому же рынку (возможен второй ролл той же книги).
+        if done_date is not None:
+            _mkt_day = f'{market.date:%Y-%m-%d}'
+            if not done_date:
+                raise RuntimeError(
+                    'намерение прошлого запуска принято, но БЕЗ даты сессии: продолжать '
+                    'этот же запуск нельзя — решение посчиталось бы второй раз по тому же '
+                    'рынку (ручной разбор, О-5)')
+            if str(done_date) != _mkt_day:
+                raise RuntimeError(
+                    f'намерение исполнено в сессии {done_date}, а рынок сегодняшний '
+                    f'({_mkt_day}): день {done_date} завершён, но СЕГОДНЯШНИЕ сигнал, '
+                    f'полоса, кап и ролл не исполнены — объявлять день отторгованным '
+                    f'нельзя (О-5)')
         if done_date:
             # Сессия этой даты уже исполнена прошлым запуском: заявок нет, решение не
             # считается заново. Замыкание выполняется отдельным запуском, как обычно.
@@ -1415,7 +1453,19 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
             except Exception as ex:
                 raise RuntimeError(f'живой запас О-3-Е недоступен под замком ({ex}) — '
                                    f'торговля Е запрещена')
-            if _fresh is not None:
+            # None ПОД ЗАМКОМ — ЭТО ОТКАЗ, А НЕ «ОСТАВИМ СТАРОЕ» (двадцать пятый круг, №5).
+            # Прежде при неполной свежей сводке в kw оставалось СТАРОЕ здоровое значение,
+            # снятое до замка, и step_e продолжал торговлю без обязательного сокращения —
+            # то есть книга около 2x сохранялась при неизвестном maintenance cushion.
+            if _fresh is None:
+                _live_pos = any(v for v in (broker.net_positions() or {}).values())
+                if _live_pos or getattr(book, 'n_eq', 0) or getattr(book, 'n_bd', 0):
+                    raise RuntimeError(
+                        'живой запас О-3-Е под замком вернул None при существующих '
+                        'позициях — сводка брокера неполна; торговля Е запрещена до '
+                        'восстановления данных (О-5)')
+                kw.pop('live_cushion', None)
+            else:
                 kw['live_cushion'] = _fresh
         dec = (step_e(book, market, nlv, band=band, cap=cap, **kw) if route == 'E'
                else step(book, market, nlv, band=band, cap=cap, route=route, **kw))
@@ -1573,18 +1623,30 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
         # им же ставится итоговая строка, и пара «строки+итог» не рвётся.
         if journal_path and not dry_run:
             fills = {r['instrument']: r for r in placed}
-            _rows = J.rows_from_decision(dec, nlv, orders, fills) if dec.trade else []
+            _delayed = []
+            _rows = (J.rows_from_decision(dec, nlv, orders, fills, delayed_out=_delayed)
+                     if dec.trade else [])
             for row in _rows:
                 J.append(journal_path, row)
             # ИТОГОВАЯ СТРОКА СЕССИИ (семнадцатый круг, №15): маркер полноты. Обрыв между
             # append-ами оставляет валидную ЦЕПОЧКУ без итога — следующая сессия увидит
             # незакрытый журнал и остановится, вместо того чтобы копить ложную выборку §7.
-            if dec.trade and not dry_run:
-                J.append(journal_path, dict(
-                    date=f'{market.date:%Y-%m-%d}', leg='', instrument='ИТОГ', qty=0,
-                    px_order='-', px_fill='', commission='', reason='', nav=nlv,
-                    leverage='', roll_spread_near='', roll_spread_far='',
-                    note=f'итог сессии {sess + 1}: строк {len(_rows)}'))
+            # ИТОГ ПИШЕТСЯ ТОЛЬКО ПОСЛЕ ФИНАЛЬНОЙ СВЕРКИ (двадцать пятый круг, №12).
+            # Прежде строки исполнения И нормальный ИТОГ ложились ДО согласованного снимка
+            # и ST.reconcile: если дальше обнаруживался поздний fill, лишняя позиция или
+            # незакрытая заявка, состояние не сохранялось и поднимался О-5 — а журнал уже
+            # объявлял дату ПОЛНОЙ. _excluded_dates её не исключал (счётчик строк сходится,
+            # пометки утраты нет), и §7 получал ложное наблюдение без пропавшего fill и
+            # его издержек. Итог теперь ставится ниже, после сверки; при отказе на его
+            # месте оказывается пометка НЕПОЛНОТЫ, и дата честно выпадает из выборки.
+            _pending_total = dict(
+                date=f'{market.date:%Y-%m-%d}', leg='', instrument='ИТОГ', qty=0,
+                px_order='-', px_fill='', commission='', reason='', nav=nlv,
+                leverage='', roll_spread_near='', roll_spread_far='',
+                note=(f'итог сессии {sess + 1}: строк {len(_rows)}'
+                      + (f'; ИСКЛЮЧЕНА из выборки издержек §7: ориентир задержан '
+                         f'({len(_delayed)} строк, данные типа 3 ~15 мин)'
+                         if _delayed else ''))) if dec.trade else None
         # ОТКАЗ РЕШЕНИЯ БЕЗ ЕДИНОЙ ЗАЯВКИ НЕ ЗАКРЫВАЕТ ДЕНЬ (десятый круг, №5): прежде
         # last_session ставился, книга сохранялась, и «сессия не считается» на деле
         # означало «день отторгован без требуемого входа».
@@ -1606,6 +1668,16 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
             _pos_fin, _oo_fin = _snapshot_consistent(broker)
             after = ST.reconcile(dec.book_after, route, _pos_fin, open_orders=_oo_fin)
             if bad or after:
+                # ДАТА ЧЕСТНО ПОМЕЧАЕТСЯ НЕПОЛНОЙ (№12): строки исполнения уже в журнале,
+                # и без этой пометки §7 считал бы день полным наблюдением.
+                if journal_path and not dry_run and _pending_total is not None:
+                    try:
+                        J.append(journal_path, dict(
+                            _pending_total,
+                            note=f'итог сессии {sess + 1}: НЕПОЛНАЯ — исполнение разошлось '
+                                 f'с намерением, исключить из выборки §7'))
+                    except Exception:
+                        pass
                 raise RuntimeError(
                     'исполнение разошлось с намерением — состояние НЕ сохранено, книга '
                     'у брокера требует ручного разбора (О-5):\n  ' +
@@ -1630,4 +1702,8 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                     note='; '.join(dec.reasons))
             ST.clear_intent(bp)          # состояние записано — намерение исполнено
             dec.book_after = closed
+            # ИТОГ СЕССИИ — ПОСЛЕДНИМ (двадцать пятый круг, №12): дата объявляется полной
+            # только когда сверка прошла И состояние сохранено.
+            if journal_path and not dry_run and _pending_total is not None:
+                J.append(journal_path, _pending_total)
         return dec, orders, diff

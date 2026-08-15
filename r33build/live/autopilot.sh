@@ -334,7 +334,14 @@ BK2
         # фиксировался НИКОГДА. Маркер ставится по факту сохранённой книги; тревога при
         # этом всё равно поднимается ниже, торговля не продолжается.
         touch "$ST/traded-$day"
-        alarm_write "$ST/ALARM-trade-$day.txt" "$out" || true
+        alarm_write "$ST/ALARM-trade-$day.txt" "$out" || {
+            # ОТКАЗ ЗАПИСИ ТРЕВОГИ — ОТКАЗ КОНТУРА (двадцать пятый круг, №11). Я сам
+            # обесценил защиту припиской "|| true": файл не появлялся, тик заканчивался
+            # нулём, следующий cron снова торговал поверх неизвестного исхода.
+            log "КРИТИЧНО: тревога не записана — снимаю отметку дня, торговля запрещена"
+            rm -f "$ST/traded-$day"
+            return 1
+        }
         (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-trade-$day.txt" >> "$ST/ALARM-trade-$day.txt" 2>&1) || true
         log "ТРЕВОГА торговли $day: состояние сохранено (книга за $day), сессия упала после — замыкание разрешено, торговля остановлена"
         return 1
@@ -369,7 +376,14 @@ BK
         # сессии снимают «штатность»: остаётся обычная ветка тревоги.
         touch "$ST/traded-$day"; log "торговля $day: штатный отказ (день уже отторгован)"
     else
-        alarm_write "$ST/ALARM-trade-$day.txt" "$out" || true
+        alarm_write "$ST/ALARM-trade-$day.txt" "$out" || {
+            # ОТКАЗ ЗАПИСИ ТРЕВОГИ — ОТКАЗ КОНТУРА (двадцать пятый круг, №11). Я сам
+            # обесценил защиту припиской "|| true": файл не появлялся, тик заканчивался
+            # нулём, следующий cron снова торговал поверх неизвестного исхода.
+            log "КРИТИЧНО: тревога не записана — снимаю отметку дня, торговля запрещена"
+            rm -f "$ST/traded-$day"
+            return 1
+        }
         (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-trade-$day.txt" >> "$ST/ALARM-trade-$day.txt" 2>&1) || true
         log "ТРЕВОГА торговли $day (код $rc) — автопилот остановлен до ручного разбора"
         return 1
@@ -404,7 +418,10 @@ BK2
         touch "$ST/closed-$day"; log "замыкание $day: ок"
         backup_state "$day"
     else
-        alarm_write "$ST/ALARM-close-$day.txt" "$out" || true
+        alarm_write "$ST/ALARM-close-$day.txt" "$out" || {
+            log "КРИТИЧНО: тревога замыкания не записана — контур останавливается"
+            return 1
+        }
         (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-close-$day.txt" >> "$ST/ALARM-close-$day.txt" 2>&1) || true
         log "ТРЕВОГА замыкания $day (код $rc)"
         return 1
@@ -561,7 +578,8 @@ else:
     sys.stdout.write('OK %.3f' % c)" 2>&1)
         case "$_cw" in
             LOW\ *)
-                echo "внутридневной запас О-3-Е упал: $_cw (порог 1.40) — О-5" > "$ST/ALARM-o3e-intraday-$day.txt"
+                alarm_write "$ST/ALARM-o3e-intraday-$day.txt" "внутридневной запас О-3-Е упал: $_cw (порог 1.40) — О-5" \
+                    || log "КРИТИЧНО: тревога О-3-Е не записана"
                 (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-o3e-intraday-$day.txt" >> "$ST/ALARM-o3e-intraday-$day.txt" 2>&1) || true
                 log "ТРЕВОГА: внутридневной запас О-3-Е ($_cw) ниже порога — автопилот остановлен" ;;
             OK\ *) rm -f "$ST/o3e-watch-fail-$day" ;;   # успех обнуляет счётчик подряд
@@ -571,7 +589,8 @@ else:
                echo "$_n" > "$_wf"
                log "вахта О-3-Е: замер не удался ($_cw), подряд $_n"
                if [ "$_n" -ge 3 ]; then
-                   echo "запас О-3-Е не измеряется $_n тика подряд: $_cw — О-5" > "$ST/ALARM-o3e-blind-$day.txt"
+                   alarm_write "$ST/ALARM-o3e-blind-$day.txt" "запас О-3-Е не измеряется $_n тика подряд: $_cw — О-5" \
+                       || log "КРИТИЧНО: тревога слепой вахты не записана"
                    log "ТРЕВОГА: вахта О-3-Е ослепла на $_n тика подряд"
                fi ;;
         esac

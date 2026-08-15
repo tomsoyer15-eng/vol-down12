@@ -244,7 +244,7 @@ def prev_session(d, holidays=()):
     return t
 
 
-def closes(ib, contract, today, expected_prev=None):
+def closes(ib, contract, today, expected_prev=None, min_prev=None):
     """Закрытия ПРЕДЫДУЩЕЙ завершённой сессии и текущей, если она уже закрыта.
 
     Возвращает (px_prev, date_prev, px_today | None, date_today | None).
@@ -277,6 +277,12 @@ def closes(ib, contract, today, expected_prev=None):
     # ТОЧНАЯ ПРЕДЫДУЩАЯ СЕССИЯ, А НЕ ДОПУСК. Пятничный бар во вторник имеет возраст четыре
     # дня и проходил пятидневный допуск, хотя понедельничная сессия уже состоялась: цель
     # обеих ног считалась по позапрошлому закрытию. Календарь известен — сверяется он.
+    # НИЖНЯЯ ГРАНИЦА (№9): бар обязан быть НЕ СТАРШЕ общей сессии; более свежий бар
+    # площадки, работавшей в одиночку, законен.
+    if min_prev is not None and d_prev < min_prev:
+        raise FeedError(f'[STALE_BAR] {contract.symbol}: закрытие {d_prev:%d.%m.%Y} '
+                        f'СТАРШЕ последней общей сессии {min_prev:%d.%m.%Y} — источник '
+                        f'отстал, вход недостоверен')
     if expected_prev is not None and d_prev != expected_prev:
         raise FeedError(f'[STALE_BAR] {contract.symbol}: закрытие {d_prev:%d.%m.%Y}, а '
                         f'предыдущая сессия биржи — {expected_prev:%d.%m.%Y}; источник '
@@ -459,8 +465,18 @@ def build_market(ib, today, book, *, route='F', roll_today=None, roll_passed=Non
         except FeedError:
             _hol_eu = eu_holidays(d0.year)
         _exp_e = prev_session(d0, _hol_eu)
-        pe, de, pe_t, _ = closes(ib, contract_of(ib, 'CSPX', reg), d0, expected_prev=_exp_e)
-        pb, db, pb_t, _ = closes(ib, contract_of(ib, 'CBU0', reg), d0, expected_prev=_exp_e)
+        # ОБЩАЯ СЕССИЯ — НИЖНЯЯ ГРАНИЦА, А НЕ ТОЧНОЕ РАВЕНСТВО (двадцать пятый круг, №9).
+        # Контур пропускает день, когда закрыта хотя бы одна площадка, но затем требовал,
+        # чтобы последний бар КАЖДОГО фонда был именно последней ОБЩЕЙ сессией. У площадки,
+        # работавшей в одиночку, бар СВЕЖЕЕ — и он отвергался. После 1 и 4 мая 2026 общая
+        # предыдущая сессия — 30 апреля, но у CSPX есть бар 1 мая, у CBU0 — 4 мая, и 5 мая
+        # маршрут Е встал бы детерминированно. Требуем: бар НЕ СТАРШЕ общей сессии (иначе
+        # источник отстал) и не новее сегодняшнего дня — а совпадение дат двух фондов
+        # проверяется отдельно ниже и остаётся обязательным.
+        pe, de, pe_t, _ = closes(ib, contract_of(ib, 'CSPX', reg), d0, expected_prev=None,
+                                 min_prev=_exp_e)
+        pb, db, pb_t, _ = closes(ib, contract_of(ib, 'CBU0', reg), d0, expected_prev=None,
+                                 min_prev=_exp_e)
         if de != db:
             raise FeedError(f'даты закрытий не совпадают: CSPX {de:%d.%m.%Y}, '
                             f'CBU0 {db:%d.%m.%Y} — один из источников отстал')

@@ -412,11 +412,23 @@ class IBBroker:
             # проверялся ВТОРЫМ, раньше mid, и §7 снова считал ночной гэп издержками.
             # Теперь: last -> mid(bid,ask) -> и только потом close, причём close помечается
             # как НЕ котировка момента.
+            # ЗАДЕРЖАННЫЕ ДАННЫЕ НЕ ЕСТЬ КОТИРОВКА МОМЕНТА (двадцать пятый круг, №15).
+            # Тип 3 у IBKR задержан примерно на 15 минут: за это время ES/ETF легко проходят
+            # больше модельных 5 б.п., и §7 мерил бы движение рынка, а не качество
+            # исполнения. Пометка live ставится ТОЛЬКО при подписке реального времени;
+            # задержанные данные дают ориентир, но строка из выборки издержек исключается.
+            _rt = bool(getattr(self, 'realtime_md', False))
             _mid = (t.bid + t.ask) / 2 if (t.bid and t.ask) else None
-            for v, live in ((t.last, True), (_mid, True), (t.close, False)):
+            for v, live in ((t.last, _rt), (_mid, _rt), (t.close, False)):
                 v = float(v) if v is not None else float('nan')
                 if v == v and v > 0:
                     return v, live
+        except AttributeError as ex:
+            # ПОЛОМКА ИНТЕРФЕЙСА — НЕ «КОТИРОВКИ НЕТ» (двадцать пятый круг, №16): молчаливое
+            # проглатывание AttributeError превращало отсутствующий метод брокера в штатный
+            # запасной путь, и расхождение макета с живым адаптером выглядело нормой.
+            raise BrokerError(f'снимок котировки {instrument}: интерфейс брокера неполон '
+                              f'({ex}) — ориентир недостоверен')
         except Exception:
             pass
         return None, False
@@ -592,11 +604,26 @@ def SAME_API():
         return (type(v).__name__,)
 
     # --- подача ---
-    live = IBBroker(ib_stub.StubIB(rows), registry=reg, settle_s=0.0, timeout_s=1.0)
+    # СТАБ ОТДАЁТ КОТИРОВКУ, КАК ЖИВОЙ ШЛЮЗ (двадцать пятый круг, №16): без баров снимок
+    # не удавался, живой адаптер писал px_order_live=False против True у макета, и сверка,
+    # смотревшая только на набор ключей, объявляла их одинаковыми. Фикстура обязана
+    # описывать штатное состояние рынка, а не его отсутствие.
+    _sib = ib_stub.StubIB(rows)
+    _sib.quote_px = 100.0
+    live = IBBroker(_sib, registry=reg, settle_s=0.0, timeout_s=1.0)
     mock = FB.FakeBroker(prices={inst: 100.0})
     rl, rm = live.place(inst, 2), mock.place(inst, 2)
     if shape(rl) != shape(rm):
         bad.append(f'place: живой {shape(rl)} против макета {shape(rm)}')
+    elif isinstance(rl, dict) and isinstance(rm, dict):
+        # ЗНАЧЕНИЯ, А НЕ ТОЛЬКО НАБОР КЛЮЧЕЙ (двадцать пятый круг, №16): на qty/filled
+        # стоит сверка с намерением, на px_order_live — попадание строки в выборку §7.
+        for _k in ('qty', 'filled', 'px_order_live'):
+            _vl, _vm = rl.get(_k), rm.get(_k)
+            _same = (bool(_vl) == bool(_vm) if _k == 'px_order_live'
+                     else abs(float(_vl or 0) - float(_vm or 0)) < 1e-9)
+            if not _same:
+                bad.append(f'place: поле {_k} — живой {_vl!r}, макет {_vm!r}')
     if isinstance(rl, dict):
         for k in REC_KEYS:
             if k not in rl:

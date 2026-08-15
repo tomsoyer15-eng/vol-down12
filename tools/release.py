@@ -135,15 +135,30 @@ def main():
     rel = ROOT / 'releases'
     rel.mkdir(exist_ok=True)
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M%S')
+    # ПУБЛИКУЮТСЯ ИМЕННО ПРОВЕРЕННЫЕ БАЙТЫ (двадцать пятый круг, №19). SHA считался ДО
+    # часового selfcheck, а копировался архив, перечитанный ПОСЛЕ: параллельный release.py
+    # мог заменить Z, и в имя с индексом ушёл бы старый хэш при других байтах. Хэшируем
+    # заново и сверяем; расхождение — выпуск не состоялся.
+    _h_now = hashlib.sha256(Z.read_bytes()).hexdigest()
+    if _h_now != h:
+        print(f'ВЫПУСК НЕ СОСТОЯЛСЯ: архив изменился после проверки '
+              f'(было {h[:12]}, стало {_h_now[:12]}) — вероятен параллельный выпуск; '
+              f'ни история, ни корень доверия не тронуты')
+        return 1
     keep = rel / f'paket-r33-{stamp}-{h[:8]}.zip'
+    # КОРЕНЬ ДОВЕРИЯ — ДО ИСТОРИИ (№19): прежде releases/ и INDEX.txt обновлялись раньше
+    # docs/r33-sha256.txt, и сбой последней записи оставлял пакет опубликованным и
+    # проиндексированным без корня — тот же ложный выпуск, что закрывали в 24-м круге.
+    (ROOT / 'docs/r33-sha256.txt').write_text(
+        f'Корень доверия ADD-FUT v1.6.0 ред. 33\n\nАрхив {Z.name}\nSHA-256  {h}\n\n'
+        f'Внутри — MANIFEST-192.txt на {len(names)} файлов: код, нормативный текст и '
+        f'ИСХОДНЫЕ РЯДЫ.\nПроверка: распаковать в пустой каталог и выполнить  '
+        f'python selfcheck_v192.py\nХэш получен ПОСЛЕ такой проверки, а не до неё.\n',
+        encoding='utf-8')
     shutil.copy2(Z, keep)
     with open(rel / 'INDEX.txt', 'a', encoding='utf-8') as f:
         f.write(f'{stamp}  {h}  {keep.name}\n')
-    (ROOT / 'docs/r33-sha256.txt').write_text(
-        f'Корень доверия ADD-FUT v1.6.0 ред. 33\n\nАрхив {Z.name}\nSHA-256  {h}\n\n'
-        f'Внутри — MANIFEST-192.txt на {len(names)} файлов: код, нормативный текст и ИСХОДНЫЕ РЯДЫ.\n'
-        f'Проверка: распаковать в пустой каталог и выполнить  python selfcheck_v192.py\n'
-        f'Хэш получен ПОСЛЕ такой проверки, а не до неё.\n', encoding='utf-8')
+    return 0
 
 
 if __name__ == '__main__':

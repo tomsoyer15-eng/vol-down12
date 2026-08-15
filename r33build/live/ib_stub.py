@@ -306,7 +306,11 @@ class StubIB:
         # запасного пути ставит quote_px=None явно.
         q = getattr(self, 'quote_px', 'нет')
         if q == 'нет':
-            _b = (self._bars or {}).get(getattr(contract, 'conId', 0)) or []
+            # _bars МОЖЕТ НЕ СУЩЕСТВОВАТЬ (двадцать пятый круг, №16): set_bars зовут не
+            # все стенды, и обращение к атрибуту роняло _quote_ref в AttributeError —
+            # живой адаптер молча отдавал px_order_live=False там, где макет отдавал True,
+            # а SAME_API сравнивал только набор ключей и объявлял их одинаковыми.
+            _b = (getattr(self, '_bars', None) or {}).get(getattr(contract, 'conId', 0)) or []
             q = float(_b[-1][1]) if _b else None
         t.last = q if q is not None else float('nan')
         t.close = float('nan')

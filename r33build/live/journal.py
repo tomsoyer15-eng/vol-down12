@@ -100,6 +100,21 @@ def read(path):
     return out
 
 
+def verify_rows(rows, path='<память>'):
+    """Проверить УЖЕ ПРОЧИТАННЫЕ строки (двадцать пятый круг, №17): вызывающий, которому
+    нужны и число, и сами строки, обязан работать с одним снимком, а не читать дважды."""
+    prev = GENESIS
+    for i, r in enumerate(rows, 2):
+        if r['prev_hash'] != prev:
+            raise ValueError(f'{path}: строка {i} не продолжает цепочку '
+                             f'(ожидался {prev[:12]}, записан {r["prev_hash"][:12]})')
+        if _digest(prev, r) != r['row_hash']:
+            raise ValueError(f'{path}: строка {i} изменена после записи '
+                             f'(хэш содержимого не совпадает)')
+        prev = r['row_hash']
+    return len(rows)
+
+
 def verify(path):
     """Пройти цепочку. Возвращает число строк либо поднимает исключение с номером сбоя.
 
@@ -122,7 +137,11 @@ def verify(path):
     return len(rows)
 
 
-def rows_from_decision(dec, nav, orders, fills=None):
+def rows_from_decision(dec, nav, orders, fills=None, delayed_out=None):
+    """delayed_out — список, куда складываются инструменты с ЗАДЕРЖАННЫМ ориентиром:
+    вызывающий обязан пометить итоговую строку, иначе §7 посчитает день пригодным для
+    измерения издержек (двадцать пятый круг, №15)."""
+    _delayed_seen = delayed_out if delayed_out is not None else []
     """Строки журнала из решения сессии. fills — фактические цены и комиссии от брокера;
     пока их нет (наблюдение без позиции), поля остаются пустыми и запись всё равно ведётся:
     отсутствие сделки тоже факт."""
@@ -176,9 +195,16 @@ def rows_from_decision(dec, nav, orders, fills=None):
         # не удаться либо отдать только close (то есть ВЧЕРАШНЕЕ закрытие). Молча считать
         # такую разницу проскальзыванием значит записывать ночной гэп в торговые издержки —
         # ровно то ложное доказательство, из-за которого 5 б.п. «сходились».
+        # ОРИЕНТИР СОХРАНЯЕТСЯ ВСЕГДА (двадцать пятый круг, №15 — уточнение к №23 24-го).
+        # Обнулять его неверно: цена нужна и для разбора, и для сверки базиса. Помечается
+        # не строка, а ПРИГОДНОСТЬ ДАТЫ для статистики издержек §7 — через итоговую строку,
+        # тем же механизмом, что и прочие исключения. При задержанных данных (тип 3, ~15
+        # минут) разница fill−ориентир измеряет движение рынка, а не качество исполнения.
         _po_live = f.get('px_order_live', True)
+        if not _po_live:
+            _delayed_seen.append(instrument)
         base = dict(date=dec.date.strftime('%Y-%m-%d'), leg=leg,
-                    px_order=(f.get('px_order', '') if _po_live else ''),
+                    px_order=f.get('px_order', ''),
                     px_fill=f.get('px_fill', ''),
                     reason='; '.join(dec.reasons), nav=f'{nav:.2f}',
                     leverage=f'{dec.leverage:.4f}',
@@ -261,7 +287,9 @@ def _excluded_dates(rows):
     for r in rows:
         if r.get('instrument') != 'ИТОГ':
             continue
-        if 'исключ' in (r.get('note') or ''):
+        # РЕГИСТР НЕ ВАЖЕН (двадцать пятый круг, №15): пометка «ИСКЛЮЧЕНА» заглавными
+        # молча не находилась подстрокой в нижнем регистре — исключение не срабатывало.
+        if 'исключ' in (r.get('note') or '').lower():
             skip.setdefault(r['date'], 'пометка исключения в итоге')
         m = _re.search(r'строк (\d+)', r.get('note') or '')
         if m and per_date.get(r['date'], 0) != int(m.group(1)):

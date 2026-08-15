@@ -32,14 +32,46 @@ def map_mes(n):
     ОБЯЗАНА совпадать с sim_v164.map_mes — сверяется самопроверкой."""
     return (n // 10, n % 10)
 
+FUT_ROOTS = ('MES', 'ES', 'ZN')          # порядок важен: MES проверяется раньше ES
+
+
+def fut_root(instrument):
+    """Корень фьючерса из ПОЛНОГО имени: 'MESU26' -> 'MES', 'ZNZ26' -> 'ZN'.
+
+    ИМЯ И КОРЕНЬ — РАЗНЫЕ ВЕЛИЧИНЫ (двадцать пятый круг, №2). Маржа (FUT_MARGIN, живой
+    замер) и упаковка ES/MES ключуются КОРНЕМ, а инструмент заявки, книга и поставочная
+    серия требуют ПОЛНОГО имени. Прежде эти два смысла были склеены: mapped_book сравнивал
+    имя точно с 'MES', а hand_over_book (двадцать третий круг, №7) требовал серию — переход
+    Е→Ф либо отказывал до сделки на правильных именах, либо исполнялся на голых и отвергал
+    книгу УЖЕ ПОСЛЕ покупки фьючерсов, то есть уходил в MIXED с фактической позицией без
+    управляемой серии и без ролла перед поставкой.
+    """
+    n = str(instrument)
+    for r in FUT_ROOTS:
+        if n.startswith(r):
+            return r
+    return n
+
+
+def fut_series(instrument):
+    """Серия из полного имени ('MESU26' -> 'U26'); пустая строка, если имя голое."""
+    n = str(instrument)
+    return n[len(fut_root(n)):]
+
+
 def mapped_book(instrument, units):
-    """Позиция внутренней сетки -> фактическая книга брокера (ред. 32)."""
+    """Позиция внутренней сетки -> фактическая книга брокера (ред. 32).
+
+    Упаковка идёт по КОРНЮ, а имена на выходе сохраняют СЕРИЮ входа: 300 MESU26 ->
+    {'ESU26': 30}. Голое имя на входе даёт голые имена на выходе — прежнее поведение.
+    """
     units = int(units)
-    if instrument == 'MES':
+    _r, _ser = fut_root(instrument), fut_series(instrument)
+    if _r == 'MES':
         es, mes = map_mes(units)
         out = {}
-        if es: out['ES'] = es
-        if mes: out['MES'] = mes
+        if es: out['ES' + _ser] = es
+        if mes: out['MES' + _ser] = mes
         return out
     return {instrument: units} if units else {}
 
@@ -205,18 +237,25 @@ def book_margin(book, reg, prices=None, live=None):
         if instr not in reg:
             raise Incident(f'{instr}: инструмента нет в реестре — маржа не считается')
         if reg[instr]['sec_type'] == 'FUT':
-            if instr not in FUT_MARGIN:
-                raise Incident(f'{instr}: нет модельного требования маржи')
+            # ПО КОРНЮ (двадцать пятый круг, №2): FUT_MARGIN ключуется 'ES'/'MES'/'ZN',
+            # а книга несёт полные имена с серией.
+            if fut_root(instr) not in FUT_MARGIN:
+                raise Incident(f'{instr}: нет модельного требования маржи '
+                               f'(корень {fut_root(instr)})')
             if _lm:
                 # ПРИ СУЩЕСТВУЮЩЕМ ЗАМЕРЕ дыры не добираются константами (шестнадцатый
                 # круг, №4): молчаливый .get прятал неполноту — повышенное требование
                 # непокрытого корня не замечалось. Константы — только когда файла нет.
+                # ЖИВОЙ ЗАМЕР КЛЮЧУЕТСЯ СЕРИЯМИ РЕЕСТРА (проверка выше требует покрытия
+                # всех FUT-серий), а КОНСТАНТЫ — корнями. Двадцать пятый круг, №2: это
+                # разные ключи, и путать их нельзя. Имя книги при живом замере обязано
+                # нести серию — голое имя тут и должно отказывать.
                 if instr not in _lm:
                     raise Incident(f'{instr}: живой замер маржи не покрывает текущую '
                                    f'серию корня — перегенерировать first_connect')
                 total += abs(int(units)) * _lm[instr]
             else:
-                total += abs(int(units)) * FUT_MARGIN[instr]
+                total += abs(int(units)) * FUT_MARGIN[fut_root(instr)]
         else:
             px = (prices or {}).get(instr)
             if px is None:
@@ -249,8 +288,13 @@ def target_book(legs, mapped=True):
         for k, v in add.items():
             book[k] = book.get(k, 0) + v
         prices[di] = dp
-        if di == 'MES':
-            prices['ES'] = dp*10.0; prices['MES'] = dp
+        # ЦЕНЫ УПАКОВКИ — ПОД ТЕМИ ЖЕ ИМЕНАМИ, ЧТО ОТДАЛА mapped_book (двадцать пятый круг,
+        # №2): при полном имени 'MESU26' книга несёт 'ESU26'/'MESU26', и цена под голым
+        # ключом до них не дошла бы.
+        if fut_root(di) == 'MES':
+            _ser = fut_series(di)
+            prices['ES' + _ser] = dp*10.0
+            prices['MES' + _ser] = dp
     return book, prices
 
 class _CountBroker:
@@ -637,6 +681,62 @@ def _execute_guarded(broker, state_path, capital, legs, signal_id='', from_route
         _ctx.__exit__(None, None, None)
 
 
+def _preflight_handover(from_route, to_route):
+    """Сухая проверка условий передачи книги ДО первой заявки (двадцать пятый круг, №7).
+
+    Повторяет те барьеры hand_over_book, которые не зависят от результата торговли:
+    исходная книга существует, у целевого маршрута нет неразобранного намерения, а его
+    журнал либо пуст при отсутствующей книге, либо цел и закрыт итогом. Всё это можно
+    узнать заранее, и узнавать это ПОСЛЕ перевода денег бессмысленно.
+    """
+    import sys as _sp, os as _op
+    _lv = _op.path.join(_op.path.dirname(_op.path.abspath(__file__)), 'live')
+    if _lv not in _sp.path:
+        _sp.path.insert(0, _lv)
+    import state as _STp, daily as _DLp, journal as _Jp
+    _cls_src = _DLp.BookE if from_route == 'E' else _DLp.Book
+    _cls_dst = _DLp.BookE if to_route == 'E' else _DLp.Book
+    _src, _, _ = _STp.load(_STp.book_path(from_route), _cls_src)
+    if _src is None:
+        raise RuntimeError(f'книги маршрута {from_route} нет — передавать нечего')
+    if _STp.load_intent(_STp.book_path(to_route)) is not None:
+        raise RuntimeError(f'у маршрута {to_route} осталось неразобранное намерение '
+                           f'прошлой эпохи — разобрать ДО перехода (О-5)')
+    _jp = _STp.lock_dir() / f'journal-{to_route}.csv'
+    _rows = _Jp.read(_jp)
+    if _rows:
+        _Jp.verify_rows(_rows, _jp)
+        if not str(_rows[-1].get('note', '')).startswith('итог сессии'):
+            raise RuntimeError(f'журнал маршрута {to_route} не закрыт итоговой строкой — '
+                               f'передавать книгу в маршрут с оборванным журналом нельзя')
+    else:
+        _dst, _dsess, _ = _STp.load(_STp.book_path(to_route), _cls_dst)
+        if _dst is not None and int(_dsess or 0) > 0:
+            raise RuntimeError(f'журнал маршрута {to_route} пуст при существующей книге '
+                               f'(сессия №{_dsess}) — история утрачена (О-5)')
+
+
+def _snapshot_pair(broker, attempts=3):
+    """Согласованный снимок брокера для перехода (двадцать пятый круг, №3).
+
+    Начальный барьер читал заявки, ПОТОМ позиции; финальный — наоборот. Заявка,
+    исполнившаяся между двумя чтениями и уже исчезнувшая из open orders, не попадала ни в
+    сохранённый снимок позиций, ни в список живых заявок: книга и TRANSITION_COMPLETE
+    записывались по устаревшей позиции. Ежедневный контур был исправлен от этой гонки
+    (_snapshot_consistent), исполнитель — нет. Схема та же: заявки-позиции-заявки, и
+    расхождение = отказ, а не догадка.
+    """
+    for _ in range(attempts):
+        oo1 = list(broker.open_orders())
+        pos = broker.net_positions()
+        oo2 = list(broker.open_orders())
+        if sorted(map(str, oo1)) == sorted(map(str, oo2)):
+            return pos, oo2
+    raise Incident(
+        f'снимок брокера не стабилизировался за {attempts} попытки: заявки менялись во '
+        f'время чтения позиций — исполнение шло прямо сейчас, сверка была бы ложной')
+
+
 def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to_route,
                     in_common_window, resume, journal, mr_state, asof, registry,
                     plan, tid, reg, want_cls, src_cls, _M, emergency=False):
@@ -825,11 +925,42 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         # БАРЬЕР ЖИВЫХ ЗАЯВОК (восемнадцатый круг, №3): осиротевшая заявка другого клиента
         # или терминала исполнится поперёк плана и пробьёт лимит §8б — сверка позиций её
         # не видит. Чужое снимать нельзя — только отказ до первой заявки.
-        _live0 = list(broker.open_orders())
+        # МЕТКА ОБЯЗАТЕЛЬНА И ВИДНА ОБОИМ МАРШРУТАМ (двадцать четвёртый круг, №15;
+        # двадцать пятый, №6: метки ставятся ДО ПЕРВОЙ ЗАЯВКИ, а не после перевода денег). Прежде
+        # сбой её создания проглатывался (_hoflag=None), то есть окно оставалось открытым ровно
+        # тогда, когда файловая система уже нездорова. И имя несло ТОЛЬКО целевой маршрут: при
+        # Ф→Е и смерти до записи route.txt автопилот оставался на Ф и проверял handover-inflight-F,
+        # не замечая существующий handover-inflight-E. Пишем ОБЕ метки; не удалось — отказ ДО
+        # публикации книги, пока ничего не переведено.
+        import state as _ST3
+        _hoflags = []
+        try:
+            for _r in (to_route, from_route):
+                _f = _ST3.lock_dir() / f'handover-inflight-{_r}.txt'
+                _f.write_text(f'{asof} tid={tid} {from_route}->{to_route}: книга передаётся, '
+                              f'COMPLETE ещё не записан\n', encoding='utf-8')
+                _hoflags.append(_f)
+        except Exception as _exf:
+            raise RuntimeError(
+                f'метка незавершённой передачи не создана ({_exf}) — без неё обрыв между '
+                f'публикацией книги и COMPLETE остался бы невидимым для контура; передача '
+                f'не начата, деньги не переведены')
+        # ПРЕДПОЛЁТНАЯ ПРОВЕРКА ПЕРЕДАЧИ — ДО ПЕРВОЙ ЗАЯВКИ (двадцать пятый круг, №7).
+        # Исходная книга, старое намерение целевого маршрута, целевой журнал и серии
+        # проверялись только внутри hand_over_book, то есть ПОСЛЕ полного перевода денег:
+        # повреждённый journal-E.csv или оставшийся book-E.json.intent.json обнаруживались
+        # уже после продажи Ф и покупки Е, и результат — переведённая позиция, которую
+        # ежедневный контур сознательно не принимает. Те же проверки прогоняются сухо
+        # ЗАРАНЕЕ; отказ здесь не стоит ничего, кроме отложенного перехода.
+        try:
+            _preflight_handover(from_route, to_route)
+        except Exception as _exph:
+            raise Incident(f'предполётная проверка передачи книги не пройдена ({_exph}) — '
+                           f'переход не начат, деньги не переведены')
+        snap0, _live0 = _snapshot_pair(broker)          # №3: согласованный снимок
         if _live0:
             raise Incident(f'живые заявки на счёте до перехода {_live0[:4]} — исполнение '
                            f'запрещено до их разбора')
-        snap0 = broker.net_positions()
         planned_src = {instr for spec in legs.values() for instr, _, _ in spec['src']}
         for name, spec in legs.items():
             for instr, units, u in spec['src']:
@@ -1055,10 +1186,26 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
     # полная сверка фактической книги с планом перехода — сбой самого ЧТЕНИЯ после
     # исполненного перехода не смеет оставить журнал в OPEN (восемнадцатый круг, №5)
     try:
-        now = broker.net_positions()
+        # №3: тот же согласованный снимок, что и на входе — заявки-позиции-заявки
+        now, _live_fin_pre = _snapshot_pair(broker)
+    except Incident:
+        raise
     except Exception as ex:
         fail(f'финальная сверка: позиции недоступны ({ex}) — исход недоказуем')
     snap = st['snapshot']
+    # NaN НЕ ПРОХОДИТ (двадцать пятый круг, №8). Для NaN ЛОЖНЫ и `got_units < 0`, и
+    # `abs(...) > tolerance`, и проверка посторонней позиции — то есть все ворота молчат.
+    # book_from_broker включит его (NaN != 0), маршрут Е сохранит прямо в BookE, а JSON
+    # допускает NaN, поэтому состояние получит корректный digest и дойдёт до COMPLETE.
+    for _k, _v in (now or {}).items():
+        try:
+            _fv = float(_v)
+        except (TypeError, ValueError):
+            fail(f'{_k}: позиция брокера {_v!r} не число — сверка недоказуема')
+            continue
+        if _fv != _fv or _fv in (float('inf'), float('-inf')):
+            fail(f'{_k}: позиция брокера {_v!r} — не конечное число; такая величина '
+                 f'проходит ВСЕ сравнения молча и дошла бы до COMPLETE')
     for name, spec in legs.items():
         di, dp = spec['dst'][0], spec['dst'][1]
         planned_usd = sum(n*u for _, n, u in spec['src'])
@@ -1123,25 +1270,6 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
     # книга и route.txt уже согласованы, ежедневная сверка проходила и торговля шла дальше,
     # хотя нормативный журнал навсегда оставался в TRANSITION_OPEN. Метка на диске ставится
     # ДО передачи и снимается только после COMPLETE; входной барьер контура её видит.
-    # МЕТКА ОБЯЗАТЕЛЬНА И ВИДНА ОБОИМ МАРШРУТАМ (двадцать четвёртый круг, №15). Прежде
-    # сбой её создания проглатывался (_hoflag=None), то есть окно оставалось открытым ровно
-    # тогда, когда файловая система уже нездорова. И имя несло ТОЛЬКО целевой маршрут: при
-    # Ф→Е и смерти до записи route.txt автопилот оставался на Ф и проверял handover-inflight-F,
-    # не замечая существующий handover-inflight-E. Пишем ОБЕ метки; не удалось — отказ ДО
-    # публикации книги, пока ничего не переведено.
-    import state as _ST3
-    _hoflags = []
-    try:
-        for _r in (to_route, from_route):
-            _f = _ST3.lock_dir() / f'handover-inflight-{_r}.txt'
-            _f.write_text(f'{asof} tid={tid} {from_route}->{to_route}: книга передаётся, '
-                          f'COMPLETE ещё не записан\n', encoding='utf-8')
-            _hoflags.append(_f)
-    except Exception as _exf:
-        raise RuntimeError(
-            f'метка незавершённой передачи не создана ({_exf}) — без неё обрыв между '
-            f'публикацией книги и COMPLETE остался бы невидимым для контура; передача '
-            f'не начата, деньги не переведены')
     try:
         hand_over_book(broker, from_route, to_route, positions=now)
     except Exception as _ex:
@@ -1335,6 +1463,20 @@ def hand_over_book(broker, from_route, to_route, positions=None):
             f'сессия разобрала бы его и затёрла новую книгу либо встала в О-5 — '
             f'разобрать намерение ДО перехода (О-5)')
     _rows2 = _J2.read(_jp2)
+    # ПОТЕРЯННЫЙ ЖУРНАЛ РАНЕЕ РАБОТАВШЕГО МАРШРУТА — НЕ НОВЫЙ GENESIS (двадцать пятый круг,
+    # №14). Пустой журнал считался признаком «маршрут свежий», но если book-{to}.json уже
+    # СУЩЕСТВУЕТ и несёт сессии, то журнал был и исчез: старая книга перезаписывалась,
+    # дописывалась новая строка ИТОГ, связь с прежними исполнениями пропадала без отказа,
+    # и WORM мог заверить новую цепочку как нормальную. Проверка стоит ВНЕ try: её отказ —
+    # не «журнал не начат», а утрата истории, и подменять его другим текстом нельзя.
+    if not _rows2:
+        _old_bk, _old_sess, _ = _ST2.load(_ST2.book_path(to_route), _cls)
+        if _old_bk is not None and int(_old_sess or 0) > 0:
+            raise RuntimeError(
+                f'журнал маршрута {to_route} пуст, но книга маршрута существует и несёт '
+                f'сессию №{_old_sess}: журнал утрачен или подменён — передача создала бы '
+                f'новую цепочку поверх прежней истории (О-5)')
+
     # СУЩЕСТВУЮЩИЙ ЖУРНАЛ ЦЕЛЕВОГО МАРШРУТА ПРОВЕРЯЕТСЯ ЦЕЛИКОМ (двадцать третий круг,
     # №10). Прежде вызывался только read(): журнал с пересчитанным хэшем, оборванной
     # сессией или незакрытым хвостом пропускал публикацию книги и COMPLETE, а первая же

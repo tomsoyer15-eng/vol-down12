@@ -79,7 +79,10 @@ class FakeBroker:
         # макете объявляются доказательством денежной границы IBKR при другом контракте.
         # У макета ориентир задан явно, то есть он и есть котировка момента.
         rec = dict(order_id=oid, instrument=instrument, qty=qty, filled=filled,
-                   px_order_live=True,
+                   # ТОТ ЖЕ ПРИЗНАК, ЧТО У ЖИВОГО АДАПТЕРА (двадцать пятый круг, №15):
+                   # по умолчанию подписка ЗАДЕРЖАННАЯ, значит ориентир не котировка
+                   # момента. Стенд реального времени ставит realtime_md=True.
+                   px_order_live=bool(getattr(self, 'realtime_md', False)),
                    px_order=px_order, px_fill=px_fill, commission=comm)
         self.log.append(rec)
         if filled != qty:
