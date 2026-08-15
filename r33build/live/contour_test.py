@@ -158,19 +158,32 @@ chk('ролл: отказ на открытии новой серии виден
 with tempfile.TemporaryDirectory() as tmp:
     p = Path(tmp) / 'journal.csv'
     bb = FakeBroker(prices={'ZNZ26': 112.0, 'ESZ26': 6000.0})
+    # КАЖДАЯ СЕССИЯ ЗАКРЫВАЕТСЯ СТРОКОЙ ИТОГ (двадцать первый круг, №18). Прежде фикстура
+    # писала 29 исполнений без единого итога — с правкой двадцатого круга (№20) такие даты
+    # выходят из выборки §7 как неполные, reconcile возвращает ранний ответ без ключей
+    # trade/roll, и тест падал KeyError. Настоящий журнал так не выглядит: итог обязателен.
+    def _itog(dte, n, nn):
+        J.append(p, dict(date=dte, leg='', instrument='ИТОГ', qty=0, px_order='-',
+                         px_fill='', commission='', reason='', nav='10000000',
+                         leverage='2.0000', note=f'итог сессии {n}: строк {nn}'))
+
     for k in range(25):                       # 25 РАЗНЫХ сессий
         rec = bb.place('ZNZ26', 3 if k % 2 == 0 else -3)
-        J.append(p, dict(date=f'2026-{8 + k//28:02d}-{k%28+1:02d}', leg='Б', instrument='ZNZ26',
+        _d = f'2026-{8 + k//28:02d}-{k%28+1:02d}'
+        J.append(p, dict(date=_d, leg='Б', instrument='ZNZ26',
                          qty=rec['filled'], px_order=rec['px_order'], px_fill=rec['px_fill'],
                          commission=rec['commission'], reason='нога Б вне полосы',
                          nav='10000000', leverage='2.0000'))
+        _itog(_d, k + 1, 1)
     for k in range(4):                        # роллы — отдельной сверкой
         rec = bb.place('ZNZ26', 101 if k % 2 == 0 else -101)
-        J.append(p, dict(date=f'2026-11-{20+k:02d}', leg='Б', instrument='ZNZ26',
+        _d = f'2026-11-{20+k:02d}'
+        J.append(p, dict(date=_d, leg='Б', instrument='ZNZ26',
                          qty=rec['filled'], px_order=rec['px_order'], px_fill=rec['px_fill'],
                          commission=rec['commission'], reason='ролл серии', note='ролл',
                          nav='10000000', leverage='2.0000'))
-    chk('журнал: цепочка хэшей цела', J.verify(p) == 29, f'{J.verify(p)} строк')
+        _itog(_d, 25 + k + 1, 1)
+    chk('журнал: цепочка хэшей цела', J.verify(p) == 58, f'{J.verify(p)} строк')
 
     r = J.reconcile(p)
     chk('журнал: наблюдение считается сессиями, а не строками',

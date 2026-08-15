@@ -417,12 +417,55 @@ def _sig(target, grant=None, sid='s1', approve=True):
         hist = ('2026-08-01,SWITCH_SIGNAL,E|s0\n2026-08-01,OWNER_APPROVE,E|s0\n'
                 '2026-08-01,TRANSITION_OPEN,E|s0|t0\n'
                 '2026-08-01,TRANSITION_COMPLETE,E|s0|t0\n')
-    ok = ('2026-08-08,OWNER_APPROVE,' + target + '|' + sid + '\n') if approve else ''
-    open(JX, 'w').write('asof,event,detail\n' + hist + '2026-08-08,SWITCH_SIGNAL,'
+    # ХРОНОЛОГИЯ НЕУБЫВАЮЩАЯ (двадцать первый круг): сигнал и одобрение обязаны быть НЕ
+    # ПОЗЖЕ даты исполнения перехода (asof=07.08, торговый день), иначе OPEN оказывается
+    # ретро-записью и отвергается защитой девятнадцатого круга (№14). Тариф при этом
+    # остаётся датированным 08.08 — это другая величина и другая потребность.
+    ok = ('2026-08-07,OWNER_APPROVE,' + target + '|' + sid + '\n') if approve else ''
+    open(JX, 'w').write('asof,event,detail\n' + hist + '2026-08-07,SWITCH_SIGNAL,'
                         + target + '|' + sid + '\n' + ok)
     M.test_configure(JX)
-    if grant: M.grant_granularity(JX, SX, '2026-08-08', sid, grant)
-KW = dict(journal=JX, mr_state=SX, asof='2026-08-08')
+    if grant: M.grant_granularity(JX, SX, '2026-08-07', sid, grant)
+# ASOF ИСПОЛНИТЕЛЯ — ТОРГОВЫЙ ДЕНЬ (двадцать первый круг, №2): ворота общего
+# окна стали fail-closed и отвергают выходной, а 08.08.2026 — суббота.
+# Остальные стенды продолжают жить на 08-08: этой датой помечен тариф.
+# ИЗОЛЯЦИЯ ОТ ЖИВЫХ ДАННЫХ О МАРЖЕ (двадцать первый круг). Стенды исполнителя проверяют
+# ЕГО ПОВЕДЕНИЕ — тайм-аут, дробное исполнение, обрыв preview, чужую позицию, — а не
+# содержимое margins_live.json. Без явной фикстуры они читали ЖИВОЙ замер и падали на
+# «замер не покрывает серии реестра», то есть на ЧУЖОМ дефекте: отказ приходил до всякого
+# поведения. Согласованность ПОСТАВЛЕННОЙ пары «замер <-> реестр» — отдельная проверка
+# в конце файла, и подменять её фикстурой нельзя.
+#
+# РЕЕСТР НЕ ПОДМЕНЯЕТСЯ: исполнитель пинует его SHA-256, и чужой файл он отвергает
+# («реестр не совпадает с пинованным SHA-256»). Поэтому ADDFUT_REGISTRY указывает на ТОТ ЖЕ
+# instruments.csv пакета, а фикстура — только у замера маржи, под его FUT-серии (ES/MES/ZN).
+_MFIX = _JP('margins_fix.json')
+import json as _json1, datetime as _dt1
+open(_MFIX, 'w').write(_json1.dumps({
+    'ES': {'init': 34910.0, 'maint': 25059.0},
+    'MES': {'init': 3491.0, 'maint': 2506.0},
+    'ZN': {'init': 2157.0, 'maint': 1876.0},
+    '_meta': {'date': _dt1.datetime.now(_dt1.timezone.utc).strftime('%Y-%m-%d'),
+              'account': 'DUTEST01', 'series': ['ES', 'MES', 'ZN']}}))
+_os1.environ['ADDFUT_MARGINS'] = _MFIX
+_os1.environ['ADDFUT_REGISTRY'] = _os1.path.abspath('instruments.csv')
+_os1.environ['ADDFUT_ACCOUNT'] = 'DUTEST01'
+
+# ИСХОДНАЯ КНИГА ДЛЯ ПЕРЕДАЧИ (двадцать первый круг, №13). hand_over_book теперь ОТКАЗЫВАЕТ
+# при отсутствии книги маршрута-источника: без неё теряются roll_pending (поставочное
+# обязательство) и prev_st_* обеих ног, а d_fix обнуляется — замыкание считало бы вклад
+# реального ZN нулевым. Стенды исполнителя доходят до COMPLETE, то есть до передачи, и
+# обязаны иметь книгу — настоящий переход без неё не бывает. Пишется в ADDFUT_LOCK_DIR
+# (строка 75), то есть во временный каталог прогона: машинное состояние не трогается.
+import daily as _DL0, state as _ST0
+_ST0.save(_ST0.book_path('F'),
+          _DL0.Book(d_fix=7.9, n_e=26, n_b=10, unit_is_mes=True, prev_st_eq=True,
+                    prev_st_bd=True, ser_a='U26', ser_b='U26', es_held=2,
+                    last_session='2026-08-07', close_provisional=False,
+                    prev_close_lev=1.99),
+          'F', 1, note='фикстура стендов исполнителя')
+
+KW = dict(journal=JX, mr_state=SX, asof='2026-08-07')
 L1 = {'BOND': dict(src=[('ZN', 1, 98560.0)], dst=('CBU0', 5.0, 'ETF'))}
 _cl(); _sig('E', grant=98565.0); rr = []
 for _ in range(3):
@@ -448,7 +491,7 @@ except T.Incident: inc = True
 chk('Исполнитель: журнал без сигнала = отказ open до ордеров', inc and len(b1.calls) == 0)
 _cl(); _sig('E'); L4 = {'EQ': dict(src=[('MES', 4, 38428.0)], dst=('CSPX', 700.0, 'ETF'))}
 _plan = T.plan_lots(L4, 1e6)
-json.dump(dict(tid=T.transition_id('s1', 'F', 'E', 1e6, _plan), postponed=0, done=[], executed_usd=1.0,
+json.dump(dict(asof='2026-08-07', tid=T.transition_id('s1', 'F', 'E', 1e6, _plan), postponed=0, done=[], executed_usd=1.0,
                order_ids=[], snapshot={'MES': 4, 'CSPX': 0}, log=[], opened=True), open(SP, 'w'))
 b2 = _B(netpos={'MES': 4, 'CSPX': 0}, cancelnone=True, oo=['oX']); inc = False
 try: T.execute(b2, SP, 1e6, L4, signal_id='s1', resume=True, **KW)
@@ -464,8 +507,8 @@ chk('Исполнитель: живые заявки до свежего пер�
 _cl(); _sig('E', grant=98565.0)
 _plan6 = T.plan_lots(L1, 1e6)
 _tid6 = T.transition_id('s1', 'F', 'E', 1e6, _plan6)
-M.append_event(JX, '2026-08-08', 'TRANSITION_OPEN', 'E|s1|' + _tid6)
-json.dump(dict(tid=_tid6, postponed=0, done=[], executed_usd=1.0, order_ids=[],
+M.append_event(JX, '2026-08-07', 'TRANSITION_OPEN', 'E|s1|' + _tid6)
+json.dump(dict(asof='2026-08-07', tid=_tid6, postponed=0, done=[], executed_usd=1.0, order_ids=[],
                snapshot={'ZN': 1, 'CBU0': 0}, log=[], opened=True), open(SP, 'w'))
 class _BPrevRaise(_B):
     def preview(s): raise RuntimeError('margin preview оборван связью')
@@ -493,7 +536,7 @@ chk('МР: ретро-датированная запись в журнал от
 _cl(); _sig('E', grant=98565.0)
 L5 = {'BOND': dict(src=[('ZN', 2, 98560.0)], dst=('CBU0', 5.0, 'ETF'))}
 _plan = T.plan_lots(L5, 1e6)
-json.dump(dict(tid=T.transition_id('s1', 'F', 'E', 1e6, _plan), postponed=0, done=[], executed_usd=1.0,
+json.dump(dict(asof='2026-08-07', tid=T.transition_id('s1', 'F', 'E', 1e6, _plan), postponed=0, done=[], executed_usd=1.0,
                order_ids=[], snapshot={'ZN': 2, 'CBU0': 0}, log=[], opened=True), open(SP, 'w'))
 b3 = _B(netpos={'ZN': 1, 'CBU0': 0}, preview=False)
 r3 = T.execute(b3, SP, 1e6, L5, signal_id='s1', resume=True, **KW)
@@ -510,8 +553,8 @@ b4 = _B(netpos={'MES': 29, 'CSPX': 0})
 r4 = T.execute(b4, SP, 1e6, {'EQ': dict(src=[('MES', 29, 38428.0)], dst=('CSPX', 700.0, 'ETF'))}, signal_id='s1', **KW)
 _cspx = b4.np['CSPX']
 os.remove(SP)
-M.append_event(JX, '2026-08-08', 'SWITCH_SIGNAL', 'F|s2')
-M.append_event(JX, '2026-08-08', 'OWNER_APPROVE', 'F|s2'); M.grant_granularity(JX, SX, '2026-08-08', 's2', 38780.0)
+M.append_event(JX, '2026-08-07', 'SWITCH_SIGNAL', 'F|s2')
+M.append_event(JX, '2026-08-07', 'OWNER_APPROVE', 'F|s2'); M.grant_granularity(JX, SX, '2026-08-07', 's2', 38780.0)
 b4b = _B(netpos={'CSPX': _cspx, 'MES': 0})
 # Обратный переход идёт на капитале ВЫШЕ порога §8. Прежде тест выполнял E->F при 1 млн и
 # засчитывал COMPLETE как успех, то есть канонизировал прямое нарушение §8 (найдено внешней
@@ -609,7 +652,7 @@ chk('Исполнитель: порядок ног канонический — 
     _rz['status'] == 'COMPLETE' and _bz.maxu <= 100_000.0 + 1e-6 and _bz.calls[0][1] == 'CBU0')
 _cl(); _sig('E', grant=98565.0)
 _plz = T.plan_lots(L1, 1e6)
-json.dump(dict(tid=T.transition_id('s1', 'F', 'E', 1e6, _plz), postponed=1, done=[], executed_usd=0.0,
+json.dump(dict(asof='2026-08-07', tid=T.transition_id('s1', 'F', 'E', 1e6, _plz), postponed=1, done=[], executed_usd=0.0,
                order_ids=[], snapshot={'ZN': 1, 'CBU0': 0}, log=[], opened=True), open(SP, 'w'))
 _bz2 = _B(netpos={'ZN': 1, 'CBU0': 0}); inc = False
 try: T.execute(_bz2, SP, 1e6, L1, signal_id='s1', **KW)
@@ -687,14 +730,14 @@ chk('Ред.31: SWITCH_SIGNAL без OWNER_APPROVE = отказ, заявок н
     inc and len(_bNA.calls) == 0 and 'TRANSITION_OPEN' not in open(JX).read())
 
 _cl(); _sig('E', grant=98565.0, approve=False)          # одобрение на ЧУЖУЮ цель не годится
-M.append_event(JX, '2026-08-08', 'OWNER_APPROVE', 'F|s1')
+M.append_event(JX, '2026-08-07', 'OWNER_APPROVE', 'F|s1')
 inc = False
 try: T.execute(_B(netpos={'ZN': 1, 'CBU0': 0}), SP, 1e6, L1, signal_id='s1', **KW)
 except T.Incident: inc = True
 chk('Ред.31: одобрение на другую цель не разрешает переход', inc)
 
 _cl(); _sig('E', grant=98565.0, approve=False)          # одобрение на ЧУЖОЙ сигнал не годится
-M.append_event(JX, '2026-08-08', 'OWNER_APPROVE', 'E|sОТHER')
+M.append_event(JX, '2026-08-07', 'OWNER_APPROVE', 'E|sОТHER')
 inc = False
 try: T.execute(_B(netpos={'ZN': 1, 'CBU0': 0}), SP, 1e6, L1, signal_id='s1', **KW)
 except T.Incident: inc = True
@@ -825,24 +868,24 @@ for _lnm in (_JP('sc_alias_l.csv'), _JP('sc_alias_h.csv')):
 os.symlink(os.path.abspath(JX), _JP('sc_alias_l.csv'))
 os.link(os.path.abspath(JX), _JP('sc_alias_h.csv'))
 _bS = _B(netpos={'ZN': 1, 'CBU0': 0}); inc = False
-try: T.execute(_bS, SP + 'sl', 1e6, L1, signal_id='s1', journal=_JP('sc_alias_l.csv'), mr_state=SX, asof='2026-08-08')
+try: T.execute(_bS, SP + 'sl', 1e6, L1, signal_id='s1', journal=_JP('sc_alias_l.csv'), mr_state=SX, asof='2026-08-07')
 except T.Incident: inc = True
 chk('Исполнитель: symlink-алиас журнала запрещён/делит lease — заявок ноль', inc and len(_bS.calls) == 0)
 _bH = _B(netpos={'ZN': 1, 'CBU0': 0}); inc = False
-try: T.execute(_bH, SP + 'hl', 1e6, L1, signal_id='s1', journal=_JP('sc_alias_h.csv'), mr_state=SX, asof='2026-08-08')
+try: T.execute(_bH, SP + 'hl', 1e6, L1, signal_id='s1', journal=_JP('sc_alias_h.csv'), mr_state=SX, asof='2026-08-07')
 except T.Incident: inc = True
 chk('Исполнитель: hardlink-алиас делит lease (device+inode) — заявок ноль', inc and len(_bH.calls) == 0)
 _cwd0 = os.getcwd(); os.chdir(os.path.dirname(os.path.abspath(JX)) or '/tmp')
 _bR = _B(netpos={'ZN': 1, 'CBU0': 0}); inc = False
 try: T.execute(_bR, SP + 'rl', 1e6, L1, signal_id='s1', journal='./' + os.path.basename(JX), mr_state=SX,
-               asof='2026-08-08', registry=os.path.join(_cwd0, 'instruments.csv'))
+               asof='2026-08-07', registry=os.path.join(_cwd0, 'instruments.csv'))
 except T.Incident: inc = True
 os.chdir(_cwd0)
 chk('Исполнитель: относительный путь делит lease с абсолютным — заявок ноль', inc and len(_bR.calls) == 0)
 _f3.flock(_lfC, _f3.LOCK_UN); _lfC.close()
 M.test_configure(JX)
 _ino0 = os.stat(JX).st_ino
-M.append_event(JX, '2026-08-08', 'REVIEW_SIGNAL', 'проба')
+M.append_event(JX, '2026-08-07', 'REVIEW_SIGNAL', 'проба')
 chk('Замок: журнал дописывается НА МЕСТЕ, inode (объект блокировки) не меняется',
     os.stat(JX).st_ino == _ino0)
 try:
@@ -1188,6 +1231,37 @@ chk('МР: после смены журнала старый процесс ин
 ok = all(map_mes(n)[0]*10 + map_mes(n)[1] == n and 0 <= map_mes(n)[1] <= 9 for n in [0, 1, 9, 10, 171, 1234])
 chk('execution-mapper map_mes', ok)
 
+
+# --- ПОСТАВЛЕННАЯ ПАРА «ЗАМЕР МАРЖИ <-> РЕЕСТР» (двадцатый круг, №17) ------------------
+# Рецензент указал: выпускные тесты пользуются временной полной фикстурой и НЕ ВИДЯТ, что
+# в самом пакете margins_live.json покрывает не все FUT-серии instruments_live.csv. С такой
+# парой любой preflight цели Ф останавливается, то есть поставленный комплект не способен
+# перейти обратно из Е — и об этом ничего не сказано.
+#
+# ДОЛГ С ДАТОЙ ПОГАШЕНИЯ. 14.08.2026 замер снять не удалось: paper-whatIf днём не отдаёт
+# маржу (проверено дважды, 10:00 и 13:20 Чикаго). Маршрут Ф маржу не читает, а переход не
+# раньше первого ролла 26.08 — поэтому до 20.08.2026 несогласованность даёт ГРОМКОЕ
+# предупреждение, а начиная с 20.08 — ПРОВАЛ выпуска. Так долг не превращается в вечный.
+_MRG_DEADLINE = '2026-08-20'
+try:
+    _mj = _json1.loads(open('live/margins_live.json',
+                            encoding='utf-8').read())
+    _mser = {k for k in _mj if k != '_meta'}
+    with open('live/instruments_live.csv', encoding='utf-8') as _f:
+        _rser = {r['instrument'] for r in csv.DictReader(_f) if r.get('sec_type') == 'FUT'}
+    _miss = sorted(_rser - _mser)
+except Exception as _ex:
+    _miss = [f'проверка невозможна: {_ex}']
+_today_s = _dt1.datetime.now(_dt1.timezone.utc).strftime('%Y-%m-%d')
+if not _miss:
+    chk('поставленная пара «замер маржи <-> реестр» согласована', True, 'все серии покрыты')
+elif _today_s < _MRG_DEADLINE:
+    print(f'[ВНИМАНИЕ] замер маржи не покрывает серии реестра {_miss} — ПЕРЕХОД Ф<->Е '
+          f'ЗАБЛОКИРОВАН до утреннего замера (первый ролл 26.08; провал выпуска с '
+          f'{_MRG_DEADLINE})')
+else:
+    chk('поставленная пара «замер маржи <-> реестр» согласована', False,
+        f'не покрыты {_miss}; срок {_MRG_DEADLINE} истёк')
 
 _m1 = _machine_snapshot()
 chk('стенды не тронули машинное состояние ~/.addfut',

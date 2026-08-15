@@ -97,6 +97,36 @@ def _book_path(route):
     return ST.book_path(route)
 
 
+def _account_pin():
+    """ТОРГОВЫЙ СЧЁТ ПИНУЕТСЯ ЯВНО (двадцатый круг, №5).
+
+    Пин в адаптере существовал, но в бою был МЁРТВ: ADDFUT_ACCOUNT не задавался нигде —
+    ни в ibgw.env (там только логин и пароль), ни в autopilot.sh, ни в crontab. При одном
+    managedAccount адаптер молча принимал тот счёт, который дал шлюз, поэтому вход в
+    ДРУГОЙ счёт (правка ibgw.env, другой paper от IBKR) прошёл бы сверку с пустой книгой и
+    получил полную позицию 2х, а ~/.addfut стал бы состоянием чужого счёта. Заодно
+    оживают проверки, опирающиеся на этот же пин: счёт замера маржи (_live_margins) и
+    фильтры чужих заявок и исполнений в адаптере.
+
+    Источник — окружение либо файл счёта в ТОМ ЖЕ каталоге состояния, где книга и замок
+    (один namespace путей, девятнадцатый круг, №17). Отсутствие пина — ОТКАЗ сессии, а не
+    молчаливое «возьмём что дали»: это торговый вход, и он обязан знать свой счёт.
+    """
+    import state as ST
+    pin = (os.environ.get('ADDFUT_ACCOUNT') or '').strip()
+    if pin:
+        return pin
+    p = ST.lock_dir() / 'account.txt'
+    try:
+        pin = p.read_text(encoding='utf-8').strip()
+    except OSError as ex:
+        raise Refused(f'торговый счёт не пинован: нет ADDFUT_ACCOUNT и не читается {p} '
+                      f'({ex}) — сессия запрещена (двадцатый круг, №5)')
+    if not pin:
+        raise Refused(f'торговый счёт не пинован: {p} пуст — сессия запрещена')
+    return pin
+
+
 def do_close(ib, route):
     """Замкнуть сессию по факту закрытия: фактические цены закрытия и фактический NLV.
 
@@ -112,7 +142,7 @@ def do_close(ib, route):
     ценам для понедельничной книги, а повторный запуск переписал бы его ещё раз.
     """
     import state as ST
-    br = IBB.IBBroker(ib)
+    br = IBB.IBBroker(ib, account=_account_pin())
     bp = _book_path(route)
     cls = DL.BookE if route == 'E' else DL.Book
     with ST.hold_book_lock():
@@ -161,7 +191,7 @@ def do_close(ib, route):
 def do_trade(ib, route, dry):
     import state as ST
 
-    br = IBB.IBBroker(ib)
+    br = IBB.IBBroker(ib, account=_account_pin())
     nlv = br.net_liquidation()
     pos = br.net_positions()
     alien = [k for k in pos if k.startswith('НЕИЗВЕСТНЫЙ')]
@@ -216,7 +246,10 @@ def do_trade(ib, route, dry):
         br, m, dirpath=str(state_dir()), route=route, capital=None, closing_nav=None,
         journal_path=str(state_dir() / f'journal-{route}.csv'), dry_run=dry,
         paper=paper_mode(),
-        ref_prices=refs, book_path=str(bp), series_a=src.get('series'), **kw)
+        ref_prices=refs, book_path=str(bp), series_a=src.get('series'),
+        # КРАЙ ТОРГОВОГО ОКНА ВНУТРЬ СЕССИИ (двадцатый круг, №6): один источник с
+        # автопилотом (feed.trade_till), проверяется перед КАЖДОЙ заявкой.
+        deadline=(None if dry else FD.trade_deadline(route)), **kw)
     if route == 'E' and not dry and dec.trade and orders:
         # ЗАПАС ПОСЛЕ ИСПОЛНЕНИЙ (восемнадцатый круг, №1): предторговый замер относится к
         # СТАРОЙ книге; удвоение позиции могло увести фактический запас под порог, а

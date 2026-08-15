@@ -425,7 +425,18 @@ def _s7(res):
 
 @sinv('маршрут Е строит книгу в долях фондов', needs=lambda r: r['route'] == 'E')
 def _s8(res):
-    return all(k in ('CSPX', 'CBU0') for k in res['broker_after'])
+    """ДВАДЦАТЬ ПЕРВЫЙ КРУГ, №20: all() по ПУСТОМУ словарю истинно. Если живой путь Е
+    перестанет подавать заявки и оставит брокера пустым, прежнее утверждение прошло бы —
+    то есть доказывало «нет чужих инструментов», а выглядело как «книга в фондах».
+    Теперь требуется НЕПУСТАЯ позиция и обе ноги."""
+    b = res['broker_after']
+    chuzhih_net = all(k in ('CSPX', 'CBU0') for k in b)
+    # В сбойных повадках (отказ, обрыв, частичное) пустая книга законна — там утверждение
+    # только про отсутствие чужих инструментов. А в ШТАТНОЙ книга обязана быть непустой,
+    # иначе доказательство вакуумно.
+    if res.get('behaviour') != 'normal':
+        return chuzhih_net
+    return chuzhih_net and bool(b) and any(float(v) for v in b.values())
 
 
 # ---------------------------------------------------------------- живой адаптер
@@ -1108,10 +1119,20 @@ def _f1(r):
 def _f2(r):
     """Дефект первой живой сессии: цена ES подавалась как есть, а S.ES_MULT откалиброван
     под цену SPY — шаг ноги А выходил ВДЕСЯТЕРО больше, и книга объявлялась неисполнимой
-    при исправном счёте. Ни отказа, ни абсурдной цифры при этом не возникало."""
+    при исправном счёте. Ни отказа, ни абсурдной цифры при этом не возникало.
+
+    ДВАДЦАТЫЙ КРУГ, №21: прежде здесь сравнивался ТОЛЬКО диагностический src['nominal_ES'],
+    а сама величина, которая идёт в размер книги, — m.px_eq_prev — не проверялась вовсе.
+    Регрессия Market(px_eq_prev=es_prev), то есть точное возвращение старого дефекта 10x,
+    прошла бы этот assert, оставь она диагностический словарь прежним. Теперь проверяется
+    ЦЕНА, ПОДАННАЯ В РЕШЕНИЕ: она обязана быть закрытием SPY (774.75 в стенде), а не
+    закрытием ES (7747.5), и обязана отличаться от него на порядок."""
     if r['m'] is None:
         return False
-    return abs(r['src']['nominal_ES'] - 50.0 * r['src']['es_close'][0]) < 1e-6
+    _spy_prev, _es_prev = 774.75, r['src']['es_close'][0]
+    return (abs(r['src']['nominal_ES'] - 50.0 * _es_prev) < 1e-6
+            and abs(r['m'].px_eq_prev - _spy_prev) < 1e-9
+            and abs(r['m'].px_eq_prev - _es_prev) > 1.0)
 
 
 @finv('отставший бар отвергается', needs=lambda r: r['case'] == 'бар вчерашний повторён')
@@ -1226,10 +1247,12 @@ RUN_CASES = ('наблюдение', 'торговля', 'незамкнутая
              'маршрут Е при тонком запасе', 'отказ дня по §8',
              'ролл: исход заявки неизвестен', 'журнал повреждён',
              'Е: тонкий запас после исполнений', 'Е: пост-трейд запас неизвестен',
-             'пути состояния: один namespace',
+             'пути состояния: один namespace', 'счёт не пинован',
+             'окно ушло за время сессии', 'пропущен торговый день',
              'worm: обязательный файл отсутствует',
              'worm: якорь аттестует действующие пути',
-             'worm: подмена содержимого при коммите ловится')
+             'worm: подмена содержимого при коммите ловится',
+             'worm: архив разных поколений помечается')
 
 
 def _session_run(case):
@@ -1292,7 +1315,16 @@ def _session_run(case):
         _sig = FD.signal_state
         FD.signal_state = lambda t, path=None, **kw: _sig(t, path=sig, **kw)
         # Час выбирается СЦЕНАРИЕМ: замыкание до закрытия биржи обязано быть отвергнуто.
-        hour = 9 if case == 'замыкание рано' else 17
+        # ЧАСЫ СТЕНДА ПО СМЫСЛУ СЛУЧАЯ (двадцатый круг, №6): торговые случаи обязаны
+        # идти ВНУТРИ торгового окна — прежние 17:00 означали сделку за краем окна,
+        # что теперь запрещено воротами. Замыкание идёт после закрытия, как и было.
+        hour = (9 if case == 'замыкание рано'
+                else 17 if case.startswith('замыкание')
+                else 16 if case == 'окно ушло за время сессии'
+                # Окно Е узкое (08:45-09:45), и часы обязаны быть внутри него у ВСЕХ
+                # случаев, которые торгуют Е, — включая те, где книга заведена как Ф.
+                else 9 if (route == 'E' or 'Е' in case)
+                else 10)
         FD.exchange_today = lambda: pd.Timestamp(today)
         _now = pd.Timestamp(f'{today} {hour:02d}:00', tz=FD.EXCHANGE_TZ)
         real_now = pd.Timestamp.now
@@ -1300,9 +1332,28 @@ def _session_run(case):
         os.environ['ADDFUT_LOCK_DIR'] = tmp
         os.environ['ADDFUT_REGISTRY'] = str(reg)
         os.environ.pop('ADDFUT_BOOK_PATH', None)
+        # ПИН ТОРГОВОГО СЧЁТА (двадцатый круг, №5). Контур обязан знать свой счёт, поэтому
+        # стенд обязан его дать — и ровно тот, который отдаёт стаб, а не выдуманный:
+        # выдуманный проверял бы сам себя. Отсутствие пина — ОТДЕЛЬНЫЙ случай
+        # ('счёт не пинован'), иначе у новой защиты не было бы отрицательной половины.
+        os.environ.pop('ADDFUT_ACCOUNT', None)
+        if case != 'счёт не пинован':
+            (Path(tmp) / 'account.txt').write_text(ib.managedAccounts()[0], encoding='utf-8')
 
         bp = Path(tmp) / f'book-{route}.json'
         cls = DL.BookE if route == 'E' else DL.Book
+        if case == 'пропущен торговый день':
+            # ДВАДЦАТЬ ПЕРВЫЙ КРУГ, №10: книга закрыта 10.08, сегодня 12.08, а предыдущая
+            # биржевая сессия — 11.08. Прежнее условие требовало лишь «сегодня новее
+            # последней», и пропущенный день забывался молча; он мог нести ролл или
+            # переключение сигнала.
+            b0 = DL.Book(d_fix=7.9, n_e=26, n_b=10, unit_is_mes=True, prev_st_eq=True,
+                         prev_st_bd=True, ser_a='U26', ser_b='U26', es_held=2,
+                         last_session='2026-08-10', close_provisional=False,
+                         prev_close_lev=1.99)
+            ST.save(bp, b0, route, 1)
+            ib._pos = {es: 2, 900002: 6, zn: 10}
+            ib._shown = dict(ib._pos)
         if case == 'незамкнутая предыдущая' or case.startswith('замыкание'):
             b0 = cls(prev_st_eq=True, prev_st_bd=True) if route == 'E' else DL.Book(
                 d_fix=7.9, n_e=26, n_b=10, unit_is_mes=True, prev_st_eq=True, prev_st_bd=True,
@@ -1464,6 +1515,46 @@ def _r_unknown(r):
     return (r['raised'] and 'НЕИЗВЕСТЕН' in r['error']
             and 'недоказуемо' in r['error'] and 'переносится' not in r['error']
             and r.get('book_same') is True)
+
+
+@rinv('пропущенный торговый день останавливает сессию',
+      needs=lambda r: r['case'] == 'пропущен торговый день')
+def _r_gap(r):
+    """ДВАДЦАТЬ ПЕРВЫЙ КРУГ, №10. Книга 10.08, сегодня 12.08, предыдущая сессия 11.08 —
+    день потерян. Проверяются ПРИЧИНА и НОЛЬ ЗАЯВОК: падение по любому другому поводу
+    (незамкнутая книга, сверка) защитой от пропуска не является."""
+    return (r['raised'] and r['placed'] == 0
+            and 'пропущены торговые дни' in r['error'])
+
+
+@rinv('заявка за краем торгового окна не подаётся',
+      needs=lambda r: r['case'] == 'окно ушло за время сессии')
+def _r_window(r):
+    """ДВАДЦАТЫЙ КРУГ, №6. Окно проверялось ОДИН раз — в автопилоте, перед запуском
+    session.py; внутри сессии идут исторические запросы, ориентиры, снимки позиций и
+    ожидания заявок до 120 с каждое. Заявка с tif=GTC + outsideRth, ушедшая за край,
+    висит до чужой сессии либо исполняется отдельно от парной. Проверяются ПРИЧИНА и
+    НОЛЬ ЗАЯВОК: отказ по любому другому поводу защитой не является."""
+    return r['raised'] and r['placed'] == 0 and 'окно закрыто' in r['error']
+
+
+@rinv('архив разных поколений не остаётся под рабочим именем',
+      needs=lambda r: r['case'] == 'worm: архив разных поколений помечается')
+def _r_worm_reject(r):
+    """ДВАДЦАТЫЙ КРУГ, №22. Проверяются ТРИ вещи разом: снимок отклонён, под рабочим
+    именем не осталось ни одного архива, и ровно один помечен .rejected. Одного лишь
+    факта исключения мало: прежде оно тоже поднималось, а файл продолжал лежать."""
+    return not r['raised'] and r.get('ok') is True
+
+
+@rinv('без пина торгового счёта сессия не подаёт заявок',
+      needs=lambda r: r['case'] == 'счёт не пинован')
+def _r_pin(r):
+    """ДВАДЦАТЫЙ КРУГ, №5. Пин существовал в адаптере, но в бою был мёртв: ADDFUT_ACCOUNT
+    не задавался нигде, и при одном managedAccount брался тот счёт, который дал шлюз.
+    Проверяется ПРИЧИНА и НОЛЬ ЗАЯВОК: падение по любой другой причине защитой не является.
+    Положительная половина — все прочие случаи запуска: они пинуются счётом стаба."""
+    return r['raised'] and r['placed'] == 0 and 'не пинован' in r['error']
 
 
 @rinv('незамкнутая предыдущая сессия останавливает торговлю',
@@ -1629,9 +1720,14 @@ def _r7(r):
 @rinv('маршрут Е строит книгу в долях фондов, а не во фьючерсах',
       needs=lambda r: r['case'] == 'маршрут Е')
 def _r8(r):
+    """ДВАДЦАТЬ ПЕРВЫЙ КРУГ, №20: та же вакуумность — all() по пустым позициям истинно.
+    Требуется непустая книга фондов, иначе утверждение не отличает «маршрут Е сработал»
+    от «маршрут Е не сделал ничего»."""
     if r['raised']:
         return False
-    return all(k in (900004, 900005) for k in r['positions'])
+    pos = r['positions']
+    return (bool(pos) and all(k in (900004, 900005) for k in pos)
+            and any(float(v) for v in pos.values()))
 
 
 def _session_days(days=('2026-08-12', '2026-08-13', '2026-08-14')):
@@ -1687,6 +1783,10 @@ def _session_days(days=('2026-08-12', '2026-08-13', '2026-08-14')):
         os.environ['ADDFUT_LOCK_DIR'] = tmp
         os.environ['ADDFUT_REGISTRY'] = str(reg)
         os.environ.pop('ADDFUT_BOOK_PATH', None)
+        # ПИН ТОРГОВОГО СЧЁТА (двадцатый круг, №5): контур обязан знать свой счёт, и
+        # стенд даёт ровно тот, что отдаёт стаб — выдуманный проверял бы сам себя.
+        os.environ.pop('ADDFUT_ACCOUNT', None)
+        (Path(tmp) / 'account.txt').write_text(ib.managedAccounts()[0], encoding='utf-8')
         real_now = pd.Timestamp.now
 
         out = dict(case='три сессии подряд', errors=[], series=[], sessions=[], levs=[],
@@ -1790,6 +1890,10 @@ def _session_late_fill():
         os.environ['ADDFUT_LOCK_DIR'] = tmp
         os.environ['ADDFUT_REGISTRY'] = str(reg)
         os.environ.pop('ADDFUT_BOOK_PATH', None)
+        # ПИН ТОРГОВОГО СЧЁТА (двадцатый круг, №5): контур обязан знать свой счёт, и
+        # стенд даёт ровно тот, что отдаёт стаб — выдуманный проверял бы сам себя.
+        os.environ.pop('ADDFUT_ACCOUNT', None)
+        (Path(tmp) / 'account.txt').write_text(ib.managedAccounts()[0], encoding='utf-8')
         real_now = pd.Timestamp.now
 
         out = dict(case='позднее исполнение после сессии', first_ok=False, second_refused=False,
@@ -1991,6 +2095,37 @@ def _worm_case(kind):
             return out
         (Path(tmp) / 'signals_live.csv').write_text(
             ',leg_eq,leg_bond\n2026-08-31,1,1\n', encoding='utf-8')
+        # САЙДКАР УРОВНЕЙ ОБЯЗАТЕЛЕН (двадцать первый круг, №14): он попадает в архив и
+        # теперь входит в тело якоря — без него сигнал недоказуем, и настоящее состояние
+        # его всегда несёт. Прежняя фикстура его не создавала.
+        (Path(tmp) / 'signals_levels.csv').write_text(
+            ',IEF,SPY\n2026-07-31,92.630000,747.030000\n', encoding='utf-8')
+        if kind == 'worm: архив разных поколений помечается':
+            # ДВАДЦАТЫЙ КРУГ, №22: _tar_state публикует addfut-*.tgz ДО повторного
+            # вычисления тела. Состояние «меняется» между двумя вычислениями — снимок
+            # обязан быть отклонён, а уже опубликованный архив НЕ смеет остаться под
+            # рабочим именем: следующий backup_push или ручное восстановление взяли бы
+            # архив, про который сам код установил, что поколения разные.
+            bdir = Path(tmp) / 'backups'
+            _orig_body = WA._anchor_body
+            _calls = {'n': 0}
+
+            def _shifting(day):
+                _calls['n'] += 1
+                return _orig_body(day) + ('' if _calls['n'] == 1 else '\nИЗМЕНЕНО')
+            WA._anchor_body = _shifting
+            try:
+                WA.snap('2026-08-14', bdir)
+                out['ok'] = False              # отказа не было — защита мертва
+            except RuntimeError as ex:
+                rabochie = sorted(x.name for x in bdir.glob('addfut-*.tgz'))
+                pomecheny = sorted(x.name for x in bdir.glob('addfut-*.tgz.rejected'))
+                out['ok'] = ('разных поколений' in str(ex)
+                             and not rabochie and len(pomecheny) == 1)
+                out['files'] = dict(рабочие=rabochie, помеченные=pomecheny)
+            finally:
+                WA._anchor_body = _orig_body
+            return out
         body = WA._anchor_body('2026-08-14')
         if kind == 'worm: якорь аттестует действующие пути':
             # ДЕЙСТВУЮЩИЙ путь ряда сигналов (ADDFUT_SIGNALS), а не жёсткий ~/.addfut.
@@ -2108,6 +2243,10 @@ def _session_route_switch():
         os.environ['ADDFUT_LOCK_DIR'] = tmp
         os.environ['ADDFUT_REGISTRY'] = str(reg)
         os.environ.pop('ADDFUT_BOOK_PATH', None)
+        # ПИН ТОРГОВОГО СЧЁТА (двадцатый круг, №5): контур обязан знать свой счёт, и
+        # стенд даёт ровно тот, что отдаёт стаб — выдуманный проверял бы сам себя.
+        os.environ.pop('ADDFUT_ACCOUNT', None)
+        (Path(tmp) / 'account.txt').write_text(ib.managedAccounts()[0], encoding='utf-8')
         real_now = pd.Timestamp.now
 
         out = dict(case='смена маршрута в связке с торговлей', f_ok=False, handed=None,
@@ -2162,8 +2301,10 @@ def _session_route_switch():
         b3 = {k: list(v) + [('2026-08-13', v[-1][1] * 1.001)] for k, v in b2.items()}
         ib.set_bars(b3)
         FD.exchange_today = lambda: pd.Timestamp('2026-08-13')
+        # ВНУТРИ ОКНА МАРШРУТА Е (двадцатый круг, №6): окно Е 08:45-09:45, и прежние 10:00
+        # означали торговлю за краем — теперь это запрещено воротами.
         pd.Timestamp.now = staticmethod(
-            lambda tz=None: pd.Timestamp('2026-08-13 10:00', tz=FD.EXCHANGE_TZ) if tz
+            lambda tz=None: pd.Timestamp('2026-08-13 09:00', tz=FD.EXCHANGE_TZ) if tz
             else real_now())
         try:
             SS.do_trade(ib, 'E', dry=False)
@@ -2244,6 +2385,38 @@ def _r14(r):
     return r['refused_without_close']
 
 
+def check_ib_interface():
+    """СТАБ ОБЯЗАН ОПИСЫВАТЬ ИНТЕРФЕЙС, КОТОРЫЙ У ЖИВОГО КЛАССА ЕСТЬ (двадцатый круг, №15).
+
+    Двадцатая рецензия утверждала, что ib_insync.IB.reqAccountSummary не существует и что
+    StubIB «изобрёл» метод, поэтому все стенды доказывают несуществующий интерфейс. ФАКТ
+    проверен и утверждение ОТКЛОНЕНО: в установленной 0.9.86 метод есть, сигнатура (self),
+    блокирующий, внутри открывает новый reqId и ждёт accountSummaryEnd — ровно то, что
+    написано в комментарии адаптера.
+
+    Но КЛАСС дефекта назван верно: у стендов не было ни одной проверки, связывающей стаб с
+    живым классом, и апгрейд библиотеки сломал бы контур молча. Здесь имена, которые
+    адаптер зовёт у self.ib, сверяются С ОБОИХ концов: они обязаны быть и у ib_insync.IB,
+    и у StubIB. Первое ловит уехавшую библиотеку, второе — стаб, доказывающий выдумку.
+    """
+    import re
+    import ib_stub
+    from ib_insync import IB
+    src = (Path(__file__).resolve().parent / 'ib_broker.py').read_text(encoding='utf-8')
+    used = sorted(set(re.findall(r'self\.ib\.([a-zA-Z_]+)', src)))
+    assert len(used) >= 10, f'подозрительно мало вызовов адаптера: {used}'
+    no_live = [m for m in used if not hasattr(IB, m)]
+    no_stub = [m for m in used if not hasattr(ib_stub.StubIB, m)]
+    ok = not no_live and not no_stub
+    print(f'[{"OK  " if ok else "FAIL"}] интерфейс адаптера сверен с живым ib_insync.IB и '
+          f'со стабом: {len(used)} имён')
+    if no_live:
+        print(f'       НЕТ У ЖИВОГО ib_insync.IB: {no_live} — контур упадёт в бою')
+    if no_stub:
+        print(f'       НЕТ У СТАБА: {no_stub} — стенды не покрывают этот путь')
+    return ok
+
+
 def run_run():
     cov, bad = {}, {}
     for case in RUN_CASES:
@@ -2299,7 +2472,9 @@ TR_CASES = ('план целых фьючерсов', 'план дробных �
             'лимит заявок: покупка №391 не подаётся',
             'маржа цели: фактическая книга дороже отображённой',
             'замер с нечисловой маржой', 'замер устарел',
-            'замер: init прежде maint', 'тревога перехода — файл в каталоге автопилота')
+            'замер: init прежде maint', 'тревога перехода — файл в каталоге автопилота',
+            'общее окно закрылось: заявка не подаётся',
+            'компенсация исполнена не полностью')
 
 
 class _Unp(dict):
@@ -2317,19 +2492,28 @@ class _Unp(dict):
 
 class _TrBroker:
     """Брокер перехода: продаёт источник, покупает цель. Дробность задаётся сценарием."""
-    def __init__(self, frac_of=None):
+    def __init__(self, frac_of=None, short_buy=None):
         self.frac_of = frac_of      # инструмент, по которому исполнение дробное
+        # НЕДОБОР ПОКУПКИ НА ЦЕЛУЮ ЕДИНИЦУ (двадцатый круг, №2): повадка живого брокера,
+        # которую прежние стабы не воспроизводили вовсе — оттого недостача цели ровно на
+        # один контракт и доходила до COMPLETE.
+        self.short_buy = short_buy
         self.calls = []
         self.n = 0
 
     def _f(self, instr, u):
         return u - 0.5 if self.frac_of == instr and u > 0 else u
 
+    def _b(self, instr, u):
+        if self.short_buy == instr and u >= 1:
+            return u - 1
+        return self._f(instr, u)
+
     def sell_units(self, i, u):
         self.n += 1; self.calls.append(('sell', i, u)); return (f's{self.n}', self._f(i, u))
 
     def buy_units(self, i, u):
-        self.n += 1; self.calls.append(('buy', i, u)); return (f'b{self.n}', self._f(i, u))
+        self.n += 1; self.calls.append(('buy', i, u)); return (f'b{self.n}', self._b(i, u))
 
     def cancel_order(self, o): return True
     def open_orders(self): return []
@@ -2373,7 +2557,7 @@ def _tr_run(case):
             elif case == 'замер с нечисловой маржой':
                 # ВОСЕМНАДЦАТЫЙ КРУГ, №13 (пара): NaN-требование превращало маржу корня в
                 # мусор; sorted/сравнения его не ловили — только явная проверка конечности.
-                mp.write_text(_json.dumps({'_meta': {'date': _today,
+                mp.write_text(_json.dumps({'_meta': {'date': _today, 'account': 'DUTEST01',
                                                      'series': ['ESU26', 'ZNU26']},
                                            'ESU26': {'init': float('nan')},
                                            'ZNU26': {'init': 2500.0}}), encoding='utf-8')
@@ -2389,7 +2573,7 @@ def _tr_run(case):
             elif case == 'замер: init прежде maint':
                 # ВОСЕМНАДЦАТЫЙ КРУГ, №13 (пара): возможность ОТКРЫТЬ книгу определяет
                 # НАЧАЛЬНОЕ требование; выбор maint занижал маржу и завышал запас.
-                mp.write_text(_json.dumps({'_meta': {'date': _today,
+                mp.write_text(_json.dumps({'_meta': {'date': _today, 'account': 'DUTEST01',
                                                      'series': ['ESU26', 'ZNU26']},
                                            'ESU26': {'init': 50000.0, 'maint': 2500.0},
                                            'ZNU26': {'init': 3000.0, 'maint': 1000.0}}),
@@ -2398,25 +2582,30 @@ def _tr_run(case):
                 mp.write_text(_json.dumps({'ESU26': {'maint': 40000.0},
                                            'ZNU26': {'maint': 2500.0}}), encoding='utf-8')
             elif case == 'замер прежней серии':
-                mp.write_text(_json.dumps({'_meta': {'date': _today, 'series': ['ESZ25']},
+                mp.write_text(_json.dumps({'_meta': {'date': _today, 'account': 'DUTEST01', 'series': ['ESZ25']},
                                            'ESZ25': {'maint': 30000.0}}), encoding='utf-8')
             elif case == 'замер не покрывает корень':
-                mp.write_text(_json.dumps({'_meta': {'date': _today, 'series': ['ZNU26']},
+                mp.write_text(_json.dumps({'_meta': {'date': _today, 'account': 'DUTEST01', 'series': ['ZNU26']},
                                            'ZNU26': {'maint': 2500.0}}), encoding='utf-8')
             elif case == 'живой замер покрывает':
-                mp.write_text(_json.dumps({'_meta': {'date': _today,
+                mp.write_text(_json.dumps({'_meta': {'date': _today, 'account': 'DUTEST01',
                                                      'series': ['ESU26', 'ZNU26']},
                                            'ESU26': {'maint': 40000.0},
                                            'ZNU26': {'maint': 2500.0}}), encoding='utf-8')
             keepm = _os.environ.get('ADDFUT_MARGINS')
             keepr = _os.environ.get('ADDFUT_REGISTRY')
+            # ПИН ЗАДАЁТСЯ ЯВНО (правило 5 проекта): иначе _machine_pin() ушёл бы читать
+            # МАШИННЫЙ ~/.addfut/account.txt, и стенд начал бы зависеть от живого состояния.
+            keepa = _os.environ.get('ADDFUT_ACCOUNT')
+            _os.environ['ADDFUT_ACCOUNT'] = 'DUTEST01'
             _os.environ['ADDFUT_MARGINS'] = str(mp)
             _os.environ['ADDFUT_REGISTRY'] = str(rp)
             try:
                 reg = {'ES': dict(sec_type='FUT'), 'ZN': dict(sec_type='FUT')}
                 out['margin'] = TRN.book_margin({'ES': 1, 'ZN': 2}, reg)
             finally:
-                for k, v in (('ADDFUT_MARGINS', keepm), ('ADDFUT_REGISTRY', keepr)):
+                for k, v in (('ADDFUT_MARGINS', keepm), ('ADDFUT_REGISTRY', keepr),
+                             ('ADDFUT_ACCOUNT', keepa)):
                     _os.environ.pop(k, None)
                     if v is not None:
                         _os.environ[k] = v
@@ -2467,6 +2656,46 @@ def _tr_run(case):
                               _f8)
             finally:
                 out['calls'] = list(br.calls)
+        elif case == 'компенсация исполнена не полностью':
+            # ДВАДЦАТЫЙ КРУГ, №2: брокер недобирает КАЖДУЮ покупку на единицу. Основная
+            # покупка оставляет недостачу, компенсация её не закрывает — и прежде это
+            # проходило: исполнение компенсации ни с чем не сверялось, а допуск был в
+            # ЦЕЛУЮ единицу цели. Итог — COMPLETE при недостающем контракте.
+            lots = TRN.plan_lots(legs_fut, 10e6)
+            lim = TRN.unpaired_limit(legs_fut, 10e6)
+            br = _TrBroker(short_buy='CBU0')
+            st = dict(done=[], order_ids=[], log=[], executed_usd=0.0)
+            sp = Path(tempfile.mkdtemp(prefix='addfut-tr-')) / 'st.json'
+
+            def _f2c(msg, cancel=True):
+                raise TRN.Incident(msg)
+
+            try:
+                TRN._run_lots(br, lots, st, sp, lim, _Unp({k: 0.0 for k in legs_fut}), {},
+                              _f2c)
+            finally:
+                out['calls'] = list(br.calls)
+        elif case == 'общее окно закрылось: заявка не подаётся':
+            # ДВАДЦАТЫЙ КРУГ, №7: окно перехода было БУЛЕВЫМ аргументом, проверенным один
+            # раз до preview, preflight и сотен заявок. Здесь край общего окна LSE/CME уже
+            # позади — ворота обязаны остановить переход ДО первой заявки, иначе продажа
+            # фьючерса уходит брокеру, а покупка фонда идёт на закрытую площадку.
+            import pandas as _pdw
+            lots = TRN.plan_lots(legs_fut, 10e6)
+            lim = TRN.unpaired_limit(legs_fut, 10e6)
+            br = _TrBroker()
+            st = dict(done=[], order_ids=[], log=[], executed_usd=0.0)
+            sp = Path(tempfile.mkdtemp(prefix='addfut-tr-')) / 'st.json'
+
+            def _fw(msg, cancel=True):
+                raise TRN.Incident(msg)
+
+            _past = _pdw.Timestamp.now(tz='America/Chicago') - _pdw.Timedelta(minutes=1)
+            try:
+                TRN._run_lots(br, lots, st, sp, lim, _Unp({k: 0.0 for k in legs_fut}), {},
+                              _fw, window_till=_past)
+            finally:
+                out['calls'] = list(br.calls)
         elif case == 'маржа цели: фактическая книга дороже отображённой':
             # ДЕВЯТНАДЦАТЫЙ КРУГ, №2: исполнитель покупает единицы ЦЕЛИ ПЛАНА (MES-сетку),
             # а отображённая книга ES+MES существует только в preflight. Запас обязан
@@ -2482,12 +2711,16 @@ def _tr_run(case):
                 'ESU26,FUT,EQ,CME,USD,1,ESU6,20260918,50,,\n'
                 'MESU26,FUT,EQ,CME,USD,2,MESU6,20260918,5,,\n', encoding='utf-8')
             _today2 = __import__('datetime').date.today().isoformat()
-            mp2.write_text(_json.dumps({'_meta': {'date': _today2,
+            mp2.write_text(_json.dumps({'_meta': {'date': _today2, 'account': 'DUTEST01',
                                                   'series': ['ESU26', 'MESU26']},
                                         'ESU26': {'init': 40000.0},
                                         'MESU26': {'init': 4500.0}}), encoding='utf-8')
             keepm = _os.environ.get('ADDFUT_MARGINS')
             keepr = _os.environ.get('ADDFUT_REGISTRY')
+            # ПИН ЗАДАЁТСЯ ЯВНО (правило 5 проекта): иначе _machine_pin() ушёл бы читать
+            # МАШИННЫЙ ~/.addfut/account.txt, и стенд начал бы зависеть от живого состояния.
+            keepa = _os.environ.get('ADDFUT_ACCOUNT')
+            _os.environ['ADDFUT_ACCOUNT'] = 'DUTEST01'
             _os.environ['ADDFUT_MARGINS'] = str(mp2)
             _os.environ['ADDFUT_REGISTRY'] = str(rp2)
             try:
@@ -2499,7 +2732,8 @@ def _tr_run(case):
                     legs2, TRN.plan_lots(legs2, 1e6), 1e6, reg2, 'F',
                     lim=TRN.unpaired_limit(legs2, 1e6))
             finally:
-                for k, v in (('ADDFUT_MARGINS', keepm), ('ADDFUT_REGISTRY', keepr)):
+                for k, v in (('ADDFUT_MARGINS', keepm), ('ADDFUT_REGISTRY', keepr),
+                             ('ADDFUT_ACCOUNT', keepa)):
                     _os.environ.pop(k, None)
                     if v is not None:
                         _os.environ[k] = v
@@ -2564,6 +2798,29 @@ def _tr_run(case):
     except Exception as ex:
         out['raised'] = True; out['error'] = f'{type(ex).__name__}: {ex}'
     return out
+
+
+@tinv('недобор компенсации не проходит в успешный переход',
+      needs=lambda r: r['case'] == 'компенсация исполнена не полностью')
+def _t_comp(r):
+    """ДВАДЦАТЫЙ КРУГ, №2. Прежде исполнение компенсации не сравнивалось с заказанным, а
+    допуск пары и финальной сверки был в ЦЕЛУЮ единицу цели — недостача ровно одного
+    контракта (около 1% NLV при минимальном размере перехода) доходила до COMPLETE и не
+    исправлялась ежедневной полосой 10%. Проверяется ПРИЧИНА: остановка по недостаче, а
+    не по лимиту или окну."""
+    return (r['raised']
+            and ('компенсаци' in r['error'] or 'не выровнена' in r['error'])
+            and ('исполнено' in r['error'] or 'половины единицы' in r['error']))
+
+
+@tinv('за краем общего окна LSE/CME заявка перехода не подаётся',
+      needs=lambda r: r['case'] == 'общее окно закрылось: заявка не подаётся')
+def _t_window(r):
+    """ДВАДЦАТЫЙ КРУГ, №7. Проверяются ПРИЧИНА и НОЛЬ ЗАЯВОК: остановка по любому другому
+    поводу (лимит 390, лимит §8б) защитой окна не является, а одна ушедшая заявка означает
+    непарную позицию на закрытой площадке."""
+    return (r['raised'] and 'окно LSE/CME закрыто' in r['error']
+            and not r.get('calls'))
 
 
 @tinv('план покрывает РОВНО все единицы источника',
@@ -2790,6 +3047,10 @@ ROLL_CASES = ('отложенный ролл через праздник', 'пе
               'смешанная книга: просрочена только Б',
               'откат ролла одной ноги Б: исправная А не уезжает',
               'смена упаковки Е-Ф: сделка без экспозиции',
+              'отказ §8 не перекладывает упаковку',
+              'две серии одной ноги при передаче книги',
+              'передача книги хранит пер-ножный ролл',
+              'resume перехода из другой сессии',
               'посторонняя позиция при передаче книги')
 
 
@@ -2876,6 +3137,54 @@ def _roll_seq(case):
             out['dec'] = dec
             out['orders'] = DL.book_to_orders(dec, b0)
             out['exp_same'] = (dec.book_after.n_e == b0.n_e and dec.book_after.n_b == b0.n_b)
+            out['cap0'] = cap0
+            out['cap_pack'] = dec.capital_after_costs
+        elif case == 'отказ §8 не перекладывает упаковку':
+            # ДВАДЦАТЫЙ КРУГ, №4: книга 100 MES (es_held=0), NLV ниже порога §8 (paper не
+            # выставлен) — наращивание запрещено, сокращение разрешено. Цель вдвое меньше,
+            # и честная заявка ровно одна: продать 50 MES. Прежде канон упаковки слал
+            # ПРОДАЖУ 90 MES и ПОКУПКУ 4 ES — покупка ровно на ветке отказа, а сбой второй
+            # заявки оставлял книгу резко недобранной.
+            b0 = DL.Book(d_fix=8.0, n_e=100, n_b=0, unit_is_mes=True, prev_st_eq=True,
+                         prev_st_bd=False, ser_a='U26', ser_b=None, es_held=0)
+            mkt = DL.Market(date=pd.Timestamp('2026-08-12'), px_eq_prev=600.0,
+                            dref_prev=8.0, dref_today=8.0, px_eq_today=600.0,
+                            roll_today=False, st_eq=True, st_bd=False, roll_passed=False)
+            dec = DL.step(b0, mkt, 50 * (DL.S.ES_MULT / 10) * 600.0)
+            out['dec'] = dec
+            out['orders'] = DL.book_to_orders(dec, b0)
+        elif case == 'передача книги хранит пер-ножный ролл':
+            # ДВАДЦАТЫЙ КРУГ, №11: bool('Б') давал True = «обе ноги», и после возврата
+            # Ф->Е->Ф исправная нога А уходила в дальнюю серию. Проверяется САМ перенос
+            # признака (carry_pending), а не его нормализация в book_from_broker.
+            import transition as _TRN
+            class _PB:
+                roll_pending = 'Б'
+            out['carry'] = _TRN.carry_pending(_PB())
+            out['carry_pusto'] = _TRN.carry_pending(None)
+        elif case == 'resume перехода из другой сессии':
+            # ДВАДЦАТЬ ПЕРВЫЙ КРУГ (защита двадцатого, №1): продолжение вчерашнего перехода
+            # шло бы по вчерашнему капиталу, лимиту §8б и ценам. ПРЕДЕЛ СТЕНДА назван
+            # честно: проверяется САМА защита, а не её вызов из _execute_locked — полный
+            # путь execute требует журнала МР с одобрением и живёт в selfcheck.
+            import transition as _TRN
+            out['chuzhaya'] = _TRN.resume_same_session({'asof': '2026-08-06'}, '2026-08-07')
+            out['svoya'] = _TRN.resume_same_session({'asof': '2026-08-07'}, '2026-08-07')
+        elif case == 'две серии одной ноги при передаче книги':
+            # ДВАДЦАТЫЙ КРУГ, №10: {'ZNU26': 1, 'ZNZ26': 100} превращалось в n_b=101
+            # ОДНОЙ произвольно выбранной серии — поставочный контракт исчезал из
+            # состояния, оставаясь у брокера, и переход мог получить COMPLETE.
+            try:
+                ST.book_from_broker(DL.Book, {'ZNU26': 1, 'ZNZ26': 100}, 'F')
+                out['merge_refused'] = False
+            except ValueError as ex:
+                out['merge_refused'] = 'несколько серий' in str(ex)
+            # законная пара ES+MES ОДНОЙ серии обязана строиться
+            try:
+                _bk = ST.book_from_broker(DL.Book, {'ESU26': 2, 'MESU26': 6}, 'F')
+                out['legit_ok'] = (_bk.n_e == 26 and _bk.ser_a == 'U26')
+            except Exception:
+                out['legit_ok'] = False
         elif case == 'посторонняя позиция при передаче книги':
             # ДЕВЯТНАДЦАТЫЙ КРУГ, №12: чужая позиция в снимке брокера не выбрасывается
             # молча при построении книги — она осталась бы неуправляемой навсегда.
@@ -2971,8 +3280,53 @@ def _rl8(r):
         return False
     sent = {i: q for i, q in (r.get('orders') or [])}
     grid = sum(q * (10 if i.startswith('ES') else 1) for i, q in sent.items())
+    # ДВАДЦАТЫЙ КРУГ, №3: перекладка — сделка, и её ИЗДЕРЖКИ обязаны быть списаны.
+    # 29 MES -> 2 ES + 9 MES это продажа 20 MES и покупка 2 ES: оборот 40 единиц сетки,
+    # 5 б.п. от номинала. Прежде capital_after_costs не менялся вовсе, и кап с плечом
+    # считались так, будто встречные заявки бесплатны.
+    _u = (DL.S.ES_MULT / 10) * 600.0
+    _want = r['cap0'] - DL.S.COST * 40 * _u
     return (d.trade and d.pack_change and bool(sent) and grid == 0
-            and r.get('exp_same') and d.book_after.es_held == 2)
+            and r.get('exp_same') and d.book_after.es_held == 2
+            and abs(r['cap_pack'] - _want) < 1e-9)
+
+
+@rlinv('передача книги сохраняет пер-ножный признак ролла',
+       needs=lambda r: r['case'] == 'передача книги хранит пер-ножный ролл')
+def _rl_carry(r):
+    """ДВАДЦАТЫЙ КРУГ, №11: 'Б' обязано остаться 'Б', а не стать True («обе ноги»)."""
+    return (not r['raised'] and r.get('carry') == 'Б' and r.get('carry_pusto') is False)
+
+
+@rlinv('resume перехода принимается только в своей сессии',
+       needs=lambda r: r['case'] == 'resume перехода из другой сессии')
+def _rl_resume(r):
+    """ДВАДЦАТЫЙ КРУГ, №1: чужая дата — отказ, своя — проход."""
+    return (not r['raised'] and r.get('chuzhaya') is False and r.get('svoya') is True)
+
+
+@rlinv('две серии одной ноги не складываются в выдуманную',
+       needs=lambda r: r['case'] == 'две серии одной ноги при передаче книги')
+def _rl_series(r):
+    """ДВАДЦАТЫЙ КРУГ, №10. Проверяется И отказ на смеси серий, И то, что законная пара
+    ES+MES одной серии по-прежнему строится: защита, запрещающая исправное, не защита."""
+    return (not r['raised'] and r.get('merge_refused') is True
+            and r.get('legit_ok') is True)
+
+
+@rlinv('отказ §8 не трогает упаковку: только продажа, без встречной покупки',
+       needs=lambda r: r['case'] == 'отказ §8 не перекладывает упаковку')
+def _rl_pack_ref(r):
+    """ДВАДЦАТЫЙ КРУГ, №4. Обещание «при отказе упаковка не трогается» стояло в
+    комментарии, а pack_es вызывался безусловно. Проверяется, что отказ ЕСТЬ, что заявок
+    на ПОКУПКУ нет ни одной и что es_held не изменился: иначе на ветке, где наращивание
+    запрещено, уходила бы покупка ES, а отказ второй заявки оставлял книгу недобранной."""
+    d = r.get('dec')
+    if r['raised'] or d is None:
+        return False
+    sent = dict(r.get('orders') or [])
+    return (bool(d.refusals) and sent == {'MESU26': -50}
+            and d.book_after.es_held == 0)
 
 
 @rlinv('посторонняя позиция не глотается при построении книги из позиций брокера',
@@ -3098,7 +3452,8 @@ def sginv(name, needs=None):
 
 
 SIG_CASES = ('дописывается новый месяц', 'источник разошёлся с историей',
-             'хвост месяца потерян', 'новых месяцев нет', 'уровни пересчитаны поставщиком',
+             'хвост месяца потерян', 'хвост ПРОМЕЖУТОЧНОГО месяца потерян',
+             'новых месяцев нет', 'уровни пересчитаны поставщиком',
              'сайдкар уровней отсутствует', 'сайдкар без столбца ноги',
              'сайдкар без общих месяцев', 'свежее закрытие завышено поставщиком',
              'свежее закрытие занижено за купонным потолком',
@@ -3126,6 +3481,12 @@ def _sig_run(case):
     if case == 'хвост месяца потерян':
         # последний бар июля отодвинут с последней сессии (31.07) на середину месяца
         bars[spy_id][-1] = ('2026-07-15', bars[spy_id][-1][1])
+    if case == 'хвост ПРОМЕЖУТОЧНОГО месяца потерян':
+        # ДВАДЦАТЫЙ КРУГ, №9: дыра не в последнем, а в ПРЕДпоследнем дописываемом месяце.
+        # Прежняя проверка смотрела только me.index[-1], и такой месяц входил в SMA
+        # нетронутым; TRADES и MIDPOINT его не ловят — тот же поставщик, та же дыра.
+        _d, _px = bars[spy_id][-2]
+        bars[spy_id][-2] = (f'{_d[:8]}15', _px)
     # СВЕЖИЙ МЕСЯЦ ПОД НЕЗАВИСИМЫМ СРЕЗОМ TRADES (шестнадцатый круг, №3): скорректированный
     # ряд портится ТОЛЬКО в последней точке — все прежние сверки (сайдкар, перекрытие) её
     # не видят по построению.
@@ -3253,6 +3614,15 @@ def _sg2(r):
     """Молча уехавший источник менял бы стратегию без единой ошибки — это главный денежный
     риск сигнального слоя."""
     return r['raised'] and 'РАЗОШЁЛСЯ' in r['error']
+
+
+@sginv('потерянный хвост ПРОМЕЖУТОЧНОГО месяца отвергается',
+       needs=lambda r: r['case'] == 'хвост ПРОМЕЖУТОЧНОГО месяца потерян')
+def _g_tail_mid(r):
+    """ДВАДЦАТЫЙ КРУГ, №9: проверялся только последний месяц решения, а дописываться может
+    до двенадцати сразу. Дыра в промежуточном входила в SMA целой — цена ошибки —
+    переключение целой ноги на величину порядка NLV."""
+    return r['raised'] and 'хвост месяца' in r['error']
 
 
 @sginv('потерянный хвост месяца отвергается',
@@ -3386,12 +3756,16 @@ def jinv(name, needs=None):
 
 
 J7_CASES = ('пометка исключения', 'счётчик итога расходится', 'пустая цена в живой строке',
-            'нечисловое наблюдение', 'ролловый номинал односторонний')
+            'нечисловое наблюдение', 'ролловый номинал односторонний',
+            'комиссия не пришла', 'нет строки ИТОГ', 'ролл без своих двадцати сессий')
 
 
-def _j7_row(date, inst, qty, po, pf, note='', leg='Б'):
+def _j7_row(date, inst, qty, po, pf, note='', leg='Б', commission='0'):
+    # КОМИССИЯ '0' И КОМИССИЯ '' — РАЗНОЕ (двадцатый круг, №18): ноль есть утверждение
+    # «сбора не было», пустое поле — «commissionReport не пришёл, расход неизвестен».
+    # Прежде фикстуры писали пустое, а сверка молча считала его нулём.
     return dict(date=date, leg=leg, instrument=inst, qty=qty, px_order=po, px_fill=pf,
-                commission='', reason='', nav='1000000.00', leverage='1.0',
+                commission=commission, reason='', nav='1000000.00', leverage='1.0',
                 roll_spread_near='', roll_spread_far='', note=note)
 
 
@@ -3433,6 +3807,34 @@ def _j7_run(case):
             J.append(jp, _j7_row('2026-08-04', 'ESU26', 1, '7000', ''))
             J.append(jp, _j7_row('2026-08-04', 'ИТОГ', 0, '-', '', note='итог сессии 4: строк 2'))
             out['res'] = J.reconcile(jp)
+        elif case == 'комиссия не пришла':
+            # ДВАДЦАТЫЙ КРУГ, №18: commissionReport задержался, поле пусто — расход
+            # неизвестен. Прежде он молча считался нулевым, и такие даты «доказывали»
+            # достаточность 5 б.п. на заниженных издержках.
+            J.append(jp, _j7_row('2026-08-06', 'ZNU26', 1, '100', '100.1', commission=''))
+            J.append(jp, _j7_row('2026-08-06', 'ИТОГ', 0, '-', '', note='итог сессии 6: строк 1'))
+            J.append(jp, _j7_row('2026-08-07', 'ZNU26', 1, '100', '100.1'))
+            J.append(jp, _j7_row('2026-08-07', 'ИТОГ', 0, '-', '', note='итог сессии 7: строк 1'))
+            out['res'] = J.reconcile(jp)
+        elif case == 'нет строки ИТОГ':
+            # ДВАДЦАТЫЙ КРУГ, №20: процесс упал после записи исполнений, но до итога.
+            # Цепочка хэшей валидна, дата выглядит полноценной — и входила в выборку.
+            J.append(jp, _j7_row('2026-08-08', 'ZNU26', 1, '100', '100.1'))
+            J.append(jp, _j7_row('2026-08-09', 'ZNU26', 1, '100', '100.1'))
+            J.append(jp, _j7_row('2026-08-09', 'ИТОГ', 0, '-', '', note='итог сессии 9: строк 1'))
+            out['res'] = J.reconcile(jp)
+        elif case == 'ролл без своих двадцати сессий':
+            # ДВАДЦАТЫЙ КРУГ, №19: двадцать ОБЫЧНЫХ дат плюс ОДИН ролл. Прежде порог
+            # проверялся по объединению классов, и единственный перенос получал
+            # полноценный вердикт против MODEL_ROLL_BP.
+            for i in range(20):
+                d = f'2026-06-{i + 1:02d}'
+                J.append(jp, _j7_row(d, 'ZNU26', 1, '100', '100.01'))
+                J.append(jp, _j7_row(d, 'ИТОГ', 0, '-', '', note=f'итог сессии {i + 1}: строк 1'))
+            J.append(jp, _j7_row('2026-06-25', 'ZNU26', -1, '100', '99.95', note='ролл'))
+            J.append(jp, _j7_row('2026-06-25', 'ZNZ26', 1, '100', '100.05', note='ролл'))
+            J.append(jp, _j7_row('2026-06-25', 'ИТОГ', 0, '-', '', note='итог сессии 21: строк 2'))
+            out['res'] = J.reconcile(jp)
         elif case == 'нечисловое наблюдение':
             J.append(jp, _j7_row('2026-08-05', 'ZNU26', 1, '100', 'nan'))
             J.append(jp, _j7_row('2026-08-05', 'ИТОГ', 0, '-', '', note='итог сессии 5: строк 1'))
@@ -3444,6 +3846,43 @@ def _j7_run(case):
     except Exception as ex:
         out['raised'] = True; out['error'] = f'{type(ex).__name__}: {ex}'
     return out
+
+
+@jinv('дата с неизвестной комиссией выходит из выборки §7',
+      needs=lambda r: r['case'] == 'комиссия не пришла')
+def _j_comm(r):
+    """ДВАДЦАТЫЙ КРУГ, №18: пустая комиссия — не нулевая. Дата с ней обязана быть названа
+    в excluded с причиной, а не тихо занижать измеренный расход."""
+    res = r.get('res')
+    return (not r['raised'] and res is not None
+            and '2026-08-06' in (res.get('excluded') or {})
+            and 'комисси' in (res.get('excluded') or {}).get('2026-08-06', '')
+            and res['n_sessions'] == 1)
+
+
+@jinv('дата без строки ИТОГ выходит из выборки §7',
+      needs=lambda r: r['case'] == 'нет строки ИТОГ')
+def _j_total(r):
+    """ДВАДЦАТЫЙ КРУГ, №20: проверялся только счётчик ВНУТРИ существующего итога, а его
+    отсутствие не значило ничего — при валидной цепочке хэшей дата шла в выборку."""
+    res = r.get('res')
+    return (not r['raised'] and res is not None
+            and '2026-08-08' in (res.get('excluded') or {})
+            and res['n_sessions'] == 1)
+
+
+@jinv('ролл не получает вердикт без своих двадцати сессий',
+      needs=lambda r: r['case'] == 'ролл без своих двадцати сессий')
+def _j_roll20(r):
+    """ДВАДЦАТЫЙ КРУГ, №19: порог двадцати проверялся по ОБЪЕДИНЕНИЮ классов, и один
+    перенос после двадцати обычных дат уже получал полноценный вердикт против
+    MODEL_ROLL_BP; счётчик при этом считал строки, а не ролловые сессии."""
+    res = r.get('res')
+    if r['raised'] or res is None:
+        return False
+    roll = res.get('roll') or {}
+    return (roll.get('n') == 1 and 'не делается' in str(roll.get('verdict'))
+            and 'ratio' not in roll)
 
 
 @jinv('пометка «исключить сессию» выводит дату из выборки §7',
@@ -3494,7 +3933,10 @@ def _j5(r):
     if r['raised'] or res is None:
         return False
     roll = res.get('roll') or {}
-    return roll.get('n') == 40 and abs(roll.get('bp', 0.0) - 10.0) < 0.2
+    # n — РОЛЛОВЫЕ СЕССИИ, а не строки (двадцатый круг, №19): двадцать переносов по две
+    # строки давали n=40 и выглядели вдвое более доказанными, чем есть.
+    return (roll.get('n') == 20 and roll.get('n_rows') == 40
+            and abs(roll.get('bp', 0.0) - 10.0) < 0.2)
 
 
 def run_j7():
@@ -3769,5 +4211,9 @@ if __name__ == '__main__':
         cases = jbad.get(name, [])
         print(f'[{"OK  " if not cases else "FAIL"}] {name}: '
               f'{f"ДЕРЖИТСЯ на {cov}" if not cases else f"НАРУШЕН: {cases}"}')
-    sys.exit(0 if not (bad or sbad or abad or ibad or fbad or rbad or tbad or lbad
-                       or gbad or fbad8 or jbad) else 1)
+    # --- ИНТЕРФЕЙС АДАПТЕРА против ЖИВОГО ib_insync (двадцатый круг, №15: замечание
+    # отклонено по факту, но класс «стенды доказывают стаб» признан).
+    print()
+    _iface_ok = check_ib_interface()
+    sys.exit(0 if (_iface_ok and not (bad or sbad or abad or ibad or fbad or rbad or tbad
+                                      or lbad or gbad or fbad8 or jbad)) else 1)

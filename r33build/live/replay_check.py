@@ -122,7 +122,40 @@ if __name__ == '__main__':
         # начальная серия — из календаря первого входа, смена — ровно на следующую
         # поставку цикла; упаковка — с ВЕРХНЕЙ границей остатка MES (es_held=0 при сотнях
         # MES прежде считалось «ЧИСТО»).
+        # КАЛЕНДАРЬ РОЛЛОВ ПЕРЕСЧИТЫВАЕТСЯ НЕЗАВИСИМО (двадцать первый круг, №19).
+        # Прежде даты роллов приходили из S.roll_days_calendar И в step, И в sim164, И в
+        # эту сверку — то есть три места брали ОДИН источник, и сдвиг всех роллов на
+        # неверную дату сохранял бы совпадение кодов и вердикт «ЧИСТО». Ни праздничная
+        # таблица, ни правило «за три сессии» этим не проверялись.
+        #
+        # Здесь календарь строится ЗАНОВО прямо из индекса сессий: последний торговый день
+        # фев/мая/авг/ноя минус ТРИ сессии. Индекс — факт рынка, а не наша функция.
         _rolls = S.roll_days_calendar(d[0])
+        _idx = d[0]
+        _nezav = set()
+        for _y in range(_idx[0].year, _idx[-1].year + 1):
+            for _m in (2, 5, 8, 11):
+                _mes = _idx[(_idx.year == _y) & (_idx.month == _m)]
+                if len(_mes) == 0:
+                    continue
+                _nm = _idx[_idx > _mes[-1]]
+                if len(_nm) == 0:
+                    continue          # месяц не завершён данными — ролла нет
+                _pos = _idx.get_loc(_mes[-1])
+                if _pos >= 3:
+                    _nezav.add(_idx[_pos - 3])
+        _cal_ok = (_nezav == _rolls)
+        # ЯКОРЬ ИЗ ВНЕШНЕГО ИСТОЧНИКА: 24.11.2026 — дата ноябрьского ролла по календарю
+        # CME/CBOT (праздник сдвигает с 25-го), записана в §1 спецификации ДО этой
+        # проверки. Совпадение двух наших вычислений её не доказывает — она проверяется
+        # отдельно и жёстко.
+        import pandas as _pdr
+        _yakor = _pdr.Timestamp('2026-11-24')
+        _yakor_ok = (_yakor not in set(_idx)) or (_yakor in _rolls)
+        print(f'  календарь роллов: независимый пересчёт '
+              f'{"совпал" if _cal_ok else "РАЗОШЁЛСЯ"} ({len(_rolls)} дат); '
+              f'якорь 24.11.2026 {"на месте" if _yakor_ok else "НЕ СОВПАЛ"}')
+        _cal_bad = 0 if (_cal_ok and _yakor_ok) else 1
         _ser_bad = _pack_bad = _pend_bad = 0
         _prev = None
         _first_seen = False
@@ -177,7 +210,7 @@ if __name__ == '__main__':
                 _pend_bad += 1
         print(f"  серии/упаковка/признак: {'ЧИСТО' if not (_ser_bad or _pack_bad or _pend_bad) else f'серии {_ser_bad}, упаковка {_pack_bad}, pending {_pend_bad}'}")
         ok &= bool(same_idx and close and same_pos
-                   and not (_ser_bad or _pack_bad or _pend_bad))
+                   and not (_ser_bad or _pack_bad or _pend_bad or _cal_bad))
 
     # --- маршрут Е: собственный контур против sim_etf ---
     from sim_etf import sim_etf as _se

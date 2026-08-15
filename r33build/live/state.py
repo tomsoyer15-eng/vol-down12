@@ -192,10 +192,31 @@ def load_intent(book_path):
     return rec['payload']
 
 
-def clear_intent(book_path):
+def clear_intent(book_path, archive=True):
+    """Снять намерение. ДОКАЗАТЕЛЬСТВО НЕ УНИЧТОЖАЕТСЯ (двадцатый круг, №16).
+
+    Прежде намерение просто удалялось. Разбор оборвавшегося запуска (daily._resume_intent)
+    при уже дописанной книге снимает его СРАЗУ, до сверки позиций и заявок с брокером, —
+    и если сверка потом находит ПОЗДНЕЕ ИСПОЛНЕНИЕ, файл с book_before, book_after и
+    списком заявок уже уничтожен. Именно он нужен, чтобы понять, какую компенсацию
+    подавать по О-5: журнал §7 и permId-отчёты говорят, что СЛУЧИЛОСЬ, но не то, что
+    НАМЕЧАЛОСЬ. Теперь файл переименовывается в intent-done-*, а не пропадает.
+    """
     p = intent_path(book_path)
     if p.exists():
-        p.unlink()
+        if archive:
+            # УНИКАЛЬНОЕ ИМЯ (двадцать первый круг, №17): секундной метки мало — два
+            # снятия в одну секунду затирали прежнее доказательство через os.replace.
+            import time as _t
+            base = f'{p.stem}-done-{int(_t.time())}'
+            dst = p.with_name(f'{base}{p.suffix}')
+            _k = 0
+            while dst.exists():
+                _k += 1
+                dst = p.with_name(f'{base}-{_k}{p.suffix}')
+            os.replace(str(p), str(dst))
+        else:
+            p.unlink()
         dfd = os.open(str(p.parent), os.O_DIRECTORY)
         try:
             os.fsync(dfd)
@@ -221,6 +242,24 @@ def expected_positions(book, route):
             if mes:
                 out[f'MES{book.ser_a}'] = mes
     return out
+
+
+def check_one_series(pos):
+    """У каждой ноги ровно одна серия (двадцатый круг, №10). Отдельной функцией — чтобы у
+    защиты была парная мутация, бьющая ровно в неё."""
+    _ser = {'А': set(), 'Б': set()}
+    for k in pos:
+        if k.startswith('MES'):
+            _ser['А'].add(k[3:])
+        elif k.startswith('ES'):
+            _ser['А'].add(k[2:])
+        elif k.startswith('ZN'):
+            _ser['Б'].add(k[2:])
+    for _leg, _ss in _ser.items():
+        if len(_ss) > 1:
+            raise ValueError(f'нога {_leg}: у брокера несколько серий {sorted(_ss)} — книга '
+                             f'не строится, суммировать их в одну серию значит потерять '
+                             f'поставочный контракт; ручной разбор (О-5)')
 
 
 def book_from_broker(cls, positions, route, *, ser_a=None, ser_b=None, unit_is_mes=True,
@@ -252,6 +291,14 @@ def book_from_broker(cls, positions, route, *, ser_a=None, ser_b=None, unit_is_m
         return cls(n_eq=pos.get('CSPX', 0), n_bd=pos.get('CBU0', 0),
                    prev_st_eq=st_eq, prev_st_bd=st_bd, roll_pending=_pend)
     es = mes = zn = 0
+    # НЕСКОЛЬКО СЕРИЙ ОДНОЙ НОГИ — ОТКАЗ, А НЕ СУММА (двадцатый круг, №10). Прежде
+    # {'ZNU26': 1, 'ZNZ26': 100} превращалось в n_b=101 ОДНОЙ произвольно выбранной серии
+    # (какая первой попалась в словаре), и старый ПОСТАВОЧНЫЙ контракт исчезал из
+    # машинного состояния, оставаясь у брокера: переход при этом мог получить COMPLETE.
+    # То же для ноги А, где ES и MES обязаны быть одной серии. Смешанное состояние
+    # законно лишь мгновение внутри ролла, а сюда книга попадает ПОСЛЕ перехода — значит
+    # это разбор вручную (О-5), а не арифметика.
+    check_one_series(pos)
     for k, v in pos.items():
         if k.startswith('MES'):
             mes += int(v); ser_a = ser_a or k[3:]

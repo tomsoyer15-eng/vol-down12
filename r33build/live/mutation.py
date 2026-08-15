@@ -901,7 +901,27 @@ def _run_mutations():
                 raise RuntimeError('якорь не виден в HEAD')
         return orig, patched, WA, '_git_commit_verified'
 
-    return [('книга после перехода пишется мимо контура', handover_wrong_path),
+    def pin_not_required():
+        """ДВАДЦАТЫЙ КРУГ, №5: торговый счёт не пинуется — адаптер берёт тот, что дал шлюз."""
+        import session as SS
+        return SS._account_pin, (lambda: None), '_account_pin'
+
+    def window_gate_off():
+        """ДВАДЦАТЫЙ КРУГ, №6: ворота торгового окна отключены — заявка уходит за краем
+        окна с tif=GTC и висит до чужой сессии."""
+        return (DL._window_gate, (lambda deadline, what='', margin_min=False: None),
+                DL, '_window_gate')
+
+    def rejected_archive_stays():
+        """ДВАДЦАТЫЙ КРУГ, №22: отвергнутый архив остаётся под рабочим именем, и им можно
+        восстановиться."""
+        import worm_anchor as WA
+        return WA.reject_archive, (lambda dst: ''), WA, 'reject_archive'
+
+    return [('пин торгового счёта не требуется', pin_not_required),
+            ('ворота торгового окна отключены', window_gate_off),
+            ('отвергнутый архив остаётся рабочим', rejected_archive_stays),
+            ('книга после перехода пишется мимо контура', handover_wrong_path),
             ('входная сверка книги отключена', no_reconcile),
             ('наблюдение подаёт заявки', dry_trades),
             ('ориентиры не снимаются', no_refs),
@@ -1077,7 +1097,28 @@ def _transition_mutations():
         orig = TRN._alarm_transition
         return orig, (lambda asof, reason: ''), '_alarm_transition'
 
-    return [('дробность источника не признаётся', no_frac),
+    def gate_no_window():
+        """ДВАДЦАТЫЙ КРУГ, №7: ворота заявки не смотрят на край общего окна LSE/CME —
+        переход, начатый перед границей, продолжает торговать на закрытой площадке."""
+        orig = TRN._order_gate
+
+        def patched(st, broker, fail, where='', window_till=None):
+            return orig(st, broker, fail, where=where, window_till=None)
+        return orig, patched, '_order_gate'
+
+    def comp_unchecked():
+        """ДВАДЦАТЫЙ КРУГ, №2: исполнение компенсации НЕ сверяется с заказанным (как было).
+        Недостача ровно одного контракта проходит и доходит до COMPLETE.
+
+        Мутируется именно сверка, а не допуск pair_tol: допуск — вторая линия, и в одиночку
+        он не наблюдаем (см. comp_fill_ok). Мутация, которую нельзя поймать, — не защита,
+        а самообман; про допуск сказано в §12 как о защите в глубину."""
+        return (TRN.compensation_ok,
+                (lambda filled, want, ostatok, dprice: ''), TRN, 'compensation_ok')
+
+    return [('край общего окна не проверяется', gate_no_window),
+            ('исполнение компенсации не сверяется', comp_unchecked),
+            ('дробность источника не признаётся', no_frac),
             ('лимит непарной дельты снят', limit_off),
             ('дробный остаток округляется вверх', round_up_tail),
             ('дробное исполнение фьючерса принимается', frac_fut_ok),
@@ -1224,7 +1265,51 @@ def _roll_mutations():
                        prev_st_eq=st_eq, prev_st_bd=st_bd, roll_pending=_pend)
         return orig, patched, ST, 'book_from_broker'
 
-    return [('просрочка одной ноги роллит обе', global_overdue),
+    def repack_on_refusal():
+        """ДВАДЦАТЫЙ КРУГ, №4: упаковка перекладывается и на ветке отказа §8 — уходит
+        встречная ПОКУПКА ES там, где наращивание запрещено."""
+        return (DL.keep_pack_on_refusal,
+                (lambda refusals, roll_a, b, n_e, es_after: es_after),
+                DL, 'keep_pack_on_refusal')
+
+    def repack_free():
+        """ДВАДЦАТЫЙ КРУГ, №3: смена упаковки не списывает издержек — кап и плечо
+        считаются так, будто встречные заявки бесплатны."""
+        return DL.repack_cost, (lambda grid, u_e: 0.0), DL, 'repack_cost'
+
+    def series_merged():
+        """ДВАДЦАТЫЙ КРУГ, №10: серии одного корня складываются в одну выдуманную —
+        поставочный контракт исчезает из состояния, оставаясь у брокера."""
+        import state as _ST
+        return _ST.check_one_series, (lambda pos: None), _ST, 'check_one_series'
+
+    def pending_to_bool():
+        """ДВАДЦАТЫЙ КРУГ, №11: пер-ножный признак приводится к bool — 'Б' становится
+        «обе ноги», и после возврата Ф->Е->Ф исправная нога А уходит в дальнюю серию."""
+        import sys as _s2
+        from pathlib import Path as _P2
+        _s2.path.insert(0, str(_P2(__file__).resolve().parent.parent))
+        import transition as _TRN2
+        return (_TRN2.carry_pending,
+                (lambda pb: bool(getattr(pb, 'roll_pending', False)) if pb else False),
+                _TRN2, 'carry_pending')
+
+    def resume_any_day():
+        """ДВАДЦАТЫЙ КРУГ, №1: resume принимается из ЛЮБОЙ сессии — продолжение идёт по
+        вчерашнему капиталу, вчерашнему лимиту §8б и вчерашним ценам."""
+        import sys as _s3
+        from pathlib import Path as _P3
+        _s3.path.insert(0, str(_P3(__file__).resolve().parent.parent))
+        import transition as _TRN3
+        return (_TRN3.resume_same_session, (lambda st, asof: True),
+                _TRN3, 'resume_same_session')
+
+    return [('пер-ножный ролл приводится к bool', pending_to_bool),
+            ('resume принимается из любой сессии', resume_any_day),
+            ('серии одного корня складываются', series_merged),
+            ('упаковка перекладывается при отказе §8', repack_on_refusal),
+            ('смена упаковки бесплатна', repack_free),
+            ('просрочка одной ноги роллит обе', global_overdue),
             ('roll_pending общий для ног', pending_global),
             ('смена упаковки не сделка', pack_not_trade),
             ('посторонняя позиция глотается', aliens_swallowed),
@@ -1318,7 +1403,18 @@ def _signal_mutations():
         orig = SU._verify_quotes
         return orig, (lambda ib, c, sym, mt, months, dur: None), '_verify_quotes'
 
-    return [('сверка уровней отключена', levels_off),
+    def tail_last_only():
+        """ДВАДЦАТЫЙ КРУГ, №9: календарный хвост проверяется ТОЛЬКО у последнего месяца —
+        дыра в промежуточном входит в SMA целой, а TRADES и MIDPOINT её не ловят: тот же
+        поставщик, та же дыра."""
+        orig = SU._verify_month_tail
+
+        def patched(sym, df, me, months=None):
+            return orig(sym, df, me, months=[me.index[-1]] if len(me) else [])
+        return orig, patched, '_verify_month_tail'
+
+    return [('хвост только у последнего месяца', tail_last_only),
+            ('сверка уровней отключена', levels_off),
             ('частичный сайдкар принимается', partial_ok),
             ('сверка свежего месяца отключена', fresh_off),
             ('срез котировок не сверяется', quotes_off),
@@ -1334,7 +1430,7 @@ def _j7_mutations():
     каждая воспроизводит поведение до правки."""
     import journal as J
 
-    def _excl(mark=True, counter=True, empty=True):
+    def _excl(mark=True, counter=True, empty=True, no_total=True, comm=True):
         import re as _re
 
         def patched(rows):
@@ -1355,6 +1451,15 @@ def _j7_mutations():
                 for r in data:
                     if r['qty'] and (not r['px_fill'] or not r['px_order']):
                         skip.setdefault(r['date'], 'пустая цена')
+            if no_total:                       # двадцатый круг, №20
+                _wt = {r['date'] for r in rows if r.get('instrument') == 'ИТОГ'}
+                for d in {r['date'] for r in data}:
+                    if d not in _wt:
+                        skip.setdefault(d, 'нет ИТОГ')
+            if comm:                           # двадцатый круг, №18
+                for r in data:
+                    if r['qty'] and not r['commission']:
+                        skip.setdefault(r['date'], 'комиссия неизвестна')
             return skip
         return patched
 
@@ -1388,7 +1493,39 @@ def _j7_mutations():
                         notional=notional, ratio=ratio, verdict=J._verdict(ratio))
         return orig, patched, '_roll_block'
 
+    def no_total_ok():
+        """Дата без строки ИТОГ считается полной (как было до двадцатого круга, №20)."""
+        return J._excluded_dates, _excl(no_total=False), '_excluded_dates'
+
+    def commission_zero():
+        """Пустая комиссия считается нулевой (как было до двадцатого круга, №18):
+        измеренный расход систематически занижен."""
+        return J._excluded_dates, _excl(comm=False), '_excluded_dates'
+
+    def threshold_union():
+        """Порог двадцати — по ОБЪЕДИНЕНИЮ классов, счёт по строкам (как было до
+        двадцатого круга, №19): единственный ролл получает полноценный вердикт."""
+        def patched(sub):
+            if not sub:
+                return dict(label='ролл', n=0, verdict='наблюдений нет')
+            bp2, _ = J._cost_bp(sub)
+            closes = [r for r in sub if float(r['qty']) < 0]
+            _, notional_one = J._cost_bp(closes)
+            if not notional_one:
+                _, notional_one = J._cost_bp(sub)
+                notional_one /= 2.0
+            loss = bp2 / 1e4 * J._cost_bp(sub)[1]
+            bp = loss / notional_one * 1e4 if notional_one else 0.0
+            ratio = bp / J.MODEL_ROLL_BP if J.MODEL_ROLL_BP else float('inf')
+            return dict(label='ролл', n=len(sub), n_rows=len(sub), bp=bp,
+                        model_bp=J.MODEL_ROLL_BP, notional=notional_one, ratio=ratio,
+                        verdict=J._verdict(ratio))
+        return J._roll_block, patched, '_roll_block'
+
     return [('пометки исключения не читаются', marks_unread),
+            ('дата без ИТОГ считается полной', no_total_ok),
+            ('пустая комиссия считается нулевой', commission_zero),
+            ('порог двадцати по объединению классов', threshold_union),
             ('счётчик итога не сверяется', counter_unchecked),
             ('пустые цены отбрасываются молча', empty_dropped_silently),
             ('NaN проходит арифметику', nan_passes),

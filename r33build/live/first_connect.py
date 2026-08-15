@@ -113,6 +113,36 @@ def tag_to_yyyymm(tag):
     return f'{y}{m:02d}'
 
 
+def _machine_pin():
+    """Пин торгового счёта: окружение либо account.txt в каталоге замка (двадцать первый
+    круг, №7). Прежде first_connect брал ADDFUT_ACCOUNT or managedAccounts()[0], а
+    автопилот его не запускает — то есть его process-local экспорт здесь ничего не
+    защищал: замер с ЧУЖОГО единственного счёта публиковался и потом разрешал переход на
+    правильном счёте по чужому house margin."""
+    import os as _o
+    v = (_o.environ.get('ADDFUT_ACCOUNT') or '').strip()
+    if v:
+        return v
+    try:
+        import state as _ST
+        return (_ST.lock_dir() / 'account.txt').read_text(encoding='utf-8').strip()
+    except OSError:
+        return ''
+
+
+def _pin_or_die(ib):
+    """Счёт замера ОБЯЗАН совпасть с пином. Без пина замер не снимается вовсе."""
+    pin = _machine_pin()
+    accts = ib.managedAccounts() or []
+    if not pin:
+        raise SystemExit('торговый счёт не пинован (нет ADDFUT_ACCOUNT и account.txt) — '
+                         'замер маржи не снимается: он мог бы описывать чужой счёт')
+    if accts and pin not in accts:
+        raise SystemExit(f'пин {pin} не среди managed {accts} — не тот шлюз, замер '
+                         f'не снимается')
+    return pin
+
+
 def main():
     sys.path.insert(0, str(ROOT / 'live')); sys.path.insert(0, str(ROOT / 'r33build'))
     sys.path.insert(0, str(ROOT / 'r33build' / 'live'))
@@ -205,7 +235,7 @@ def main():
         c = Contract(conId=r['con_id'], exchange=r['exchange'])
         ib.qualifyContracts(c)
         _o = MarketOrder('BUY', 1)
-        _acct = os.environ.get('ADDFUT_ACCOUNT') or (ib.managedAccounts() or [''])[0]
+        _acct = _pin_or_die(ib)
         _o.account = _acct                      # замер — на ПИНОВАННОМ счёте (№3)
         st = ib.whatIfOrder(c, _o)
         if st and st.initMarginChange:
@@ -241,8 +271,8 @@ def main():
     # ЗАМЕР ТОЛЬКО НА ЯВНОМ СЧЁТЕ (семнадцатый круг, №8): при нескольких managed accounts
     # молчаливый выбор первого публиковал маржу чужого счёта как живую.
     _accts = ib.managedAccounts() or []
-    if margins and not os.environ.get('ADDFUT_ACCOUNT') and len(_accts) > 1:
-        print(f'  счетов несколько ({_accts}), ADDFUT_ACCOUNT не задан — замер не публикуется')
+    if margins and not _machine_pin() and len(_accts) > 1:
+        print(f'  счетов несколько ({_accts}), пин не задан — замер не публикуется')
         margins = {}
     if margins:
         # ПРИВЯЗКА ЗАМЕРА (шестнадцатый круг, №4): дата, счёт и серии — без них старый

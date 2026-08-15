@@ -256,6 +256,24 @@ def _excluded_dates(rows):
     for r in data:
         if r['qty'] and (not r['px_fill'] or not r['px_order']):
             skip.setdefault(r['date'], 'строка исполнения без цены — сессия неполна')
+    # ОТСУТСТВИЕ СТРОКИ ИТОГ ДЕЛАЕТ ДАТУ НЕПОЛНОЙ (двадцатый круг, №20). Прежде
+    # проверялся только СЧЁТЧИК внутри существующего итога: процесс, упавший после записи
+    # исполнений, но до итога, оставлял валидную цепочку хэшей и дату, которую выборка §7
+    # считала полноценной. Маркер полноты был обязателен лишь для следующей торговли, но
+    # не для самого статистического доказательства.
+    _with_total = {r['date'] for r in rows if r.get('instrument') == 'ИТОГ'}
+    for d in {r['date'] for r in data}:
+        if d not in _with_total:
+            skip.setdefault(d, 'нет строки ИТОГ — сессия не закрыта, часть строк '
+                               'исполнения могла не записаться')
+    # ОТСУТСТВУЮЩАЯ КОМИССИЯ НЕ ЕСТЬ НУЛЕВАЯ (двадцатый круг, №18). _rec честно пишет
+    # commission='' , пока не пришёл commissionReport, но _cost_bp просто не прибавлял её —
+    # то есть считал нулём. Двадцать таких строк «доказали» бы достаточность 5 б.п. на
+    # систематически заниженных расходах; позднего дополнения append-only журнала нет.
+    for r in data:
+        if r['qty'] and not r['commission']:
+            skip.setdefault(r['date'], 'комиссия не пришла (commissionReport) — расход '
+                                       'занижен, дата не годится для сверки §7')
     return skip
 
 
@@ -277,6 +295,9 @@ def _roll_block(sub):
     мутацию (девятнадцатый круг, долг пар)."""
     if not sub:
         return dict(label='ролл', n=0, verdict='наблюдений нет')
+    # СЧЁТ — ПО РОЛЛОВЫМ СЕССИЯМ (двадцатый круг, №19): len(sub) считал строки, и один
+    # ролл из четырёх строк выглядел четырьмя наблюдениями.
+    _sess = {r['date'] for r in sub}
     bp2, _ = _cost_bp(sub)
     closes = [r for r in sub if float(r['qty']) < 0]
     _, notional_one = _cost_bp(closes)
@@ -285,8 +306,13 @@ def _roll_block(sub):
         notional_one /= 2.0
     loss = bp2 / 1e4 * _cost_bp(sub)[1]
     bp = loss / notional_one * 1e4 if notional_one else 0.0
+    if len(_sess) < MIN_OBS:
+        return dict(label='ролл', n=len(_sess), n_rows=len(sub), bp=bp,
+                    model_bp=MODEL_ROLL_BP, notional=notional_one,
+                    verdict=f'ролловых сессий {len(_sess)} из {MIN_OBS} — '
+                            f'вывод не делается')
     ratio = bp / MODEL_ROLL_BP if MODEL_ROLL_BP else float('inf')
-    return dict(label='ролл', n=len(sub), bp=bp, model_bp=MODEL_ROLL_BP,
+    return dict(label='ролл', n=len(_sess), n_rows=len(sub), bp=bp, model_bp=MODEL_ROLL_BP,
                 notional=notional_one, ratio=ratio, verdict=_verdict(ratio))
 
 
@@ -314,12 +340,26 @@ def reconcile(path):
                     verdict=f'сессий {len(sessions)} из {MIN_OBS} — вывод не делается')
 
     def block(sub, model_bp, label):
+        """ПОРОГ ДВАДЦАТИ — ПО СВОЕМУ КЛАССУ (двадцатый круг, №19).
+
+        Прежде порог проверялся по ОБЪЕДИНЕНИЮ классов и один раз: после двадцати обычных
+        торговых дат единственный ролл уже получал полноценный вердикт против
+        MODEL_ROLL_BP, а счётчик n считал СТРОКИ, а не различные ролловые сессии. Это
+        ложное доказательство параметра, а не ожидание накопления наблюдений; §8
+        отдельно признаёт, что сверка ролловых издержек ждёт двадцати РОЛЛОВ.
+        """
         if not sub:
             return dict(label=label, n=0, verdict='наблюдений нет')
+        _sess = {r['date'] for r in sub}
         bp, notional = _cost_bp(sub)
+        if len(_sess) < MIN_OBS:
+            return dict(label=label, n=len(_sess), n_rows=len(sub), bp=bp,
+                        model_bp=model_bp, notional=notional,
+                        verdict=f'сессий класса {len(_sess)} из {MIN_OBS} — '
+                                f'вывод не делается')
         ratio = bp / model_bp if model_bp else float('inf')
-        return dict(label=label, n=len(sub), bp=bp, model_bp=model_bp, notional=notional,
-                    ratio=ratio, verdict=_verdict(ratio))
+        return dict(label=label, n=len(_sess), n_rows=len(sub), bp=bp, model_bp=model_bp,
+                    notional=notional, ratio=ratio, verdict=_verdict(ratio))
 
     # КЛАСС СТОИМОСТИ — ТОЛЬКО ИЗ ПОМЕТКИ note, которую ставит разделение оборота.
     # Прежде слово искалось и в reason: в день ролла там всегда есть «ролл серии», и строка
