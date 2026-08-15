@@ -52,8 +52,19 @@ def refresh_manifest():
     return [l.split(None, 1)[1] for l in out if re.match(r'^[0-9a-f]{64}\s', l)]
 
 
+def _snapshot(names):
+    """Хэши упаковываемых файлов — чтобы поймать правку дерева ВО ВРЕМЯ выпуска."""
+    return {n: hashlib.sha256((R / n).read_bytes()).hexdigest() for n in names}
+
+
 def main():
     names = refresh_manifest()
+    # ДЕРЕВО НЕ ДОЛЖНО МЕНЯТЬСЯ ВО ВРЕМЯ ВЫПУСКА (инцидент 15.08). Прогон длится около
+    # часа; правка файла в это время НЕ ЛОМАЕТ selfcheck — он проверяет распакованный
+    # архив, — но корень доверия начинает указывать на пакет, которого в дереве уже нет.
+    # Обнаружить это можно было только сверкой хэшей вручную, что и произошло: пакет
+    # 93a2505b прошёл все проверки, не содержа правки, сделанной за минуту до конца.
+    _before = _snapshot(names)
     with zipfile.ZipFile(Z, 'w', zipfile.ZIP_DEFLATED) as f:
         for n in names + [MAN.name]:
             f.write(R / n, n)
@@ -111,6 +122,16 @@ def main():
     shutil.copy2(Z, keep)
     with open(rel / 'INDEX.txt', 'a', encoding='utf-8') as f:
         f.write(f'{stamp}  {h}  {keep.name}\n')
+    # СВЕРКА ДЕРЕВА ПЕРЕД ЗАПИСЬЮ КОРНЯ ДОВЕРИЯ: если файл изменился за время прогона,
+    # корень указал бы на архив, не соответствующий коду, — молча и без единой ошибки.
+    _after = _snapshot(names)
+    _moved = sorted(n for n in names if _before.get(n) != _after.get(n))
+    if _moved:
+        print(f'ВЫПУСК НЕ СОСТОЯЛСЯ: дерево изменилось ВО ВРЕМЯ прогона — {_moved[:6]}'
+              f'{" и ещё " + str(len(_moved) - 6) if len(_moved) > 6 else ""}. '
+              f'Архив проверен, но корень доверия указывал бы на устаревший пакет; '
+              f'повторить выпуск на неподвижном дереве.')
+        return 1
     (ROOT / 'docs/r33-sha256.txt').write_text(
         f'Корень доверия ADD-FUT v1.6.0 ред. 33\n\nАрхив {Z.name}\nSHA-256  {h}\n\n'
         f'Внутри — MANIFEST-192.txt на {len(names)} файлов: код, нормативный текст и ИСХОДНЫЕ РЯДЫ.\n'
