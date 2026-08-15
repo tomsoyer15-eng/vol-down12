@@ -300,7 +300,14 @@ class StubIB:
         class _T:
             pass
         t = _T()
-        q = getattr(self, 'quote_px', None)
+        # ПО УМОЛЧАНИЮ КОТИРОВКА ЕСТЬ, КАК НА БИРЖЕ (двадцать третий круг, №23): пустой
+        # снимок — исключение, а не норма, и фикстура, где его нет никогда, заставляла бы
+        # §7 всегда исключать строки из выборки. Берём последний бар инструмента; стенд
+        # запасного пути ставит quote_px=None явно.
+        q = getattr(self, 'quote_px', 'нет')
+        if q == 'нет':
+            _b = (self._bars or {}).get(getattr(contract, 'conId', 0)) or []
+            q = float(_b[-1][1]) if _b else None
         t.last = q if q is not None else float('nan')
         t.close = float('nan')
         t.bid = float('nan')

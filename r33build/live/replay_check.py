@@ -155,7 +155,31 @@ if __name__ == '__main__':
         print(f'  календарь роллов: независимый пересчёт '
               f'{"совпал" if _cal_ok else "РАЗОШЁЛСЯ"} ({len(_rolls)} дат); '
               f'якорь 24.11.2026 {"на месте" if _yakor_ok else "НЕ СОВПАЛ"}')
-        _cal_bad = 0 if (_cal_ok and _yakor_ok) else 1
+        # ЖИВОЙ ПУТЬ ПРОВЕРЯЕТСЯ ОТДЕЛЬНО (двадцать третий круг, №26). Прежде сверялись две
+        # НАШИ формулы по одному и тому же историческому индексу: живая праздничная таблица
+        # HOLIDAYS_CME, daily.is_roll_day() и путь feed -> Market.roll_today в доказательство
+        # не входили вовсе, и общий сдвиг роллов в покрытом году прошёл бы незамеченным.
+        # Здесь ЖИВАЯ функция гоняется по СВОЕЙ таблице и сверяется с пересчётом из индекса
+        # сессий на пересечении лет. Область пересечения объявляется вслух — молчаливой
+        # «полной независимости» тут нет и быть не может.
+        import daily as _DLr
+        _live_bad = []
+        _yrs = sorted({_y for _y in range(_idx[0].year, _idx[-1].year + 1)
+                       if _y in getattr(_DLr, 'HOLIDAYS_CME', {})})
+        for _y in _yrs:
+            try:
+                _hol = _DLr.holidays_for(_y)
+            except Exception as _ex:
+                _live_bad.append(f'{_y}: календарь недоступен ({_ex})')
+                continue
+            _ours = {d for d in _nezav if d.year == _y}
+            _theirs = {d for d in _idx[_idx.year == _y] if _DLr.is_roll_day(d, _hol)}
+            if _ours != _theirs:
+                _live_bad.append(f'{_y}: живая {sorted(map(str, _theirs))[:4]} против '
+                                 f'пересчёта {sorted(map(str, _ours))[:4]}')
+        print(f'  живой путь роллов: годы пересечения {_yrs or "нет"} — '
+              f'{"совпал" if not _live_bad else "РАЗОШЁЛСЯ: " + "; ".join(_live_bad)}')
+        _cal_bad = 0 if (_cal_ok and _yakor_ok and not _live_bad) else 1
         _ser_bad = _pack_bad = _pend_bad = 0
         _prev = None
         _first_seen = False

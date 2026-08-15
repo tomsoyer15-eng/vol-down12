@@ -530,7 +530,10 @@ def _intent_mutations():
     def no_intent():
         """Намерение не разбирается вовсе (как было)."""
         orig = DL._resume_intent
-        return orig, (lambda ST, bp, cls, route, book, sess, broker, dry: book)
+        # ПАРА, А НЕ КНИГА (двадцать третий круг, №25): одиночный Book ловился ошибкой
+        # распаковки у ВЫЗЫВАЮЩЕГО, то есть мутация доказывала несовместимость API, а не
+        # работу защиты намерения.
+        return orig, (lambda ST, bp, cls, route, book, sess, broker, dry: (book, None))
 
     def adopt_always():
         """Намеченная книга принимается ВСЕГДА, даже при промежуточной у брокера."""
@@ -538,7 +541,7 @@ def _intent_mutations():
         def patched(ST, bp, cls, route, book, sess, broker, dry):
             it = ST.load_intent(bp)
             if not it:
-                return book
+                return book, None
             after = cls(**it['book_after'])
             ST.save(bp, after, route, sess + 1, note='принято без сверки')
             ST.clear_intent(bp)
@@ -556,7 +559,7 @@ def _intent_mutations():
         orig = DL._resume_intent
         def patched(ST, bp, cls, route, book, sess, broker, dry):
             ST.clear_intent(bp)
-            return book
+            return book, None
         return orig, patched
 
     def snapshot_proves():
@@ -972,10 +975,14 @@ def _transition_mutations():
     def replay_done():
         """Завершённые лоты исполняются повторно: обрыв даёт ДВОЙНУЮ продажу."""
         orig = TRN._run_lots
+        # СИГНАТУРА СОВМЕСТИМА С БОЕВОЙ (двадцать третий круг, №25): без window_till
+        # боевой вызов падал TypeError, и «мутация поймана» означало крах вызова на
+        # ПОСТОРОННЕМ оконном сценарии, а не работу проверяемой защиты.
         def patched(broker, plan, st, state_path, lim, unp, dst_bought, fail,
-                    _M=None, journal=None):
+                    _M=None, journal=None, window_till=None):
             st = dict(st); st['done'] = []
-            return orig(broker, plan, st, state_path, lim, unp, dst_bought, fail, _M, journal)
+            return orig(broker, plan, st, state_path, lim, unp, dst_bought, fail, _M,
+                        journal, window_till)
         return orig, patched, '_run_lots'
 
     def no_frac():
@@ -1044,8 +1051,11 @@ def _transition_mutations():
         повтор продаёт лот целиком поверх уже исполненной части."""
         orig = TRN._run_lots
 
+        # СИГНАТУРА СОВМЕСТИМА С БОЕВОЙ (двадцать третий круг, №25): без window_till
+        # боевой вызов падал TypeError, и «мутация поймана» означало крах вызова на
+        # ПОСТОРОННЕМ оконном сценарии, а не работу проверяемой защиты.
         def patched(broker, plan, st, state_path, lim, unp, dst_bought, fail,
-                    _M=None, journal=None):
+                    _M=None, journal=None, window_till=None):
             st.pop('partial', None)
             return orig(broker, plan, st, state_path, lim, unp, dst_bought, fail,
                         _M, journal)
@@ -1056,8 +1066,11 @@ def _transition_mutations():
         круга, №2): лимит §8б считается свободным."""
         orig = TRN._run_lots
 
+        # СИГНАТУРА СОВМЕСТИМА С БОЕВОЙ (двадцать третий круг, №25): без window_till
+        # боевой вызов падал TypeError, и «мутация поймана» означало крах вызова на
+        # ПОСТОРОННЕМ оконном сценарии, а не работу проверяемой защиты.
         def patched(broker, plan, st, state_path, lim, unp, dst_bought, fail,
-                    _M=None, journal=None):
+                    _M=None, journal=None, window_till=None):
             for k in unp:
                 unp[k] = 0.0
             return orig(broker, plan, st, state_path, lim, unp, dst_bought, fail,
@@ -1069,9 +1082,9 @@ def _transition_mutations():
         покупка №391 и компенсации уходят брокеру без проверки."""
         orig = TRN._order_gate
 
-        def patched(st, broker, fail, where=''):
+        def patched(st, broker, fail, where='', window_till=None):   # №25
             if str(where).startswith('продажа'):
-                return orig(st, broker, fail, where)
+                return orig(st, broker, fail, where, window_till)
         return orig, patched, '_order_gate'
 
     def mapped_only():

@@ -182,7 +182,26 @@ def registry():
     reg = Path(os.environ.get('ADDFUT_REGISTRY') or (HERE / 'instruments_live.csv'))
     if not reg.exists():
         raise FeedError(f'нет реестра {reg}: сначала first_connect.py')
-    return {r['instrument']: r for r in csv.DictReader(open(reg, encoding='utf-8'))}
+    raw = reg.read_bytes()
+    out = {r['instrument']: r for r in csv.DictReader(raw.decode('utf-8').splitlines())}
+    # ОДНО ПОКОЛЕНИЕ РЕЕСТРА НА СЕССИЮ (двадцать третий круг, №21). Реестр читается в
+    # сессии ТРИЖДЫ: при создании IBBroker, в build_market и в reference_prices. Между
+    # чтениями first_connect может атомарно заменить файл — он не берёт ни книжного, ни
+    # сессионного замка. Тогда решение и ориентиры относятся к con_id поколения B, а
+    # заявка уходит по con_id поколения A; особенно опасна именно регенерация, ИСПРАВЛЯЮЩАЯ
+    # ошибочную серию или листинговую линию. Хэш первого чтения запоминается в процессе;
+    # смена содержимого внутри одного процесса — отказ, а не тихая склейка поколений.
+    import hashlib as _hl
+    _h = _hl.sha256(raw).hexdigest()
+    _prev = globals().get('_REG_PIN')
+    if _prev is None:
+        globals()['_REG_PIN'] = (str(reg), _h)
+    elif _prev != (str(reg), _h):
+        raise FeedError(
+            f'реестр {reg} ИЗМЕНИЛСЯ во время сессии (было {_prev[1][:12]}, стало '
+            f'{_h[:12]}): решение и заявка ушли бы по con_id разных поколений — '
+            f'сессия остановлена; перезапуск после завершения first_connect')
+    return out
 
 
 def contract_of(ib, name, reg=None):
@@ -240,7 +259,13 @@ def closes(ib, contract, today, expected_prev=None):
     if gap <= 0:
         raise FeedError(f'{contract.symbol}: последнее закрытие {d_prev:%d.%m.%Y} не раньше '
                         f'даты сессии {t:%d.%m.%Y} — источник опережает календарь')
-    if gap > MAX_BAR_GAP_D:
+    # ДОПУСК В КАЛЕНДАРНЫХ ДНЯХ — ТОЛЬКО КОГДА КАЛЕНДАРЬ НЕИЗВЕСТЕН (двадцать третий круг,
+    # №8). Плоские пять дней отвергали ПРАВИЛЬНЫЙ бар на длинных праздничных связках: для
+    # 29.12.2026 предыдущая европейская сессия — 23.12 (24, 25 и 28 декабря — праздники
+    # LSE/SIX, между ними выходные), разрыв ШЕСТЬ дней, и маршрут Е встал бы детерминированно
+    # ещё до сверки с expected_prev. Когда календарь известен (expected_prev задан), он и
+    # есть точная проверка — грубый допуск в этом случае не нужен и только мешает.
+    if expected_prev is None and gap > MAX_BAR_GAP_D:
         raise FeedError(f'[STALE_BAR] {contract.symbol}: последнее закрытие {d_prev:%d.%m.%Y}, '
                         f'это {gap} дней назад — источник отстал, сессия не считается')
     # ТОЧНАЯ ПРЕДЫДУЩАЯ СЕССИЯ, А НЕ ДОПУСК. Пятничный бар во вторник имеет возраст четыре

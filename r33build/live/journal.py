@@ -164,8 +164,14 @@ def rows_from_decision(dec, nav, orders, fills=None):
         leg = leg_of(instrument)
         ser = series_of(instrument)
         f = fills.get(instrument, {})
+        # ОРИЕНТИР НЕ КОТИРОВКА МОМЕНТА — СТРОКА НЕ ГОДИТСЯ ДЛЯ ИЗДЕРЖЕК (№23). Снимок мог
+        # не удаться либо отдать только close (то есть ВЧЕРАШНЕЕ закрытие). Молча считать
+        # такую разницу проскальзыванием значит записывать ночной гэп в торговые издержки —
+        # ровно то ложное доказательство, из-за которого 5 б.п. «сходились».
+        _po_live = f.get('px_order_live', True)
         base = dict(date=dec.date.strftime('%Y-%m-%d'), leg=leg,
-                    px_order=f.get('px_order', ''), px_fill=f.get('px_fill', ''),
+                    px_order=(f.get('px_order', '') if _po_live else ''),
+                    px_fill=f.get('px_fill', ''),
                     reason='; '.join(dec.reasons), nav=f'{nav:.2f}',
                     leverage=f'{dec.leverage:.4f}',
                     roll_spread_near=f.get('roll_near', ''),

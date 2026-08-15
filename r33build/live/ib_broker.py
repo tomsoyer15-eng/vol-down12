@@ -32,7 +32,8 @@ SETTLE_S = 8.0        # сколько ждать разноски сделок 
 # Прежняя проверка совпадения интерфейса сверяла только ИМЕНА ПАРАМЕТРОВ и пропустила
 # расхождение возвращаемого значения: адаптер отдавал число, контур звал у него .get и
 # падал на первой же живой заявке. Набор полей теперь объявлен и сверяется с макетом.
-REC_KEYS = ('order_id', 'instrument', 'qty', 'filled', 'px_order', 'px_fill', 'commission')
+REC_KEYS = ('order_id', 'instrument', 'qty', 'filled', 'px_order', 'px_fill',
+            'px_order_live', 'commission')      # №23: ориентир — котировка момента?
 
 # СТАТУС ЗАЯВКИ НЕ РАВЕН ФАКТУ ИСПОЛНЕНИЯ. Проверено на бумажном счёте 12.08.2026: заявка
 # на 2 ES получила предупреждение 10349 («TIF выставлен в DAY пресетом счёта»), была
@@ -365,6 +366,7 @@ class IBBroker:
                 comm += float(cr.commission or 0)
         rec = dict(order_id=tr.order.orderId, instrument=instrument, qty=qty, filled=filled,
                    px_order=px_order, px_fill=px_fill,
+                   px_order_live=bool(getattr(self, '_px_live', False)),   # №23
                    commission=(comm if comm_ok else ''),
                    status=tr.orderStatus.status)
         if abs(filled - qty) > 1e-9:
@@ -387,22 +389,32 @@ class IBBroker:
         try:
             t = self.ib.reqMktData(self._contract(instrument), '', True, False)
             self.ib.sleep(2.0)
-            for v in (t.last, t.close, (t.bid + t.ask) / 2 if (t.bid and t.ask) else None):
+            # ПОРЯДОК ИСТОЧНИКОВ ЧЕСТНЫЙ (двадцать третий круг, №23): t.close у снимка —
+            # это ОБЫЧНО ПРЕДЫДУЩЕЕ ЗАКРЫТИЕ, то есть ровно то, от чего мы уходим. Он
+            # проверялся ВТОРЫМ, раньше mid, и §7 снова считал ночной гэп издержками.
+            # Теперь: last -> mid(bid,ask) -> и только потом close, причём close помечается
+            # как НЕ котировка момента.
+            _mid = (t.bid + t.ask) / 2 if (t.bid and t.ask) else None
+            for v, live in ((t.last, True), (_mid, True), (t.close, False)):
                 v = float(v) if v is not None else float('nan')
                 if v == v and v > 0:
-                    return v
+                    return v, live
         except Exception:
             pass
-        return None
+        return None, False
 
     def place(self, instrument, qty, px_order=None):
         from ib_insync import MarketOrder
         if not qty:
             raise BrokerError(f'{instrument}: нулевая заявка')
-        # ориентир момента заявки; вчерашнее закрытие — только запасной путь (№20)
-        _q_ref = self._quote_ref(instrument)
+        # ориентир момента заявки; вчерашнее закрытие — только запасной путь (№20).
+        # ПОМЕТКА ЧЕСТНОСТИ (№23): если ориентир НЕ котировка момента (снимок не удался
+        # либо отдал только close), запись несёт px_order_live=False, и §7 обязан
+        # исключить строку из выборки издержек, а не выдавать гэп за проскальзывание.
+        _q_ref, _q_live = self._quote_ref(instrument)
         if _q_ref is not None:
             px_order = _q_ref
+        self._px_live = bool(_q_ref is not None and _q_live)
         # ДРОБНЫЕ ДОЛИ ФОНДОВ НЕ УСЕКАЮТСЯ. abs(int(qty)) превращал 100,5 в 100, а 0,5 — в
         # НУЛЕВУЮ заявку, уже прошедшую проверку «if not qty»: весь код выше специально
         # хранит дроби, а адаптер уничтожал их на последнем шаге (маршрут Е).
@@ -495,6 +507,33 @@ class IBBroker:
                         return dict(terminal=True, cancelled=bool(not done),
                                     status=t.orderStatus.status, filled=done)
                 raise BrokerError(f'заявка {oid}: снятие не подтверждено за 30 с')
+        # ЗАЯВКИ НЕТ В openTrades — ЭТО НЕ «ОТМЕНЕНА» (двадцать третий круг, №13). Она
+        # могла ИСПОЛНИТЬСЯ между open_orders() и cancel_order(); прежний ответ
+        # (terminal=True, cancelled=True, filled=0) означал «ничего не произошло», и при
+        # устойчиво старом снимке позиций переход писал ABORT вместо MIXED, а ежедневное
+        # восстановление объявляло книгу исходной. Исход выясняется по ОТЧЁТАМ ИСПОЛНЕНИЯ
+        # (правило 7 проекта: статус заявки ≠ факт), и только пустой отчёт даёт «отсутствует».
+        _done = 0.0
+        try:
+            for f in self.ib.fills():
+                _ex = getattr(f, 'execution', None)
+                if _ex is None:
+                    continue
+                if int(getattr(_ex, 'orderId', -1)) != want_oid:
+                    continue
+                if want_cid is not None and int(getattr(_ex, 'clientId', -1)) != want_cid:
+                    continue
+                _acct = getattr(_ex, 'acctNumber', '') or ''
+                if self.account and _acct and _acct != self.account:
+                    continue
+                _done += abs(float(getattr(_ex, 'shares', 0) or 0))
+        except Exception as ex:
+            raise BrokerError(f'заявка {oid} исчезла из openTrades, а отчёты исполнения '
+                              f'недоступны ({ex}) — исход неизвестен, объявлять отменённой '
+                              f'нельзя (правило 7)')
+        if _done:
+            return dict(terminal=True, cancelled=False, status='исполнена до отмены',
+                        filled=_done)
         return dict(terminal=True, cancelled=True, status='отсутствует', filled=0.0)
 
 

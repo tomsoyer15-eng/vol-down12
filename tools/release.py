@@ -6,7 +6,7 @@
 исходных рядов data/*.csv внутри не было. Строка «ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ» имеет смысл только
 если получена на РАСПАКОВАННОМ архиве, где недостающий файл неоткуда подхватить.
 """
-import hashlib, re, shutil, subprocess, sys, tempfile, zipfile
+import hashlib, os, re, shutil, subprocess, sys, tempfile, zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -89,7 +89,12 @@ def main():
         if bad:
             sys.exit('ВЫПУСК НЕ СОСТОЯЛСЯ: архив расходится с манифестом ДО запуска '
                      'проверяющего: ' + '; '.join(bad[:6]))
-        r = subprocess.run([str(PY), 'selfcheck_v192.py'], cwd=t, capture_output=True, text=True)
+        # ОКРУЖЕНИЕ ПРОВЕРЯЮЩЕГО ЧИСТИТСЯ (двадцать третий круг, №11): унаследованный
+        # ADDFUT_BOOK_PATH или ADDFUT_DIR увёл бы стенды на ЖИВЫЕ пути, и lstat-снимок
+        # ~/.addfut этого не заметил бы — он сторожит каталог, а не переопределение.
+        _env = {k: v for k, v in os.environ.items() if not k.startswith('ADDFUT_')}
+        r = subprocess.run([str(PY), 'selfcheck_v192.py'], cwd=t, capture_output=True,
+                           text=True, env=_env)
         tail = (r.stdout or r.stderr).strip().splitlines()[-1:]
     ok = r.returncode == 0 and 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' in (r.stdout or '')
     print(f'{Z.name}: {len(names) + 1} файлов, {Z.stat().st_size / 1048576:.2f} МБ')

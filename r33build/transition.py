@@ -95,9 +95,18 @@ def _live_margins():
     cand = _os.environ.get('ADDFUT_MARGINS')
     p = _P(cand) if cand else _P(__file__).resolve().parent / 'live' / 'margins_live.json'
     if not p.exists():
-        # Файла нет (свежая машина, стенды): константы — ЯВНЫЙ запасной путь, о нём говорит
-        # вызывающий в причинах. Битый или пустой файл — ДРУГОЕ: это сломанный замер.
-        return {}
+        # ОТСУТСТВИЕ ЗАМЕРА — ОТКАЗ, А НЕ КОНСТАНТЫ (двадцать третий круг, №5). Прежде
+        # «файла нет» молча включало модельные константы, и это давало ИЗВРАЩЁННЫЙ стимул:
+        # НЕПОЛНЫЙ замер блокирует переход воротами серий, а УДАЛЁННЫЙ — открывает его.
+        # Достаточно было переименовать margins_live.json, чтобы обойти обязательное живое
+        # измерение и пойти по фиктивному запасу при повышенном house-требовании.
+        # Стендам и свежей машине — явная калитка, как у даты перехода (№1).
+        import os as _os2
+        if _os2.environ.get('ADDFUT_MARGINS_CONST_OK') == '1':
+            return {}
+        raise Incident(f'{p}: замера маржи нет — переход по модельным константам запрещён '
+                       f'(house-требование может быть выше, запас оказался бы фиктивным). '
+                       f'Запустить first_connect; стендам — ADDFUT_MARGINS_CONST_OK=1')
     raw_text = p.read_text(encoding='utf-8')
     try:
         raw = _json.loads(raw_text)
@@ -668,7 +677,19 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
                 f'капитал перехода ${float(capital):,.0f} расходится с NLV брокера '
                 f'${_nlv:,.0f} более чем на {CAPITAL_TOL:.0%}: по нему считаются лимит '
                 f'§8б, маржа и число долей цели — исполнение запрещено')
-    lim = unpaired_limit(legs, capital, grant_limit)
+    # ВОРОТА СЧИТАЮТСЯ ОТ МЕНЬШЕГО ИЗ ДВУХ ЧИСЕЛ (двадцать третий круг, №4). Допуск 2%
+    # проверяет БЛИЗОСТЬ, но все ворота дальше считались по числу ВЫЗЫВАЮЩЕГО, а оно может
+    # быть выше фактического NLV на весь допуск. Два денежных пути: (а) порог §8 проверен
+    # на строке выше по capital — при фактических $2,95 млн и переданных $3,008 млн вход в
+    # Ф проходил, хотя счёт НИЖЕ жёсткого порога; (б) лимит непарной дельты при NLV $10 млн
+    # и capital $10,19 млн становился 1,019% ФАКТИЧЕСКОГО счёта вместо 1%.
+    _cap_eff = min(float(capital), _nlv)
+    if to_route == 'F' and _cap_eff < MIN_NLV_F and not emergency:
+        raise Incident(
+            f'NLV брокера ${_nlv:,.0f} ниже порога маршрута Ф ${MIN_NLV_F:,.0f} (§8) — '
+            f'переданный капитал ${float(capital):,.0f} прошёл проверку порога только '
+            f'за счёт допуска {CAPITAL_TOL:.0%}; требуется решение заказчика')
+    lim = unpaired_limit(legs, _cap_eff, grant_limit)
     for name, spec in legs.items():                            # хвост кванта цели допустим только в пределах лимита
         dp = spec['dst'][1]
         for instr, units, u in spec['src']:
@@ -682,6 +703,24 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
     def hook(kind):
         return _M.confirm_transition(journal, mr_state, asof, to_route, kind=kind,
                                      tid=tid, sid=signal_id) is True
+
+    def _mixed(reason=''):
+        """MIXED + ФАЙЛ ТРЕВОГИ, ВСЕГДА (двадцать третий круг, №14). Утверждение «любой
+        MIXED ставит ALARM» было неверным: _alarm_transition() звался только из fail(),
+        а hook('mixed') писался напрямую ещё в семи местах — сбой open_orders до preview
+        на resume, обрыв отмены, исключение preview после возможного изменения книги,
+        превышение остатка resume. Автопилот журнал МР НЕ читает, поэтому после
+        освобождения книжного замка он мог продолжить торговлю поверх разорванной позиции.
+        Падение самого hook тоже не должно съедать тревогу — файл ставится в любом случае.
+        """
+        try:
+            _ok = hook('mixed')
+        except Exception as _ex:
+            _alarm_transition(asof, f'MIXED, но журнал МР его не принял ({_ex!r}): {reason}')
+            raise
+        _alarm_transition(asof, f'переход {from_route}->{to_route} в MIXED: {reason}'[:400])
+        return _ok
+
 
     if os.path.exists(state_path):
         st = json.load(open(state_path))
@@ -721,16 +760,16 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         try:
             _pre_open = list(broker.open_orders())
         except Exception as ex:
-            hook('mixed'); _atomic(state_path, st)
+            _mixed('исход не разобран'); _atomic(state_path, st)
             raise Incident(f'resume: запрос заявок до preview не выполнен ({ex}) — MIXED')
         for _oid in _pre_open:
             try:
                 _r = broker.cancel_order(_oid)
             except Exception as ex:
-                hook('mixed'); _atomic(state_path, st)
+                _mixed('исход не разобран'); _atomic(state_path, st)
                 raise Incident(f'resume: отмена {_oid} до preview оборвана ({ex}) — MIXED')
             if not (_r is True or (isinstance(_r, dict) and _r.get('terminal'))):
-                hook('mixed'); _atomic(state_path, st)
+                _mixed('исход не разобран'); _atomic(state_path, st)
                 raise Incident(f'resume: отмена {_oid} до preview не подтверждена — MIXED')
             # ОТМЕНА ЗАСТАЛА ИСПОЛНЕНИЕ (девятнадцатый круг, №11): filled терминального
             # ответа — состоявшаяся сделка; книга уже изменилась, и дальнейший исход
@@ -750,7 +789,7 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
     except Exception as ex:
         if resume or st.get('opened') or st.get('executed_usd', 0.0) > TOL \
                 or st.get('cancel_fills'):
-            hook('mixed'); _atomic(state_path, st)
+            _mixed('исход не разобран'); _atomic(state_path, st)
             raise Incident(f'margin preview оборван ({ex}) при возможно изменённой книге — '
                            f'состояние MIXED, ручная сверка')
         raise Incident(f'margin preview оборван ({ex}) — переход не начат')
@@ -760,7 +799,7 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
             if st['executed_usd'] > TOL or st.get('cancel_fills'):
                 # cancel_fills (№11): исполнение, пойманное отменой, — прогресс; прежний
                 # критерий по одному executed_usd писал бы ЛОЖНЫЙ ABORT при изменённой книге.
-                hook('mixed')
+                _mixed('исход не разобран')
             else:
                 hook('open'); hook('abort')                    # честная пара OPEN+ABORT, pending снимается строго
             raise Incident('margin preview отклонён три раза — инцидент')
@@ -795,7 +834,9 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
                 raise Incident(f'{instr}: позиция класса источника ({qty}) вне плана — книга не переводится целиком')
             if reg[instr]['sec_type'] == want_cls:
                 raise Incident(f'{instr}: предсуществующая позиция класса цели ({qty}) до перехода — требуется разбор')
-    mo = preflight_margin_orders(legs, plan, capital, reg, to_route, lim=lim)   # ред. 32: маржа и заявки ДО открытия
+    # ЗАПАС СЧИТАЕТСЯ ОТ ФАКТИЧЕСКОГО СЧЁТА (№4): cushion = capital/margin, и завышенный
+    # на допуск capital давал завышенный запас — те же ворота О-3 по фиктивному числу.
+    mo = preflight_margin_orders(legs, plan, _cap_eff, reg, to_route, lim=lim)   # ред. 32: маржа и заявки ДО открытия
     st['preflight'] = {k: mo[k] for k in ('margin_usd', 'cushion', 'orders', 'orders_max')}
     _atomic(state_path, st)
     # КРАЙ ОБЩЕГО ОКНА — ДО ЗАПИСИ OPEN (двадцатый круг, №7; двадцать второй, №15).
@@ -856,7 +897,9 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         kind = 'mixed' if (stuck or st['executed_usd'] > TOL or moved > 0
                            or st.get('cancel_fills')) else 'abort'
         try:
-            ok = hook(kind)
+            # MIXED идёт через _mixed: тревога-файл ставится и когда журнал МР ПАДАЕТ,
+            # и когда он отвергает запись (№14) — автопилот журнала не читает вовсе.
+            ok = _mixed(msg[:200]) if kind == 'mixed' else hook(kind)
         except Exception as ex:
             _atomic(state_path, st)
             raise Incident(msg + f' | КРИТИЧНО: запись {kind.upper()} в журнал провалилась ({ex!r}) — немедленная ручная сверка книги и журнала')
@@ -869,8 +912,7 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         # исполнение до handover) жил только в журнале МР, который автопилот НЕ читает:
         # после освобождения замка книги дневной контур мог подать заявки поверх позднего
         # исполнения при устойчиво старом снимке позиций у брокера.
-        if kind == 'mixed':
-            msg += _alarm_transition(asof, f'переход {from_route}->{to_route} в MIXED: {msg[:200]}')
+        # тревога уже поставлена внутри _mixed (№14) — второй раз не ставим
         raise Incident(msg)
 
     resume_unp = {}
@@ -945,7 +987,7 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
             total_unp += diff; total_abs += abs(diff)
             resume_unp[name] = diff
         if total_abs > lim + TOL:
-            hook('mixed'); _atomic(state_path, st)
+            _mixed('исход не разобран'); _atomic(state_path, st)
             raise Incident('восстановление: |непарная| выше предела — состояние MIXED, ручная сверка')
         st['done'] = []
         st['partial'] = {}
@@ -1043,10 +1085,24 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
     # контура: два источника истины расходились НАВСЕГДА, потому что COMPLETE повторно не
     # пишется. Теперь при неудаче передачи COMPLETE не фиксируется вовсе, и переход
     # остаётся незавершённым — состояние, из которого есть штатный выход.
+    # БЕСШУМНОЕ ОКНО МЕЖДУ КНИГОЙ И COMPLETE ЗАКРЫТО (двадцать третий круг, №15).
+    # hand_over_book пишет целевую книгу и route.txt, и только ПОСЛЕ возврата ставится
+    # hook('complete'). Убийство процесса в этом окне не выполняло ни одной ветки: брокер,
+    # книга и route.txt уже согласованы, ежедневная сверка проходила и торговля шла дальше,
+    # хотя нормативный журнал навсегда оставался в TRANSITION_OPEN. Метка на диске ставится
+    # ДО передачи и снимается только после COMPLETE; входной барьер контура её видит.
+    _hoflag = _ST2_flag = None
+    try:
+        import state as _ST3
+        _hoflag = _ST3.lock_dir() / f'handover-inflight-{to_route}.txt'
+        _hoflag.write_text(f'{asof} tid={tid} {from_route}->{to_route}: книга передаётся, '
+                           f'COMPLETE ещё не записан\n', encoding='utf-8')
+    except Exception:
+        _hoflag = None
     try:
         hand_over_book(broker, from_route, to_route, positions=now)
     except Exception as _ex:
-        hook('mixed')
+        _mixed('исход не разобран')
         # ТРЕВОГА ФАЙЛОМ (девятнадцатый круг, №13): публикация могла пройти ЧАСТИЧНО
         # (книга записана, route.txt — нет); автопилот журнал МР не читает — без файла
         # он продолжил бы торговать при MIXED в нормативном журнале.
@@ -1055,7 +1111,7 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         raise Incident(f'книга НЕ передана ежедневному контуру ({_ex}); COMPLETE НЕ записан, '
                        f'переход остаётся незавершённым — состояние MIXED, ручная сверка{_al}')
     if not hook('complete'):
-        hook('mixed')
+        _mixed('исход не разобран')
         # route.txt И КНИГА УЖЕ ОПУБЛИКОВАНЫ (девятнадцатый круг, №13): ежедневный контур
         # видит согласованное состояние и торговал бы дальше, пока нормативный журнал МР
         # говорит MIXED. Автопилот читает только ~/.addfut/ALARM-* — тревога ставится ТУТ.
@@ -1064,6 +1120,12 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
                                       f'книги и route.txt — состояние MIXED')
         raise Incident('журнал отклонил COMPLETE — книга переведена, состояние MIXED, '
                        'ручная сверка' + _al)
+    # МЕТКА ПЕРЕДАЧИ СНИМАЕТСЯ ТОЛЬКО ЗДЕСЬ — после принятого COMPLETE (№15).
+    if _hoflag is not None:
+        try:
+            _hoflag.unlink()
+        except FileNotFoundError:
+            pass
     # СУММА МОДУЛЕЙ И ЗДЕСЬ (двадцать второй круг, №19): отчёт со знаковой суммой при
     # остатках +$49k/-$49k показывал unpaired_usd=0 — ложное доказательство полного
     # спаривания, хотя это два разных риска и полоса 10% может не исправить ни один.
@@ -1182,6 +1244,25 @@ def hand_over_book(broker, from_route, to_route, positions=None):
             f'd_fix не восстановлен (старой книги Ф нет, живой доходности у брокера нет), '
             f'а нога Б у брокера живая ({_zn_live:+g} ZN) — передача книги с d_fix=0 '
             f'дала бы ложное плечо закрытия; ручной разбор (О-5)')
+    # СЕРИЯ ОБЯЗАТЕЛЬНА ДЛЯ ЖИВОЙ НОГИ (двадцать третий круг, №7). book_from_broker берёт
+    # серию СРЕЗОМ имени ('MESU26' -> 'U26'), и для ГОЛОГО 'MES'/'ZN' она выходит пустой.
+    # Ноги перехода набирает ОПЕРАТОР РУКАМИ — живого вызывающего у execute() нет вовсе, —
+    # а весь выпускной набор ходит голыми именами, поэтому путь не проверялся ни разу.
+    # Книга без серии не роллируется и падает на пустом теге уже ПОСЛЕ движения денег.
+    if to_route == 'F':
+        def _ser_of(k):                    # ТА ЖЕ логика, что у state.book_from_broker
+            k = str(k)
+            if k.startswith('MES'): return k[3:]
+            if k.startswith('ES'):  return k[2:]
+            if k.startswith('ZN'):  return k[2:]
+            return None
+        _bad_ser = sorted({k for k, v in (_pos_src or {}).items()
+                           if float(v or 0) and _ser_of(k) == ''})
+        if _bad_ser:
+            raise RuntimeError(
+                f'позиции {_bad_ser} без серии контракта: книга Ф получила бы пустой '
+                f'ser_a/ser_b, не смогла бы роллироваться и встала бы перед поставкой. '
+                f'Ноги перехода задавать ПОЛНЫМИ именами (MESU26, ZNZ26), ручной разбор')
     _bk = _ST2.book_from_broker(_cls, _pos_src, to_route,
                                 roll_pending=_prev_pending, d_fix=_dfx,
                                 st_eq=_st_eq, st_bd=_st_bd)
@@ -1214,7 +1295,32 @@ def hand_over_book(broker, from_route, to_route, positions=None):
     try:
         import journal as _J2
         _jp2 = _ST2.lock_dir() / f'journal-{to_route}.csv'
-        if not _J2.read(_jp2):
+        # НАМЕРЕНИЕ СТАРОЙ ЭПОХИ ЦЕЛЕВОГО МАРШРУТА (двадцать третий круг, №9). Перед
+        # записью book-{to_route}.json никто не смотрел на book-{to_route}.json.intent.json.
+        # После COMPLETE первый же run_session разбирал ЧУЖОЕ намерение прошлой эпохи: при
+        # совпавших количествах он принимал старую book_after и затирал только что
+        # переданную книгу, при несовпавших — вставал в О-5. Оба исхода наступают уже
+        # ПОСЛЕ физического перевода денег, поэтому проверка стоит ДО передачи.
+        if _ST2.load_intent(_ST2.book_path(to_route)) is not None:
+            raise RuntimeError(
+                f'у маршрута {to_route} осталось НЕРАЗОБРАННОЕ намерение прошлой эпохи '
+                f'({_ST2.book_path(to_route)}.intent.json): после передачи книги первая же '
+                f'сессия разобрала бы его и затёрла новую книгу либо встала в О-5 — '
+                f'разобрать намерение ДО перехода (О-5)')
+        _rows2 = _J2.read(_jp2)
+        # СУЩЕСТВУЮЩИЙ ЖУРНАЛ ЦЕЛЕВОГО МАРШРУТА ПРОВЕРЯЕТСЯ ЦЕЛИКОМ (двадцать третий круг,
+        # №10). Прежде вызывался только read(): журнал с пересчитанным хэшем, оборванной
+        # сессией или незакрытым хвостом пропускал публикацию книги и COMPLETE, а первая же
+        # ежедневная сессия отказывала — оставляя НОВУЮ физическую позицию без управления.
+        # Проверять надо ДО передачи: после неё деньги уже переведены.
+        if _rows2:
+            _J2.verify(_jp2)                     # цепочка хэшей; расхождение — исключение
+            if not str(_rows2[-1].get('note', '')).startswith('итог сессии'):
+                raise RuntimeError(
+                    f'журнал маршрута {to_route} не закрыт итоговой строкой прошлой '
+                    f'сессии — записи исполнения могли потеряться; передавать книгу в '
+                    f'маршрут с оборванным журналом нельзя (О-5)')
+        if not _rows2:
             _J2.append(_jp2, dict(
                 date=_today, leg='', instrument='ИТОГ', qty=0, px_order='-', px_fill='',
                 commission='', reason='', nav='', leverage='',

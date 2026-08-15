@@ -72,6 +72,15 @@ except Exception:
     pass
 
 _MACHINE0 = _machine_snapshot()
+# ОКРУЖЕНИЕ ИЗОЛИРУЕТСЯ ЦЕЛИКОМ (двадцать третий круг, №11). Прежде задавался только
+# ADDFUT_LOCK_DIR, а book_path() отдаёт приоритет УНАСЛЕДОВАННОМУ ADDFUT_BOOK_PATH, и
+# session.state_dir() — ADDFUT_DIR. release.py окружение не чистит, поэтому стенды могли
+# писать фикстуру ПО ЖИВОМУ пути, а lstat-снимок ~/.addfut этого даже не увидел бы: он
+# сторожит каталог, а не внешнее переопределение. Правило 5 проекта требует обратного.
+for _v in ('ADDFUT_BOOK_PATH', 'ADDFUT_DIR', 'ADDFUT_SIGNALS', 'ADDFUT_JOURNAL',
+           'ADDFUT_ACCOUNT', 'ADDFUT_MARGINS', 'ADDFUT_REGISTRY', 'ADDFUT_LIVE_OK',
+           'ADDFUT_SIGNALS_FALLBACK_OK', 'ADDFUT_SIGNAL_CONFIRM'):
+    os.environ.pop(_v, None)
 os.environ['ADDFUT_LOCK_DIR'] = os.path.join(_TD, 'addfut')
 
 FAIL = []

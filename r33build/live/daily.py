@@ -610,6 +610,20 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
             # расходов. Оборот считается в единицах СЕТКИ: один ES = десять единиц.
             _grid = repack_grid(_repack, b.unit_is_mes)
             e -= repack_cost(_grid, u_e)
+            # КАП ПРОВЕРЯЕТСЯ ЗАНОВО ПОСЛЕ СПИСАНИЯ (двадцать третий круг, №3): стоимость
+            # перекладки вычитается ПОСЛЕ кап-аллокатора, поэтому книга, прошедшая кап
+            # ровно у 2,00, после встречных ES/MES-заявок имела капитал меньше, а плечо —
+            # выше капа, и всё равно исполнялась. Путь ЖИВОЙ (только после Е→Ф), в истории
+            # не встречается, поэтому эквивалентность 1e-12 не затрагивается.
+            while (exp_e + exp_b) > cap * e and (n_e > 0 or n_b > 0):
+                if n_e > 0 and (u_e >= u_b or n_b == 0):
+                    n_e -= 1; exp_e = n_e * u_e
+                else:
+                    n_b -= 1; exp_b = n_b * u_b
+                d.reasons.append('кап 2,00 пересчитан ПОСЛЕ издержек перекладки: '
+                                 f'книга сокращена до n_e={n_e}, n_b={n_b}')
+                d.book_after = replace(d.book_after, n_e=n_e, n_b=n_b,
+                                       es_held=pack_es(b.es_held, n_e, b.unit_is_mes, roll_a))
             d.reasons.append('смена упаковки ES/MES: физическая книга приводится к целевой, '
                              f'экспозиция не меняется, оборот {_grid} единиц сетки '
                              f'(издержки ${repack_cost(_grid, u_e):,.0f} списаны)')
@@ -1221,6 +1235,30 @@ def _resume_intent(ST, bp, cls, route, book, sess, broker, dry_run):
         'Ручной разбор (О-5).')
 
 
+def _snapshot_consistent(broker, attempts=3):
+    """Согласованный снимок брокера (двадцать третий круг, №12).
+
+    Аргументы вычисляются слева направо: net_positions() читался ПЕРВЫМ, open_orders() —
+    вторым. Если старая заявка исполнялась МЕЖДУ вызовами, первый снимок ещё старый, а
+    второй уже пуст: сверка проходила, и контур подавал новую заявку от старой позиции —
+    прямой дубль. Снимок берётся дважды, порядок ОБРАТНЫЙ (заявки, позиции, заявки), и
+    принимается только если картина не сдвинулась; иначе — отказ, а не догадка.
+    """
+    _oo = getattr(broker, 'open_orders', lambda: [])
+    last = None
+    for _ in range(attempts):
+        oo1 = list(_oo())
+        pos = {k: v for k, v in (broker.net_positions() or {}).items() if v}
+        oo2 = list(_oo())
+        if sorted(map(str, oo1)) == sorted(map(str, oo2)):
+            return pos, oo2
+        last = (sorted(map(str, oo1)), sorted(map(str, oo2)))
+    raise RuntimeError(
+        f'снимок брокера не стабилизировался за {attempts} попытки: заявки менялись во '
+        f'время чтения позиций {last} — исполнение шло прямо сейчас, сверка была бы '
+        f'ложной; сессия остановлена (О-5)')
+
+
 def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                 capital=None, closing_nav=None, journal_path=None, dry_run=False,
                 ref_prices=None, book_path=None, series_a=None, deadline=None, **kw):
@@ -1268,8 +1306,18 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                               f'дописано по намерению, повторного решения не было')
             return dd, [], []
 
-        diff = ST.reconcile(book, route, broker.net_positions(),
-                            open_orders=getattr(broker, 'open_orders', lambda: [])())
+        # НЕЗАВЕРШЁННАЯ ПЕРЕДАЧА КНИГИ (двадцать третий круг, №15): если процесс перехода
+        # умер между публикацией книги и записью COMPLETE, на диске осталась метка. Брокер,
+        # книга и route.txt при этом СОГЛАСОВАНЫ, поэтому обычная сверка молчит, а журнал МР
+        # навсегда в TRANSITION_OPEN — и автопилот его не читает. Торговать нельзя.
+        _hf = ST.lock_dir() / f'handover-inflight-{route}.txt'
+        if _hf.exists():
+            raise RuntimeError(
+                f'{_hf}: передача книги начата, но COMPLETE не записан — переход оборван '
+                f'между публикацией и журналом; книга и брокер выглядят согласованно, но '
+                f'нормативный журнал остался в TRANSITION_OPEN (О-5)')
+        _pos_in, _oo_in = _snapshot_consistent(broker)
+        diff = ST.reconcile(book, route, _pos_in, open_orders=_oo_in)
         if diff:
             raise RuntimeError('книга брокера не совпадает с состоянием — сессия '
                                'остановлена до ручного разбора:\n  ' + '\n  '.join(diff))
@@ -1491,8 +1539,8 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
             # сохранялось: автопилот ставил тревогу, замыкания не делал, и книга уходила
             # в ночь старой. Две проверки одного и того же обязаны быть одной.
             bad = [r for r in placed if not _filled(r, r.get('qty'))]
-            after = ST.reconcile(dec.book_after, route, broker.net_positions(),
-                                 open_orders=getattr(broker, 'open_orders', lambda: [])())
+            _pos_fin, _oo_fin = _snapshot_consistent(broker)
+            after = ST.reconcile(dec.book_after, route, _pos_fin, open_orders=_oo_fin)
             if bad or after:
                 raise RuntimeError(
                     'исполнение разошлось с намерением — состояние НЕ сохранено, книга '
