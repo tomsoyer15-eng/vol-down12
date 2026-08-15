@@ -126,6 +126,26 @@ if [ -s "$ST/account.txt" ]; then
     ADDFUT_ACCOUNT=$(tr -d ' \t\n\r' < "$ST/account.txt"); export ADDFUT_ACCOUNT
 fi
 
+alarm_write() {
+    # ЗАПИСЬ ТРЕВОГИ ОБЯЗАНА УДАТЬСЯ (двадцать четвёртый круг, №8). Прежде «echo > ALARM»
+    # не проверялся и set -e нет: после ENOSPC, ACL «менять можно, создавать нельзя» или
+    # ошибки каталога функция просто заканчивала тик. Следующий cron не видел ALARM и снова
+    # входил в торговлю — дубль поверх неизвестного исхода. Не удалось записать файл —
+    # пробуем запасное имя, затем syslog, и в любом случае возвращаем НЕуспех.
+    local f=$1; shift
+    if printf '%s\n' "$*" > "$f" 2>/dev/null && [ -s "$f" ]; then
+        return 0
+    fi
+    local alt="${ST}/ALARM-fallback-$$.txt"
+    if printf '%s\n' "$*" > "$alt" 2>/dev/null && [ -s "$alt" ]; then
+        log "ТРЕВОГА записана в запасной файл $alt (основной $f недоступен)"
+        return 0
+    fi
+    logger -t addfut "КРИТИЧНО: не удалось записать тревогу $f: $*" 2>/dev/null || true
+    log "КРИТИЧНО: тревога НЕ записана ни в $f, ни в $alt — контур останавливается"
+    return 1
+}
+
 log() { echo "$(date '+%F %T %Z') | $*" >> "$LOG"; }
 
 chicago() { TZ=America/Chicago date "+$1"; }
@@ -219,10 +239,22 @@ HS0
     fi
     log "шлюз не отвечает — запускаю"
     [ -f "$ENVF" ] || { log "ТРЕВОГА: нет $ENVF — запускать шлюз нечем"; return 1; }
-    set -a; . "$ENVF"; set +a
+    # ОКРУЖЕНИЕ ШЛЮЗА НЕ ПОПАДАЕТ В ТОРГОВУЮ СЕССИЮ (двадцать четвёртый круг, №2).
+    # `set -a; . ibgw.env` вносил ВСЁ содержимое файла в текущую оболочку — уже ПОСЛЕ
+    # env_guard. Любые ADDFUT_REGISTRY, ADDFUT_SIGNALS_FALLBACK_OK, ADDFUT_LIVE_OK,
+    # ADDFUT_ACCOUNT из него доставались сессии, и после обычного рестарта шлюза тот же
+    # cron мог внезапно торговать другой счёт, другой con_id или исследовательский сигнал.
+    # Переменные шлюза нужны ТОЛЬКО подпроцессу start.sh — читаем их в субоболочке.
+    if grep -qE '^[[:space:]]*ADDFUT_' "$ENVF"; then
+        alarm_write "$ST/ALARM-env-gw-$(chicago %F).txt" \
+            "в $ENVF заданы ADDFUT_* — они попали бы в торговую сессию мимо env_guard" || true
+        log "ТРЕВОГА: ADDFUT_* в $ENVF — запуск шлюза запрещён"
+        return 1
+    fi
     # fd 9 (замок) НЕ наследуется шлюзом (восемнадцатый круг, №9): долгоживущий Gateway
     # держал бы замок всё время жизни — все тики «занято», cron снова декоративный.
-    ( exec 9>&-; cd "$LIVE/ibgw" && nohup ./start.sh >> "$ST/ibgw-launch.log" 2>&1 & )
+    # переменные шлюза живут только внутри субоболочки запуска (№2)
+    ( exec 9>&-; set -a; . "$ENVF"; set +a; cd "$LIVE/ibgw" && nohup ./start.sh >> "$ST/ibgw-launch.log" 2>&1 & )
     for _ in $(seq 1 30); do
         sleep 10
         if exec 3<>/dev/tcp/127.0.0.1/4002 2>/dev/null; then exec 3<&-; break; fi
@@ -302,7 +334,10 @@ BK2
         # фиксировался НИКОГДА. Маркер ставится по факту сохранённой книги; тревога при
         # этом всё равно поднимается ниже, торговля не продолжается.
         touch "$ST/traded-$day"
-        log "торговля $day: состояние сохранено (книга за $day), но сессия завершилась с ошибкой — замыкание разрешено, дальше тревога"
+        alarm_write "$ST/ALARM-trade-$day.txt" "$out" || true
+        (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-trade-$day.txt" >> "$ST/ALARM-trade-$day.txt" 2>&1) || true
+        log "ТРЕВОГА торговли $day: состояние сохранено (книга за $day), сессия упала после — замыкание разрешено, торговля остановлена"
+        return 1
     elif [ "$pre" = "$day" ] \
          && ! printf '%s' "$out" | grep -qE 'РАСХОЖДЕНИ|не совпада|разошлось с намерением|исход заявки неизвестен|НЕСНЯТ|открытые заявки|О-5|повреждён|ALARM|чужой счёт|не пинован|ЗА КРАЕМ' \
          && (cd "$LIVE" && "$PY" - "$day" <<'BK' >/dev/null 2>&1
@@ -334,7 +369,7 @@ BK
         # сессии снимают «штатность»: остаётся обычная ветка тревоги.
         touch "$ST/traded-$day"; log "торговля $day: штатный отказ (день уже отторгован)"
     else
-        echo "$out" > "$ST/ALARM-trade-$day.txt"
+        alarm_write "$ST/ALARM-trade-$day.txt" "$out" || true
         (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-trade-$day.txt" >> "$ST/ALARM-trade-$day.txt" 2>&1) || true
         log "ТРЕВОГА торговли $day (код $rc) — автопилот остановлен до ручного разбора"
         return 1
@@ -346,7 +381,12 @@ run_close() {
     out=$(cd "$LIVE" && timeout -k 30 400 "$PY" session.py --close --route "$(route)" 2>&1 | grep -vE '^Error [0-9]+'); rc=$?
     echo "$out" >> "$LOG"
     _closed_ok=0
-    if [ $rc -ne 0 ]; then
+    # ПРИЧИНА ОТКАЗА ЧИТАЕТСЯ И ЗДЕСЬ (двадцать четвёртый круг, №6): «книга уже замкнута»
+    # объявляло успехом ЛЮБОЙ ненулевой код, включая поздний fill, расхождение с брокером
+    # и открытую заявку — плечо закрытия оставалось посчитанным по ложной книге, ставился
+    # closed-$day, тревоги не было.
+    if [ $rc -ne 0 ] \
+       && ! printf '%s' "$out" | grep -qE 'расходится с брокером|брокер изменился|РАСХОЖДЕНИ|О-5|поздни|неизвестен|НЕСНЯТ'; then
         (cd "$LIVE" && "$PY" - "$day" <<'BK2' >/dev/null 2>&1
 import sys
 from pathlib import Path
@@ -364,7 +404,7 @@ BK2
         touch "$ST/closed-$day"; log "замыкание $day: ок"
         backup_state "$day"
     else
-        echo "$out" > "$ST/ALARM-close-$day.txt"
+        alarm_write "$ST/ALARM-close-$day.txt" "$out" || true
         (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-close-$day.txt" >> "$ST/ALARM-close-$day.txt" 2>&1) || true
         log "ТРЕВОГА замыкания $day (код $rc)"
         return 1

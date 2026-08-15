@@ -140,7 +140,12 @@ def _git_commit_verified(out):
                         capture_output=True, text=True)
     if r1.returncode != 0:
         raise RuntimeError(f'git add отказал: {r1.stderr.strip()[:120]}')
-    r2 = subprocess.run(['git', '-C', str(ROOT), 'commit', '-q', '-m',
+    # КОММИТ ТОЛЬКО ЯКОРЯ (двадцать четвёртый круг, №26). Обычный `git commit` захватывал
+    # ВСЁ, что уже лежало в index: незавершённая или непроверенная правка торгового кода
+    # молча уезжала вместе с WORM-якорем и выглядела частью ЗАВЕРЕННОЙ истории, хотя
+    # проверяется потом только blob якоря. `--only <путь>` коммитит ровно один файл и не
+    # трогает остальной индекс.
+    r2 = subprocess.run(['git', '-C', str(ROOT), 'commit', '-q', '--only', str(rel), '-m',
                          f'WORM-якорь {out.stem}'], capture_output=True, text=True)
     if r2.returncode != 0:
         raise RuntimeError(f'git commit отказал: {(r2.stderr or r2.stdout).strip()[:120]}')

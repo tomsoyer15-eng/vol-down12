@@ -74,7 +74,12 @@ class FakeBroker:
         comm = abs(filled) * self.commission
         self.nlv -= comm
         self._orders[oid] = dict(status='filled', instrument=instrument, qty=qty, filled=filled)
+        # px_order_live — КАК У ЖИВОГО АДАПТЕРА (двадцать четвёртый круг, №24): макет
+        # обязан отдавать ту же запись, иначе SAME_API находит расхождение, а сценарии на
+        # макете объявляются доказательством денежной границы IBKR при другом контракте.
+        # У макета ориентир задан явно, то есть он и есть котировка момента.
         rec = dict(order_id=oid, instrument=instrument, qty=qty, filled=filled,
+                   px_order_live=True,
                    px_order=px_order, px_fill=px_fill, commission=comm)
         self.log.append(rec)
         if filled != qty:

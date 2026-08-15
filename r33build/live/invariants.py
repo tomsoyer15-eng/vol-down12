@@ -12,6 +12,18 @@
 проверяются УТВЕРЖДЕНИЯ, а не ожидаемые значения. Утверждение, нарушенное хотя бы раз,
 печатается вместе с породившим его состоянием.
 """
+# ИЗОЛЯЦИЯ ПРИ САМОСТОЯТЕЛЬНОМ ЗАПУСКЕ (двадцать четвёртый круг, №29). Батарея гоняет
+# полные сессии, а mutation.py повторяет их сотни раз. Без собственного ADDFUT_LOCK_DIR
+# они брали БОЕВОЙ книжный замок ~/.addfut: на торговой машине это конкуренция с живой
+# сессией, тайм-аут замка, тревога и пропуск ребаланса или ролла. Каталог создаётся один
+# на прогон и не трогает машинное состояние (правило 5 проекта).
+import os as _os0
+import tempfile as _tf0
+if not _os0.environ.get('ADDFUT_LOCK_DIR'):
+    _os0.environ['ADDFUT_LOCK_DIR'] = _tf0.mkdtemp(prefix='addfut-inv-')
+for _v0 in ('ADDFUT_BOOK_PATH', 'ADDFUT_DIR', 'ADDFUT_SIGNALS'):
+    _os0.environ.pop(_v0, None)
+
 import sys
 from pathlib import Path
 import itertools
@@ -826,6 +838,11 @@ def _intent_full(kind):
         prices = {k: 600.0 if 'ES' in k else 112.0
                   for k in set(pos) | set(DL.physical_book(after)) | set(DL.physical_book(before))}
         br = FakeBroker(prices=prices, positions=dict(pos)); br.nlv = 10_000_000.0
+        # ЕСЛИ КНИГА У БРОКЕРА НАМЕЧЕННАЯ — ЗНАЧИТ ЗАЯВКИ ИСПОЛНЯЛИСЬ (двадцать четвёртый
+        # круг, №5): барьер исполнений теперь требует отчётов и в этой ветке, а фикстура
+        # «сделка прошла» без единого отчёта описывает состояние, которого не бывает.
+        if kind in ('ролл исполнен целиком', 'состояние уже дописано'):
+            br.todays_executions = lambda: [7001, 7002]
         if kind == 'исполнение в пути':
             # Позиции ещё исходные, но БАРЬЕР уже несёт сегодняшнее исполнение нашей метки
             # (семнадцатый круг, №3): снимок один не доказывает «заявок не было».
@@ -909,6 +926,8 @@ def _intent_case(kind):
         ST.save_intent(bp, 'F', 4, before, after, [('ESU26', 16), ('ZNU26', 51)])
         br = FakeBroker(prices={k: 100.0 for k in set(pos) | set(DL.physical_book(after))},
                         positions=dict(pos))
+        if kind == 'прошло целиком':          # №5: намеченная книга = заявки исполнялись
+            br.todays_executions = lambda: [7003]
         out = dict(kind=kind, raised=False, book=None, intent_left=None, saved=None)
         try:
             out['book'], out['done_date'] = DL._resume_intent(
@@ -4288,6 +4307,23 @@ if __name__ == '__main__':
     # --- ИНТЕРФЕЙС АДАПТЕРА против ЖИВОГО ib_insync (двадцатый круг, №15: замечание
     # отклонено по факту, но класс «стенды доказывают стаб» признан).
     print()
+    # SAME_API ГОНЯЕТСЯ В БАТАРЕЕ (двадцать четвёртый круг, №24): прежде он запускался
+    # ТОЛЬКО при прямом исполнении ib_broker.py, то есть ни в батарее, ни в выпуске. Проверка
+    # имён методов (check_ib_interface) не ловит расхождение СОДЕРЖИМОГО записи исполнения,
+    # а именно на нём стоят все сценарии на макете.
     _iface_ok = check_ib_interface()
+    try:
+        import ib_broker as _IBB2
+        _same = _IBB2.SAME_API()
+        if _same:
+            print('[FAIL] SAME_API: макет и живой адаптер расходятся:')
+            for _x in _same:
+                print('   ', _x)
+            _iface_ok = False
+        else:
+            print('[OK  ] SAME_API: макет и живой адаптер дают одинаковые записи')
+    except Exception as _exs:
+        print(f'[FAIL] SAME_API не выполнен: {_exs}')
+        _iface_ok = False
     sys.exit(0 if (_iface_ok and not (bad or sbad or abad or ibad or fbad or rbad or tbad
                                       or lbad or gbad or fbad8 or jbad)) else 1)

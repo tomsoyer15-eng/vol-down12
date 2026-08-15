@@ -545,7 +545,11 @@ def _intent_mutations():
             after = cls(**it['book_after'])
             ST.save(bp, after, route, sess + 1, note='принято без сверки')
             ST.clear_intent(bp)
-            return after
+            # ПАРА, КАК У БОЕВОЙ ФУНКЦИИ (двадцать четвёртый круг, №25): одиночный Book
+            # ронял вызывающего ошибкой распаковки, и «мутация поймана» доказывало лишь
+            # несовместимость API — ровно тот класс, который объявлен исправленным. Дата
+            # сессии берётся из намерения, как в боевом коде.
+            return after, (it.get('session_date') or None)
         return orig, patched
 
     def not_finishing():

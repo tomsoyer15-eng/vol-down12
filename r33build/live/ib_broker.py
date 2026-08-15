@@ -77,6 +77,24 @@ class IBBroker:
                    or Path(__file__).resolve().parent / 'instruments_live.csv')
         if not reg.exists():
             raise BrokerError(f'нет реестра инструментов {reg}: сначала first_connect.py')
+        # ПИН ПОКОЛЕНИЯ — ОБЩИЙ С feed (двадцать четвёртый круг, №1). Адаптер читал CSV
+        # САМ, минуя feed.registry() и его _REG_PIN: если first_connect заменит файл между
+        # созданием адаптера и первым чтением рынка, адаптер останется на поколении A, а
+        # решение и ориентиры придут из B — размер посчитан по исправленному con_id, а
+        # заявка уйдёт по старому. Регистрируемся в том же пине, что и остальные читатели.
+        try:
+            import feed as _FDp
+            _os_env = os.environ.get('ADDFUT_REGISTRY')
+            os.environ['ADDFUT_REGISTRY'] = str(reg)
+            try:
+                _FDp.registry()                      # поднимет FeedError при смене поколения
+            finally:
+                if _os_env is None:
+                    os.environ.pop('ADDFUT_REGISTRY', None)
+                else:
+                    os.environ['ADDFUT_REGISTRY'] = _os_env
+        except ImportError:
+            pass
         import csv
         self._meta = {}
         with open(reg, encoding='utf-8') as f:
