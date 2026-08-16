@@ -74,13 +74,18 @@ FIXTURE_ROWS = [
 FIXTURE_COLS = list(FIXTURE_ROWS[0])
 
 
-def fixture_registry(dirpath):
-    """Записать фикстуру реестра во временный каталог и вернуть путь."""
+def fixture_registry(dirpath, rows=None):
+    """Записать фикстуру реестра во временный каталог и вернуть путь.
+
+    rows — необязательная ЗАМЕНА строк (тридцать первый круг, №8): согласованную подмену
+    серии (имя ESU26 при полях ESZ26) нельзя изобразить поведением стаба, потому что
+    подмена обязана быть согласованной И в реестре, И в ответе биржи; иначе её ловит
+    mismatches, и стенд доказывал бы соседнюю защиту."""
     p = Path(dirpath) / 'instruments_fixture.csv'
     with open(p, 'w', newline='', encoding='utf-8') as f:
         w = csv.DictWriter(f, fieldnames=FIXTURE_COLS)
         w.writeheader()
-        for r in FIXTURE_ROWS:
+        for r in (rows if rows is not None else FIXTURE_ROWS):
             w.writerow(r)
     return p
 
@@ -252,6 +257,18 @@ class StubIB:
             maint = 0.0
         elif self.behaviour == 'thin_after':
             maint = self._nlv / 1.2 if any(self._pos.values()) else 0.0
+        elif self.behaviour == 'thin_after_ok':
+            # ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №2: запас тонок при ПЕРВОМ пост-трейд замере и
+            # ВОССТАНАВЛИВАЕТСЯ после сокращения — то есть штатный исход норматива §8.
+            # Прежний 'thin_after' держал 1,20 навсегда, поэтому производственная ветка
+            # «срез удался, запас выше порога» не исполнялась ни разу, а тревога в ней
+            # не ставилась вовсе: аварийное сокращение проходило молча, и следующая
+            # сессия полосой наращивала книгу обратно к 2x.
+            if any(self._pos.values()):
+                self._thin_calls = getattr(self, '_thin_calls', 0) + 1
+                maint = self._nlv / (1.2 if self._thin_calls == 1 else 2.5)
+            else:
+                maint = 0.0
         elif any(self._pos.values()):
             maint = self._nlv / 2.0
         else:

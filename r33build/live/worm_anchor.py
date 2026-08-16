@@ -127,7 +127,34 @@ def _anchor_body(day):
             # уровней имел бы полностью «правильный» WORM-текст. Уровни обязательны:
             # без них сигнал недоказуем. Пин может отсутствовать до первого запуска.
             f'sha256 сайдкара уровней: {_sha(st / "signals_levels.csv", required=True)}\n'
-            f'sha256 пина счёта: {_sha(st / "account.txt")}\n')
+            f'sha256 пина счёта: {_sha(st / "account.txt")}\n'
+            # ЖУРНАЛ МР — ТОЖЕ В ЯКОРЕ (тридцать первый круг, №13). Он единственный
+            # источник действующего маршрута и одобрений перехода, а внешнего следа не имел
+            # вовсе: правка «на месте» (inode тот же, схема цела) была видна только тому,
+            # кто её ищет. Пин защищает личность файла, digest конфигурации — содержимое,
+            # якорь — историю: три разных слоя, и только последний переживает машину.
+            # Журнала МР может не быть до первой записи — пустота называется честно.
+            f'sha256 журнала МР ({_mr_journal().name}): {_sha(_mr_journal())}\n'
+            f'sha256 конфигурации развёртывания МР: {_sha(_mr_deploy())}\n')
+
+
+def _mr_journal():
+    """Действующий путь нормативного журнала МР — тот же, что читает контур (state.py)."""
+    return Path(os.environ.get('ADDFUT_MR_JOURNAL')
+                or (Path(__file__).resolve().parent.parent / 'mr_journal.csv'))
+
+
+def _mr_deploy():
+    """Конфигурация развёртывания МР: в ней живёт digest журнала (31-й круг, №13)."""
+    import sys as _s
+    _root = str(Path(__file__).resolve().parent.parent)
+    if _root not in _s.path:
+        _s.path.insert(0, _root)
+    try:
+        import mr_engine as _M
+        return Path(_M.deploy_config_path())
+    except Exception:
+        return Path('/nonexistent/mr-deploy.json')
 
 
 def _write_anchor(day, body):

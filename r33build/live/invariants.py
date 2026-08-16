@@ -511,9 +511,17 @@ def _adapter(behaviour, positions=None):
     import ib_stub
     import ib_broker as IBB
     d = tempfile.mkdtemp(prefix='addfut-fix-')
-    reg = ib_stub.fixture_registry(d)
-    rows = list(ib_stub.FIXTURE_ROWS)
+    rows = [dict(r) for r in ib_stub.FIXTURE_ROWS]
+    if behaviour == 'coherent_series_swap':
+        # СОГЛАСОВАННАЯ подмена: строка ESU26 несёт поставку и локальное имя ДЕКАБРЯ, и
+        # биржа (стаб читает те же строки) отвечает тем же. mismatches сойдётся, ISIN у
+        # фьючерса пуст — расхождение видит только разбор ИМЕНИ.
+        for _r in rows:
+            if _r['instrument'] == 'ESU26':
+                _r['expiry'] = '20261218'; _r['local_symbol'] = 'ESZ6'
+    reg = ib_stub.fixture_registry(d, rows)
     ib = ib_stub.StubIB(rows, behaviour=behaviour, positions=positions or {})
+    ib._fixture_reg = str(reg)      # путь фикстуры нужен стендам, читающим рынок (№6)
     # Короткое ожидание: при разрыве связи заявка остаётся нетерминальной, и штатные
     # 120 с превращают перебор сценариев в минуты простоя.
     return IBB.IBBroker(ib, registry=reg, settle_s=0.0, timeout_s=1.0), ib, rows
@@ -541,6 +549,65 @@ def _a3(beh):
     br, ib, rows = _adapter(beh)
     r = br.place(rows[0]['instrument'], 1)
     return abs(r['filled'] - 1) < 1e-9        # 77 из чужого отчёта попасть не должно
+
+
+@ainv('согласованно подменённая серия не торгуется на границе заявки',
+      needs=lambda b: b == 'coherent_series_swap')
+def _a31s(beh):
+    """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №8. series_mismatch завели в тридцатом круге и подключили
+    ТОЛЬКО к feed.contract_of. Адаптер, то есть сама граница placeOrder, продолжал сверять
+    ответ биржи со строкой реестра, из которой взял con_id: согласованная подмена проходила
+    целиком, и заявка уходила в ДЕКАБРЬСКУЮ поставку под именем сентябрьской. Календарь
+    роллов и зона поставки считаются ПО ИМЕНИ, поэтому цена ошибки — вход в месяц поставки.
+    Стенд wrong_contract этого не ловит: там биржа отвечает не то, что в реестре."""
+    import ib_broker as IBB
+    br, ib, rows = _adapter(beh)
+    try:
+        br.place('ESU26', 1)
+    except IBB.BrokerError as ex:
+        return (not ib._fills) and ('серия' in str(ex) or 'поставка' in str(ex))
+    return False
+
+
+@ainv('живая полоса долларовой единицы отделяет MES от ES',
+      needs=lambda b: b == 'unit_ref')
+def _a31u(beh):
+    """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №6. unit_ref — независимая проверка цен плана перехода, и
+    именно её ЖИВУЮ реализацию не исполнял ни один стенд: и батарея, и самопроверка
+    подставляли собственную правильную таблицу. Полоса MES считалась как
+    es_to_unit(px * 10), то есть выходила равной полосе ES — вдесятеро выше истины.
+    Правильный план Е->Ф отвергался бы «вне рыночной полосы», а подогнанный под ошибочную
+    полосу купил бы десятую часть ноги А.
+
+    Стенд проверяет ОБА конца: модельная единица MES (50 x SPY) обязана попасть в полосу,
+    а единица ES (500 x SPY) — НЕ попасть. Совпадение полос ES и MES и есть дефект.
+    """
+    import os
+    import feed as FDx
+    br, ib, rows = _adapter(beh)
+    _t = FDx.exchange_today()
+    import pandas as _pd
+    _d1 = (_pd.Timestamp(_t) - _pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+    _d2 = (_pd.Timestamp(_t) - _pd.Timedelta(days=2)).strftime('%Y-%m-%d')
+    # MES и ES котируются ОДНИМ уровнем индекса; SPY — его десятая доля.
+    _es = [(_d2, 7700.0), (_d1, 7747.5)]
+    ib.set_bars({900001: list(_es), 900002: list(_es),
+                 900004: [(_d2, 690.0), (_d1, 700.0)]})
+    _keep = os.environ.get('ADDFUT_REGISTRY')
+    os.environ['ADDFUT_REGISTRY'] = ib._fixture_reg
+    try:
+        lo_m, hi_m = br.unit_ref('MESU26', 'FUT')
+        lo_e, hi_e = br.unit_ref('ESU26', 'FUT')
+        lo_f, hi_f = br.unit_ref('CSPX', 'ETF')
+    finally:
+        os.environ.pop('ADDFUT_REGISTRY', None)
+        if _keep is not None:
+            os.environ['ADDFUT_REGISTRY'] = _keep
+    _spy = 7747.5 / 10.0
+    return (lo_m <= 50.0 * _spy <= hi_m          # единица MES внутри своей полосы
+            and not (lo_m <= 500.0 * _spy <= hi_m)   # и полоса НЕ равна полосе ES
+            and lo_e <= 500.0 * _spy <= hi_e
+            and lo_f <= 700.0 <= hi_f)
 
 
 @ainv('подменённый контракт не торгуется', needs=lambda b: b == 'wrong_contract')
@@ -808,7 +875,13 @@ ADAPTER_CASES = ('normal', 'partial', 'reject', 'disconnect', 'cancelled_but_fil
                  'stale_positions', 'foreign_fill', 'wrong_contract', 'late_fills',
                  'late_cancelled', 'other_account', 'fill_after_end',
                  'stale_twice', 'foreign_orders', 'orders_req_fails', 'nan_cushion',
-                 'stale_nlv', 'no_avg_price', 'no_commission_report')
+                 'stale_nlv', 'no_avg_price', 'no_commission_report',
+                 # ТРИДЦАТЬ ПЕРВЫЙ КРУГ: два сценария живого адаптера, которых не было.
+                 # coherent_series_swap — согласованная подмена серии (реестр и биржа
+                 # подтверждают друг друга, лжёт только ИМЯ): №8. unit_ref — ЖИВАЯ полоса
+                 # долларовой единицы, которую все переходные стенды подменяли своей
+                 # таблицей и потому не исполняли ни разу: №6.
+                 'coherent_series_swap', 'unit_ref')
 
 
 def run_adapter():
@@ -1063,7 +1136,65 @@ FEED_CASES = ('норма', 'бар вчерашний повторён', 'ис�
               'множитель контракта изменился',
               'пропущена ровно одна сессия',
               'ориентир дальней серии отстал на сессию',
-              'серия реестра подменена согласованно')
+              'серия реестра подменена согласованно',
+              # ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №7: сверка digest ЖИВОГО ряда включалась только при
+              # существующем непустом сайдкаре — удаление файла её выключало целиком.
+              'живой ряд без digest', 'живой ряд с digest', 'живой ряд правлен мимо digest')
+
+
+def _live_series_case(case):
+    """ЖИВОЙ ряд сигналов читается БЕЗ явного path (тридцать первый круг, №7).
+
+    Все прочие стенды сигнала передают path=... — то есть путь «живого» ряда, по которому
+    и работает боевой контур (ADDFUT_SIGNALS/~/.addfut), не исполнялся ни одним из них.
+    Именно на нём сверка digest была fail-open: сайдкар удалили или обнулили — и ряд можно
+    править весь месяц, а один бит ряда включает или выключает целую ногу.
+    """
+    import hashlib as _hl
+    import os
+    import tempfile
+    import pandas as pd
+    import feed as FD
+    d = tempfile.mkdtemp(prefix='addfut-livesig-')
+    live = Path(d) / 'signals_live.csv'
+    live.write_text(',leg_eq,leg_bond\n2026-07-31,1,1\n2026-08-31,1,0\n', encoding='utf-8')
+    dp = Path(str(live) + '.sha256')
+    if case != 'живой ряд без digest':
+        dp.write_text(_hl.sha256(live.read_bytes()).hexdigest() + '\n', encoding='utf-8')
+    if case == 'живой ряд правлен мимо digest':
+        live.write_text(',leg_eq,leg_bond\n2026-07-31,1,1\n2026-08-31,1,1\n',
+                        encoding='utf-8')          # нога Б включена одним битом
+    keep = os.environ.get('ADDFUT_SIGNALS')
+    os.environ['ADDFUT_SIGNALS'] = str(live)
+    try:
+        st = FD.signal_state(pd.Timestamp('2026-08-12'))
+        return None, '', dict(state=st)
+    except Exception as ex:
+        return None, f'{type(ex).__name__}: {ex}', {}
+    finally:
+        os.environ.pop('ADDFUT_SIGNALS', None)
+        if keep is not None:
+            os.environ['ADDFUT_SIGNALS'] = keep
+
+
+@finv('живой ряд БЕЗ digest не читается', needs=lambda r: r['case'] == 'живой ряд без digest')
+def _f31a(r):
+    """Отсутствие доказательства обязано означать отказ, а не разрешение: сайдкар пишет
+    signal_update на ОБЕИХ ветках (30-й круг, №9), значит его пропажа — событие."""
+    return bool(r['err']) and 'digest' in r['err']
+
+
+@finv('живой ряд С digest читается', needs=lambda r: r['case'] == 'живой ряд с digest')
+def _f31b(r):
+    """Пара к предыдущему: стенд, проверяющий только ОТКАЗ, пропускает поломку успешного
+    пути — класс дефекта №11 тридцатого круга."""
+    return (not r['err']) and r['src'].get('state') is not None
+
+
+@finv('правка живого ряда мимо digest ловится',
+      needs=lambda r: r['case'] == 'живой ряд правлен мимо digest')
+def _f31c(r):
+    return bool(r['err']) and 'digest' in r['err']
 
 
 def _feed_run(case):
@@ -1072,6 +1203,9 @@ def _feed_run(case):
     import ib_stub
     import feed as FD
     import pandas as pd
+
+    if case.startswith('живой ряд'):
+        return _live_series_case(case)
 
     d0 = pd.Timestamp('2026-08-12')
     es, tnx = 900001, 990001
@@ -1343,6 +1477,8 @@ RUN_CASES = ('наблюдение', 'торговля', 'незамкнутая
              'маршрут Е при тонком запасе', 'отказ дня по §8',
              'ролл: исход заявки неизвестен', 'журнал повреждён',
              'Е: тонкий запас после исполнений', 'Е: пост-трейд запас неизвестен',
+             'Е: запас восстановился после сокращения',
+             'Е: вахта сокращает уже отторгованную сессию',
              'пути состояния: один namespace', 'счёт не пинован',
              'окно ушло за время сессии', 'пропущен торговый день',
              'worm: обязательный файл отсутствует',
@@ -1363,6 +1499,8 @@ def _session_run(case):
     import pandas as pd
 
     route = ('E' if case in ('маршрут Е', 'Е: тонкий запас после исполнений',
+                             'Е: запас восстановился после сокращения',
+                             'Е: вахта сокращает уже отторгованную сессию',
                              'Е: пост-трейд запас неизвестен') else 'F')
     es, zn, tnx, cspx, cbu0 = 900001, 900003, 990001, 900004, 900005
     esz, mesz, znz = 900006, 900007, 900008
@@ -1483,6 +1621,8 @@ def _session_run(case):
             # запаса нет вовсе (None), ПОСЛЕ исполнений брокер отдаёт 1,20 < 1,40 —
             # контур обязан поставить тревогу файлом, а не сохранить день успешным молча.
             ib.behaviour = 'thin_after'
+        if case == 'Е: запас восстановился после сокращения':
+            ib.behaviour = 'thin_after_ok'
         if case == 'Е: пост-трейд запас неизвестен':
             # ДЕВЯТНАДЦАТЫЙ КРУГ, №10: сводка после исполнений не вернула требование —
             # запас НЕИЗВЕСТЕН при живой книге; прежнее условие глотало None без тревоги.
@@ -1496,6 +1636,18 @@ def _session_run(case):
             ST.save(Path(tmp) / 'book-E.json', b0, 'E', 3); _seed_j7('E', 3)
             # СЛУЧАЙ ГОНЯЕТ МАРШРУТ Е (двадцать седьмой круг, №1): действующий
             # маршрут обязан совпадать с запрошенным, иначе сессия честно отказывает.
+            (Path(tmp) / 'route.txt').write_text('E', encoding='utf-8')
+            ib._pos = {cspx: 1195.0, cbu0: 6538.0}
+            ib._shown = dict(ib._pos)
+        if case == 'Е: вахта сокращает уже отторгованную сессию':
+            # ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №1: день УЖЕ отторгован (книга несёт сегодняшнюю дату и
+            # предварительное замыкание), а внутридневная вахта нашла запас 1,20 < 1,40.
+            # Норматив §8 требует сокращения В ТУ ЖЕ СЕССИЮ; прежде вахта умела только
+            # писать ALARM, который сам же и запрещал запуск, способный книгу сократить.
+            ib.behaviour = 'thin_cushion'
+            b0 = DL.BookE(n_eq=1195, n_bd=6538, prev_st_eq=True, prev_st_bd=True,
+                          last_session=today, close_provisional=True, prev_close_lev=1.99)
+            ST.save(Path(tmp) / 'book-E.json', b0, 'E', 3); _seed_j7('E', 3)
             (Path(tmp) / 'route.txt').write_text('E', encoding='utf-8')
             ib._pos = {cspx: 1195.0, cbu0: 6538.0}
             ib._shown = dict(ib._pos)
@@ -1538,6 +1690,8 @@ def _session_run(case):
             out['dec'] = SS.do_close(ib, route)
         elif case == 'маршрут Е при тонком запасе':
             out['dec'] = SS.do_trade(ib, 'E', dry=False)
+        elif case == 'Е: вахта сокращает уже отторгованную сессию':
+            out['dec'] = SS.do_o3e_cut(ib, 'E')
         else:
             out['dec'] = SS.do_trade(ib, route, dry=(case == 'наблюдение'))
     except BaseException as ex:
@@ -1568,6 +1722,17 @@ def _session_run(case):
     out['provisional'] = getattr(sv, 'close_provisional', None) if sv else None
     out['lev'] = getattr(sv, 'prev_close_lev', None) if sv else None
     out['journal'] = Path(tmp) / f'journal-{route}.csv'
+    # НАМЕРЕНИЕ И СТРОКИ ЖУРНАЛА — НАРУЖУ (тридцать первый круг, №3 и №11): срез О-3-Е
+    # подавался поверх старого намерения и не попадал в §7, а увидеть это было нечем.
+    try:
+        out['intent_left'] = ST.load_intent(bp) is not None
+    except Exception:
+        out['intent_left'] = None
+    try:
+        import journal as _J7r          # JJ выше — локальный импорт ветки фикстуры
+        out['j7_rows'] = _J7r.read(out['journal']) if out['journal'].exists() else []
+    except Exception:
+        out['j7_rows'] = []
     return out
 
 
@@ -1733,6 +1898,78 @@ def _r30b(r):
             and sv.n_eq == ne and sv.n_bd == nb
             and sorted(r['positions'].values()) == sorted([float(ne), float(nb)])
             and sv.prev_close_lev <= 1.0 + 1e-9)
+
+
+@rinv('вахта О-3-Е сокращает книгу в уже отторгованной сессии',
+      needs=lambda r: r['case'] == 'Е: вахта сокращает уже отторгованную сессию')
+def _r31c(r):
+    """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №1. Норматив §8 требует сокращения до L=1 В ТУ ЖЕ СЕССИЮ, а
+    внутридневная вахта автопилота умела только писать ALARM — и этим же ALARM запрещала
+    любой запуск, который мог бы книгу сократить. Провал запаса ПОСЛЕ traded-* оставлял
+    маржинальную книгу около 2x на ночь: небольшой следующий ход даёт margin call.
+
+    Проверяется поведение целиком: книга сокращена и СОХРАНЕНА тем же номером сессии,
+    позиции брокера ей соответствуют, плечо предварительного замыкания не выше 1,0,
+    намерение снято, тревога поставлена (причина не разобрана — О-5), а дата в §7 ЯВНО
+    исключена из выборки издержек: строки среза легли после итога торговой сессии.
+    """
+    sv, dec = r['saved'], r['dec']
+    rows = r.get('j7_rows') or []
+    if r['raised'] or dec is None or sv is None:
+        return False
+    day = max((x['date'] for x in rows), default='')
+    tot = [x for x in rows if x['date'] == day and x.get('instrument') == 'ИТОГ']
+    cut_rows = [x for x in rows if x['date'] == day and x.get('instrument') in ('CSPX', 'CBU0')
+                and int(float(x['qty'])) < 0]
+    return (sv.n_eq < 1195 and sv.n_bd < 6538
+            and sorted(r['positions'].values()) == sorted([float(sv.n_eq), float(sv.n_bd)])
+            and sv.close_provisional is True and sv.prev_close_lev <= 1.0 + 1e-9
+            and r.get('intent_left') is False and r.get('alarm_o3e') is True
+            and len(cut_rows) == 2
+            and any('ИСКЛЮЧЕНА' in (x.get('note') or '') for x in tot))
+
+
+@rinv('состоявшееся сокращение О-3-Е ставит тревогу, даже когда запас восстановился',
+      needs=lambda r: r['case'] == 'Е: запас восстановился после сокращения')
+def _r31a(r):
+    """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №2. Тревога ставилась только если ПОВТОРНЫЙ замер всё ещё
+    ниже 1,40 — а удачный срез запас как раз поднимает. В штатном исходе норматива §8
+    тревоги не возникало вовсе: аварийное сокращение проходило молча, причина не
+    разбиралась, и следующая сессия полосой возвращала книгу к 2x. Прежний стенд этого не
+    видел, потому что стаб держал 1,20 навсегда — успешная ветка не исполнялась."""
+    cut = getattr(r['dec'], 'o3e_cut', None)
+    return (not r['raised'] and bool(cut) and r.get('alarm_o3e') is True
+            and r['saved'] is not None)
+
+
+@rinv('срез О-3-Е идёт через намерение и попадает в журнал §7',
+      needs=lambda r: r['case'] in ('Е: тонкий запас после исполнений',
+                                    'Е: запас восстановился после сокращения'))
+def _r31b(r):
+    """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №3 и №11. Заявки среза подавались поверх СТАРОГО намерения
+    (на диске — книга до сессии, в намерении — книга до среза, у брокера после отказа
+    второй ноги — третья) и не попадали в журнал §7: строки и ИТОГ пишутся ВЫШЕ, до среза.
+    Значит крупнейший аварийный оборот сессии и его комиссии исключались из выборки, а
+    счётчик «строк N» сходился — дата считалась ПОЛНЫМ наблюдением 5 б.п.
+
+    Проверяется: намерение снято (сессия дошла до конца), в журнале есть строки по обеим
+    ногам среза, и ИТОГ обещает столько строк, сколько их на дату."""
+    import re as _re31
+    cut = getattr(r['dec'], 'o3e_cut', None)
+    rows = r.get('j7_rows') or []
+    if r['raised'] or not cut or r.get('intent_left') is not False:
+        return False
+    _, n0e, n0b, ne, nb = cut
+    day = max(x['date'] for x in rows) if rows else ''
+    live = [x for x in rows if x['date'] == day and x.get('instrument') != 'ИТОГ']
+    tot = [x for x in rows if x['date'] == day and x.get('instrument') == 'ИТОГ']
+    if not tot:
+        return False
+    m = _re31.search(r'строк (\d+)', tot[-1].get('note') or '')
+    # заявки среза: ровно те количества, что записаны в o3e_cut
+    want = {('CSPX', ne - n0e), ('CBU0', nb - n0b)}
+    have = {(x['instrument'], int(float(x['qty']))) for x in live}
+    return (bool(m) and int(m.group(1)) == len(live) and want <= have)
 
 
 @rinv('тонкий запас ПОСЛЕ исполнений ставит тревогу файлом',
@@ -2279,9 +2516,22 @@ def _worm_case(kind):
                 _in_head = subprocess.run(
                     ['git', '-C', str(rd), 'ls-tree', 'HEAD', '--', f'anchors/{_anch[0]}'],
                     capture_output=True, text=True).stdout.strip() if _anch else ''
+                # ЗНАЧЕНИЕ ХЭША, А НЕ НАЛИЧИЕ СТРОКИ (тридцать первый круг, №18). Стенд
+                # требовал лишь подстроку «sha256 архива»: замени _sha(dst) константой или
+                # хэшем другого файла — стенд остался бы зелёным, а якорь перестал бы
+                # привязывать копию к состоянию. Смысл строки в том, что по ней можно
+                # проверить КОНКРЕТНЫЙ архив после выгрузки в зеркало; проверяем ровно это.
+                import re as _re30
+                _m30 = _re30.search(r'sha256 архива \(([^)]+)\):\s*([0-9a-f]{64})', _txt)
+                _bind = False
+                if _m30 and _rab:
+                    _tgz = bdir / _m30.group(1)
+                    _bind = (_m30.group(1) == _rab[0] and _tgz.exists()
+                             and _hl.sha256(_tgz.read_bytes()).hexdigest() == _m30.group(2))
                 out['ok'] = (len(_rab) == 1 and not _rej and len(_anch) == 1
-                             and bool(_in_head) and 'sha256 архива' in _txt)
-                out['files'] = dict(рабочие=_rab, помеченные=_rej, якоря=_anch)
+                             and bool(_in_head) and _bind)
+                out['files'] = dict(рабочие=_rab, помеченные=_rej, якоря=_anch,
+                                    архив_привязан=_bind)
             finally:
                 WA.ROOT, WA.ANCHORS = keep_root, keep_anch
             return out
@@ -2694,7 +2944,10 @@ TR_CASES = ('план целых фьючерсов', 'план дробных �
             'замер: init прежде maint', 'тревога перехода — файл в каталоге автопилота',
             'общее окно закрылось: заявка не подаётся',
             'компенсация исполнена не полностью',
-            'переход задним числом запрещён')
+            'переход задним числом запрещён',
+            # ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №13: пин журнала МР защищал путь и inode, но не
+            # содержимое — одной валидной строкой CSV разрешался переход маршрута.
+            'журнал МР правлен на месте')
 
 
 class _Unp(dict):
@@ -2771,7 +3024,32 @@ def _tr_run(case):
     legs_bad = {'Б': dict(src=[('ZNU26', 10.5, ZN_U)], dst=('CBU0', 5.0, 'ETF'))}
 
     try:
-        if case == 'переход задним числом запрещён':
+        if case == 'журнал МР правлен на месте':
+            # СОДЕРЖИМОЕ, А НЕ ТОЛЬКО ЛИЧНОСТЬ ФАЙЛА (тридцать первый круг, №13).
+            # `open(path, 'w')` сохраняет inode, и обширные тесты symlink/hardlink/inode
+            # доказывали личность файла, а не неизменность нормативных событий: дописанный
+            # OWNER_APPROVE разрешает полный перевод счёта в другой маршрут.
+            # Проверяются ОБА конца: законная запись читается, подделанная — отказ.
+            import mr_engine as _M31
+            import tempfile as _tf31
+            td31 = Path(_tf31.mkdtemp(prefix='addfut-mrdg-'))
+            keep31 = _M31._STATE['dir']
+            _M31.set_state_dir_for_tests(str(td31 / 'install'))
+            try:
+                j31 = td31 / 'mr.csv'
+                j31.write_text('asof,event,detail\n', encoding='utf-8')
+                _M31.test_configure(str(j31))
+                _M31.append_event(str(j31), '2026-08-08', 'SWITCH_SIGNAL', 'E|s1')
+                out['ok_read'] = (len(_M31.journal_rows(str(j31))) == 1)
+                with open(j31, 'a', encoding='utf-8') as _f31:
+                    _f31.write('2026-08-08,OWNER_APPROVE,E|s1\n')
+                try:
+                    _M31.journal_rows(str(j31))
+                except _M31.JournalCorrupt as ex:
+                    out['raised'] = True; out['error'] = str(ex)
+            finally:
+                _M31.set_state_dir_for_tests(keep31)
+        elif case == 'переход задним числом запрещён':
             # ASOF — ЭТО СЕГОДНЯ (двадцать второй круг, №1). Вчерашняя дата отключала
             # часы, праздники и барьер «resume в той же сессии»; проверка стоит РАНЬШЕ
             # чтения журнала, поэтому стенд обходится фиктивными путями и не касается
@@ -3082,6 +3360,21 @@ def _tr_run(case):
     except Exception as ex:
         out['raised'] = True; out['error'] = f'{type(ex).__name__}: {ex}'
     return out
+
+
+@tinv('правка журнала МР «на месте» ловится, законная запись проходит',
+      needs=lambda r: r['case'] == 'журнал МР правлен на месте')
+def _tr31(r):
+    """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №13. Единственный источник действующего маршрута и одобрений
+    перехода не имел защиты содержимого: пин сверял путь, st_dev/st_ino, symlink и
+    hardlink — то есть ЛИЧНОСТЬ файла. Синтаксически корректная замена OWNER_APPROVE,
+    TRANSITION_COMPLETE, цели или sid проходила все проверки, и одной строкой CSV
+    разрешался полный перевод счёта в другой маршрут.
+
+    Проверяется пара: законная запись читается (иначе заверение сломало бы штатный путь —
+    класс №11 тридцатого круга), подделанная — отказ с называнием причины.
+    """
+    return bool(r.get('ok_read')) and r['raised'] and 'мимо append_event' in r['error']
 
 
 @tinv('недобор компенсации не проходит в успешный переход',
@@ -3820,6 +4113,34 @@ def _pk2(r):
     return (not r['raised'] and d is not None and r['exc'][0] > 0
             and d.cap_correction
             and any('ЗА ВЫЧЕТОМ' in x for x in d.reasons))
+
+
+@pkinv('комиссия среза считается по обороту, а не по числу срезанных единиц',
+       needs=lambda r: r['case'] == 'нарушенная упаковка у границы капа')
+def _pk31(r):
+    """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №4. Ворота капа списывали ЕЩЁ ОДНУ комиссию за каждую
+    срезанную единицу. Но срез меняет не число заявок, а РАЗМЕР заявки: здесь цель ноги Б
+    выросла с 0 до 51, и срез до 50 означает купить на единицу МЕНЬШЕ — комиссия обязана
+    вернуться. Заниженный капитал делает ворота строже нормы: существует пограничный
+    интервал, где книга режется на контракт лишний раз, а следом идёт обратный оборот.
+
+    Стенд считает издержки ОБОРОТА сам, из выставленных наружу чисел ворот, и сравнивает с
+    записанным capital_after_costs. На старом знаке расхождение ровно 2 x COST x u —
+    величина, которую прежний точечный стенд PACK не смотрел вовсе (он проверял только
+    факт среза и наличие пометки «ЗА ВЫЧЕТОМ»).
+    """
+    d = r['dec']
+    if r['raised'] or d is None or getattr(d, 'cap_gate_e0', None) is None:
+        return False
+    n0e, n0b = d.cap_gate_n0
+    pe0, pb0 = d.cap_gate_plan
+    u_e, u_b = d.cap_gate_units
+    ne, nb = d.book_after.n_e, d.book_after.n_b
+    want = d.cap_gate_e0 - S.COST * ((abs(ne - n0e) - abs(pe0 - n0e)) * u_e
+                                     + (abs(nb - n0b) - abs(pb0 - n0b)) * u_b)
+    # срез растущей цели обязан ВЕРНУТЬ деньги, а не списать их второй раз
+    return (abs(d.capital_after_costs - want) < 1e-9
+            and (nb < pb0 and pb0 > n0b) and d.capital_after_costs > d.cap_gate_e0)
 
 
 @pkinv('избыток на смешанном пути посчитан и объявлен',

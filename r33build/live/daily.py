@@ -635,12 +635,16 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
         # дело: это наши собственные заявки, они списываются, но только если срез был.
         _e0c = e
         _cut2 = []
+        _pe0, _pb0 = n_e, n_b          # плановая книга ДО среза (в ней уже учтены комиссии)
 
-        def _e_gate(ne, cut):
-            _com = S.COST * (sum(1 for x in cut if x == 'А') * u_e
-                             + sum(1 for x in cut if x == 'Б') * u_b)
-            return _e0c - _com - _ex_at(ne)
-        while (exp_e + exp_b) > cap * _e_gate(n_e, _cut2) and (n_e > 0 or n_b > 0):
+        def _delta_cost(ne, nb):
+            return cut_cost_delta((n0_e, n0_b), (_pe0, _pb0), (ne, nb), u_e, u_b,
+                                  roll_a=bool(roll_any and roll_a),
+                                  roll_b=bool(roll_any and roll_b))
+
+        def _e_gate(ne, nb):
+            return _e0c - _delta_cost(ne, nb) - _ex_at(ne)
+        while (exp_e + exp_b) > cap * _e_gate(n_e, n_b) and (n_e > 0 or n_b > 0):
             if n_e > 0 and (u_e >= u_b or n_b == 0):
                 n_e -= 1; exp_e = n_e * u_e; _cut2.append('А')
             else:
@@ -652,11 +656,18 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
             d.cap_correction = True
             d.cap_before = (n_e + sum(1 for x in _cut2 if x == 'А'),
                             n_b + sum(1 for x in _cut2 if x == 'Б'))
-            # КОМИССИИ СРЕЗА СПИСЫВАЮТСЯ (№8): срезанные единицы — это новые заявки, и
-            # они стоят денег. Избыток перекладки в NAV по-прежнему НЕ входит.
-            e = _e0c - S.COST * (sum(1 for x in _cut2 if x == 'А') * u_e
-                                 + sum(1 for x in _cut2 if x == 'Б') * u_b)
+            # ИЗДЕРЖКИ СРЕЗА СПИСЫВАЮТСЯ ПО ОБОРОТУ (№8; знак исправлен в 31-м круге, №4).
+            # Избыток перекладки в NAV по-прежнему НЕ входит — только ворота его знают.
+            e = _e0c - _delta_cost(n_e, n_b)
             d.capital_after_costs = e
+            # ЧИСЛА ВОРОТ — НАРУЖУ, ПОД СТЕНД (тридцать первый круг, №4). Знак комиссии
+            # среза виден только в capital_after_costs, а сверить его без плановой величины
+            # нельзя: стенд обязан уметь пересчитать издержки оборота сам, иначе он
+            # доказывал бы согласие функции с самой собой.
+            d.cap_gate_e0 = _e0c
+            d.cap_gate_n0 = (n0_e, n0_b)
+            d.cap_gate_plan = (_pe0, _pb0)
+            d.cap_gate_units = (u_e, u_b)
             d.reasons.append(
                 f'кап 2,00 пересчитан по капиталу ЗА ВЫЧЕТОМ несписанного избытка '
                 f'(${_ex_at(n_e):,.0f}): сокращено {len(_cut2)} единиц '
@@ -828,6 +839,55 @@ def repack_excess(before, after, unit_is_mes):
     g_all = repack_grid(phys, unit_is_mes) if phys else 0
     net_g = abs(after.n_e - before.n_e) * (1 if unit_is_mes else 10)
     return max(0, g_all - net_g), g_all, net_g
+
+
+def o3e_journal(journal_path, dec, nav, cut_orders, cut_placed):
+    """ИСПОЛНЕНИЯ АВАРИЙНОГО СРЕЗА О-3-Е — В ЖУРНАЛ §7 (тридцать первый круг, №11).
+
+    Строки наблюдения и ИТОГ строятся ВЫШЕ, до среза, и после него не менялись: самый
+    крупный аварийный оборот сессии (CSPX/CBU0 на сокращение до L=1) и его комиссии в
+    выборку издержек не попадали, а счётчик строк сходился — значит _excluded_dates дату не
+    исключал, и §7 считал её ПОЛНЫМ наблюдением 5 б.п. Здесь интерфейс брокера отдаёт и
+    цену, и комиссию: это не долг переходного исполнителя (№17 тридцатого круга), а пропуск.
+
+    Отдельной функцией — под парную мутацию. Возвращает записанные строки.
+    """
+    import journal as J          # у run_session алиас локальный: на уровне модуля его нет
+    from types import SimpleNamespace as _SNS
+    fills = {r['instrument']: r for r in cut_placed}
+    cut_dec = _SNS(date=dec.date, leverage=dec.leverage,
+                   reasons=[dec.reasons[-1]] if dec.reasons else [], refusals=[],
+                   roll_pairs=[])
+    rows = J.rows_from_decision(cut_dec, nav, cut_orders, fills)
+    for row in rows:
+        J.append(journal_path, row)
+    return rows
+
+
+def cut_cost_delta(n0, plan, final, u_e, u_b, roll_a=False, roll_b=False):
+    """Изменение СОБСТВЕННЫХ издержек при срезе плана до final (тридцать первый круг, №4).
+
+    ЗНАК СЧИТАЕТСЯ ПО ОБОРОТУ, А НЕ ПО ЧИСЛУ СРЕЗАННЫХ ЕДИНИЦ. Прежде ворота капа за
+    каждую срезанную единицу списывали ЕЩЁ ОДНУ комиссию. Но срез меняет не «сколько
+    заявок добавилось», а РАЗМЕР заявки: при растущей цели (0 -> 51, срез до 50)
+    покупается на единицу МЕНЬШЕ, и комиссия обязана ВЕРНУТЬСЯ, а не списаться повторно.
+    Заниженный капитал делает ворота строже нормы — существует пограничный интервал, где
+    книга режется на контракт лишний раз, а следом идёт обратный оборот. Формула та же,
+    что у канонического кап-аллокатора (_size.e_after): разность модулей оборота
+    относительно ИСХОДНОЙ книги n0.
+
+    Ролловая стоимость снимается с срезанных единиц по тем же ногам, что и начислялась:
+    иначе перенос оплачивается за контракты, которых после среза нет.
+
+    Отдельной функцией — под парную мутацию: пока формула сидела замыканием внутри step,
+    её знак не мог быть ни подменён стендом, ни проверен им.
+    """
+    (n0_e, n0_b), (pe0, pb0), (ne, nb) = n0, plan, final
+    com = S.COST * ((abs(ne - n0_e) - abs(pe0 - n0_e)) * u_e
+                    + (abs(nb - n0_b) - abs(pb0 - n0_b)) * u_b)
+    rl = S.ROLL_BP * (((ne - pe0) * u_e if roll_a else 0.0)
+                      + ((nb - pb0) * u_b if roll_b else 0.0))
+    return com + rl
 
 
 def repack_cost(grid, u_e):
@@ -1909,18 +1969,54 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                     _cut_orders = [(i, q) for i, q in (('CSPX', _ne - _n0e),
                                                        ('CBU0', _nb - _n0b)) if q]
                     if _cut_orders:
+                        # СРЕЗ ИДЁТ ПО ТОМУ ЖЕ ПРОТОКОЛУ, ЧТО И ЛЮБАЯ ЗАЯВКА (тридцать
+                        # первый круг, №3). Первая редакция подавала _cut_orders прямо
+                        # поверх СТАРОГО намерения: на диске лежала книга ДО сессии, в
+                        # намерении — книга ДО среза, у брокера после отказа второй ноги —
+                        # третья, промежуточная. Восстановления не было вовсе, отмены тоже:
+                        # исключение оставляло одноногую дыру порядка половины NLV, и
+                        # следующий запуск не мог ни принять состояние, ни доказуемо его
+                        # вернуть. Намерение переписывается ПОД СРЕЗ (before = книга после
+                        # основных заявок, after = сокращённая), а сбой любой ноги идёт
+                        # через restore_to, как в основном цикле.
+                        _pre_cut = dec.book_after
+                        _cut_book = replace(_pre_cut, n_eq=_ne, n_bd=_nb)
+                        ST.save_intent(bp, route, sess + 1, _pre_cut, _cut_book,
+                                       _cut_orders, session_date=cur)
                         _cut_placed = []
+
+                        def _cut_fail(_inst, _qty, _what):
+                            """Единый разбор сбоя среза: вернуть книгу к ДОсрезной и назвать
+                            исход честно. Возврат недоказуем — исход О-5, как и везде."""
+                            try:
+                                ok_c, have_c, stuck_c = restore_to(broker, _pre_cut, route)
+                                _late_c = [x for x in stuck_c if 'ЗА КРАЕМ' in str(x)]
+                                _n = ('книга ПО ДОСТУПНЫМ ДАННЫМ возвращена к досрезной '
+                                      '(подтверждение — входной сверкой следующей сессии)'
+                                      if ok_c else
+                                      f'ВОССТАНОВИТЬ НЕ УДАЛОСЬ: у брокера {have_c}, '
+                                      f'неснятых заявок {len(stuck_c)}')
+                                if _late_c:
+                                    _n += ' | ' + '; '.join(_late_c)
+                            except Exception as ex2:
+                                _n = f'восстановление НЕ ВЫПОЛНЕНО ({ex2})'
+                            return RuntimeError(
+                                f'О-3-Е: сокращение {_inst} {_qty:+g} {_what} — книга в '
+                                f'промежуточном состоянии, состояние НЕ сохранено; {_n}; '
+                                f'ручной разбор (О-5)')
+
                         for _inst, _qty in _cut_orders:
                             _window_gate(deadline, what=f'О-3-Е сокращение {_inst} {_qty:+g}')
-                            _rec = broker.place(_inst, _qty, (ref_prices or {}).get(_inst))
+                            try:
+                                _rec = broker.place(_inst, _qty, (ref_prices or {}).get(_inst))
+                            except BaseException as ex:
+                                raise _cut_fail(_inst, _qty, f'не подано ({ex}, исход '
+                                                             f'НЕИЗВЕСТЕН, повтор не выполняется)')
                             _cut_placed.append(_rec)
                             if not _filled(_rec, _qty):
-                                raise RuntimeError(
-                                    f'О-3-Е: сокращение {_inst} {_qty:+g} исполнено '
-                                    f'{_rec.get("filled")} — книга в промежуточном '
-                                    f'состоянии, состояние НЕ сохранено, ручной разбор (О-5)')
+                                raise _cut_fail(_inst, _qty,
+                                                f'исполнено {_rec.get("filled")}')
                         _pos_c, _oo_c = _snapshot_consistent(broker)
-                        _cut_book = replace(dec.book_after, n_eq=_ne, n_bd=_nb)
                         _after_c = ST.reconcile(_cut_book, route, _pos_c, open_orders=_oo_c)
                         if _after_c:
                             raise RuntimeError(
@@ -1934,6 +2030,31 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                             f'О-3-Е ПОСЛЕ ИСПОЛНЕНИЙ: запас {float(_pc):.2f}× ниже '
                             f'{O3E_MIN} — книга сокращена в ту же сессию '
                             f'{_n0e}/{_n0b} -> {_ne}/{_nb} (норматив §8)')
+                        # ИСПОЛНЕНИЯ СРЕЗА ИДУТ В ЖУРНАЛ §7 (тридцать первый круг, №11).
+                        # Строки наблюдения и ИТОГ строятся ВЫШЕ, до среза, и после него
+                        # уже не менялись: самый крупный аварийный оборот сессии
+                        # (CSPX/CBU0 на сокращение до L=1) и его комиссии в выборку не
+                        # попадали, а счётчик строк сходился — значит _excluded_dates дату
+                        # не исключал, и §7 считал её ПОЛНЫМ наблюдением 5 б.п. Здесь
+                        # интерфейс брокера отдаёт и цену, и комиссию: это не долг
+                        # переходного исполнителя (№17 тридцатого круга), а пропуск.
+                        if journal_path:
+                            _cut_rows = o3e_journal(journal_path, dec, nlv, _cut_orders,
+                                                    _cut_placed)
+                            _rows = list(_rows) + list(_cut_rows)
+                            # ИТОГ ПЕРЕСЧИТЫВАЕТСЯ, А НЕ ДОПИСЫВАЕТСЯ: сессия без
+                            # первоначального ребаланса своего ИТОГА не имела вовсе, и
+                            # строки среза остались бы без маркера полноты.
+                            _pending_total = dict(
+                                date=f'{market.date:%Y-%m-%d}', leg='', instrument='ИТОГ',
+                                qty=0, px_order='-', px_fill='', commission='', reason='',
+                                nav=nlv, leverage='', roll_spread_near='',
+                                roll_spread_far='',
+                                note=(f'итог сессии {sess + 1}: строк {len(_rows)} '
+                                      f'(включая О-3-Е сокращение)'
+                                      + (f'; ИСКЛЮЧЕНА из выборки издержек §7: ориентир '
+                                         f'задержан ({len(_delayed)} строк, данные типа 3 '
+                                         f'~15 мин)' if _delayed else '')))
             dec.o3e_cut = _o3e_cut
 
             # ЗАМЫКАНИЕ СЕССИИ: без него prev_close_lev остаётся NaN, сравнение с капом

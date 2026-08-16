@@ -508,6 +508,20 @@ SP = _JP('sc_tr.json'); JX = _JP('sc_jx.csv'); SX = _JP('sc_sx.csv')
 def _cl():
     for f in (SP, JX, SX):
         if os.path.exists(f): os.remove(f)
+def _sp(**kw):
+    """Состояние перехода С DIGEST — как его пишет сам исполнитель (31-й круг, №16).
+
+    Фикстуры resume клали СЫРОЙ json.dump без поля digest, а _execute_locked с тридцатого
+    круга (№13) отвергает такое состояние ПЕРВЫМ делом. Три стенда из-за этого доказывали
+    не то, что заявлено: «cancel_order=None на resume = инцидент» получал инцидент по
+    поводу digest и до cancel_order не доходил, а сценарии, ожидающие POSTPONED/COMPLETE,
+    обрывали бы весь прогон. Тот же класс, что №11 тридцатого круга: успешный путь никем
+    не исполнялся. Состояние собирается ровно тем же кодом, что в бою."""
+    st = dict(kw)
+    st['digest'] = T._state_digest(st)
+    with open(SP, 'w') as _f:
+        json.dump(st, _f)
+    return st
 def _sig(target, grant=None, sid='s1', approve=True):
     hist = ''
     if target == 'F':
@@ -601,7 +615,12 @@ _cl(); _sig('E'); b0 = _B(netpos={'MES': 4}); inc = False
 try: T.execute(b0, SP, 1e6, {'EQ': dict(src=[('MES', 4, 38428.0)], dst=('CSPX', 700.0, 'ETF'))}, signal_id='s1')
 except T.Incident: inc = True
 chk('Исполнитель: без journal/mr_state = инцидент до ордеров (обходной хук устранён)', inc and len(b0.calls) == 0)
-_cl(); open(JX, 'w').write('asof,event,detail\n'); b1 = _B(netpos={'MES': 4}); inc = False
+# ФИКСТУРА ЖУРНАЛА ТОЖЕ ПРОВИЗИОНИРУЕТСЯ (тридцать первый круг, №13): содержимое журнала МР
+# теперь заверяется digest в конфигурации развёртывания, и файл, написанный руками мимо
+# append_event, — ровно то, что защита обязана поймать. Стенд проверяет ДРУГОЕ («журнал без
+# сигнала = отказ open»), поэтому обязан предъявить согласованный журнал, а не подделку.
+_cl(); open(JX, 'w').write('asof,event,detail\n'); M.test_configure(JX)
+b1 = _B(netpos={'MES': 4}); inc = False
 try: T.execute(b1, SP, 1e6, {'EQ': dict(src=[('MES', 4, 38428.0)], dst=('CSPX', 700.0, 'ETF'))}, signal_id='s1', **KW)
 except T.Incident: inc = True
 chk('Исполнитель: журнал без сигнала = отказ open до ордеров', inc and len(b1.calls) == 0)
@@ -617,8 +636,8 @@ except T.Incident as _ex:
 chk('Исполнитель: цена цели вне рыночной полосы = отказ до ордеров', inc and len(bpx.calls) == 0)
 _cl(); _sig('E'); L4 = {'EQ': dict(src=[('MES', 4, 38428.0)], dst=('CSPX', 700.0, 'ETF'))}
 _plan = T.plan_lots(L4, 1e6)
-json.dump(dict(asof='2026-08-10', tid=T.transition_id('s1', 'F', 'E', 1e6, _plan), postponed=0, done=[], executed_usd=1.0,
-               order_ids=[], snapshot={'MES': 4, 'CSPX': 0}, log=[], opened=True), open(SP, 'w'))
+_sp(asof='2026-08-10', tid=T.transition_id('s1', 'F', 'E', 1e6, _plan), postponed=0, done=[], executed_usd=1.0,
+               order_ids=[], snapshot={'MES': 4, 'CSPX': 0}, log=[], opened=True)
 b2 = _B(netpos={'MES': 4, 'CSPX': 0}, cancelnone=True, oo=['oX']); inc = False
 try: T.execute(b2, SP, 1e6, L4, signal_id='s1', resume=True, **KW)
 except T.Incident: inc = True
@@ -634,8 +653,8 @@ _cl(); _sig('E', grant=98565.0)
 _plan6 = T.plan_lots(L1, 1e6)
 _tid6 = T.transition_id('s1', 'F', 'E', 1e6, _plan6)
 M.append_event(JX, '2026-08-10', 'TRANSITION_OPEN', 'E|s1|' + _tid6)
-json.dump(dict(asof='2026-08-10', tid=_tid6, postponed=0, done=[], executed_usd=1.0, order_ids=[],
-               snapshot={'ZN': 1, 'CBU0': 0}, log=[], opened=True), open(SP, 'w'))
+_sp(asof='2026-08-10', tid=_tid6, postponed=0, done=[], executed_usd=1.0, order_ids=[],
+               snapshot={'ZN': 1, 'CBU0': 0}, log=[], opened=True)
 class _BPrevRaise(_B):
     def preview(s): raise RuntimeError('margin preview оборван связью')
 inc = False
@@ -662,13 +681,69 @@ chk('МР: ретро-датированная запись в журнал от
 _cl(); _sig('E', grant=98565.0)
 L5 = {'BOND': dict(src=[('ZN', 2, 98560.0)], dst=('CBU0', 5.0, 'ETF'))}
 _plan = T.plan_lots(L5, 1e6)
-json.dump(dict(asof='2026-08-10', tid=T.transition_id('s1', 'F', 'E', 1e6, _plan), postponed=0, done=[], executed_usd=1.0,
-               order_ids=[], snapshot={'ZN': 2, 'CBU0': 0}, log=[], opened=True), open(SP, 'w'))
+_sp(asof='2026-08-10', tid=T.transition_id('s1', 'F', 'E', 1e6, _plan), postponed=0, done=[], executed_usd=1.0,
+               order_ids=[], snapshot={'ZN': 2, 'CBU0': 0}, log=[], opened=True)
 b3 = _B(netpos={'ZN': 1, 'CBU0': 0}, preview=False)
 r3 = T.execute(b3, SP, 1e6, L5, signal_id='s1', resume=True, **KW)
 chk('Исполнитель: margin preview РАНЬШЕ восстановительных ордеров', r3['status'] == 'POSTPONED' and len(b3.calls) == 0)
 r3b = T.execute(_B(netpos={'ZN': 1, 'CBU0': 0}), SP, 1e6, L5, signal_id='s1', resume=True, **KW)
 chk('Исполнитель: восстановление после preview завершается', r3b['status'] == 'COMPLETE')
+# ПАРА К ИСПРАВЛЕННЫМ ФИКСТУРАМ (тридцать первый круг, №16): выше resume прошёл на
+# ДЕЙСТВИТЕЛЬНОМ состоянии — теперь то же состояние с подделанным прогрессом обязано
+# отказать. Без этой пары «отказ по digest» снова доказывался бы отсутствием digest.
+_cl(); _sig('E', grant=98565.0)
+_plan = T.plan_lots(L5, 1e6)
+_st_ok = _sp(asof='2026-08-10', tid=T.transition_id('s1', 'F', 'E', 1e6, _plan), postponed=0,
+             done=[], executed_usd=1.0, order_ids=[], snapshot={'ZN': 2, 'CBU0': 0},
+             log=[], opened=True)
+_st_bad = dict(_st_ok, done=['BOND'], executed_usd=98560.0)   # digest СТАРЫЙ: правка «на месте»
+json.dump(_st_bad, open(SP, 'w'))
+_bdg = _B(netpos={'ZN': 1, 'CBU0': 0}); inc = False
+try: T.execute(_bdg, SP, 1e6, L5, signal_id='s1', resume=True, **KW)
+except T.Incident as _ex: inc = 'ПОВРЕЖДЕНО' in str(_ex)
+chk('Исполнитель: подделанный прогресс resume отвергается по digest (не по его отсутствию)',
+    inc and len(_bdg.calls) == 0)
+_sp_no = dict(_st_ok); _sp_no.pop('digest')
+json.dump(_sp_no, open(SP, 'w'))
+_bdg2 = _B(netpos={'ZN': 1, 'CBU0': 0}); inc = False
+try: T.execute(_bdg2, SP, 1e6, L5, signal_id='s1', resume=True, **KW)
+except T.Incident as _ex: inc = 'без digest' in str(_ex)
+chk('Исполнитель: состояние перехода БЕЗ digest отвергается', inc and len(_bdg2.calls) == 0)
+# ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №12: метки незавершённой передачи ставятся ДО журнального OPEN
+# (иначе смерть в зазоре оставляет TRANSITION_OPEN без барьера, который читает дневной
+# контур), но ЧИСТЫЙ отказ обязан убирать их за собой — ни одной заявки не подано.
+_cl(); _sig('E', grant=98565.0)
+M.append_event(JX, '2026-08-10', 'TRANSITION_OPEN', 'E|s1|ЧУЖОЙ-tid')
+import state as _STho
+_hodir = _STho.lock_dir()
+_hobefore = sorted(x.name for x in _hodir.glob('handover-inflight-*.txt'))
+_bho = _B(netpos={'ZN': 1, 'CBU0': 0}); inc = False
+try: T.execute(_bho, SP, 1e6, L1, signal_id='s1', **KW)
+except T.Incident as _ex: inc = 'отклонил открытие' in str(_ex)
+_hoafter = sorted(x.name for x in _hodir.glob('handover-inflight-*.txt'))
+chk('Исполнитель: чистый отказ OPEN не оставляет меток незавершённой передачи',
+    inc and len(_bho.calls) == 0 and _hoafter == _hobefore)
+# ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №13: пин журнала МР защищал ПУТЬ и ЛИЧНОСТЬ файла, но не
+# СОДЕРЖИМОЕ. open(path,'w') сохраняет inode, и синтаксически правильная дописанная строка
+# OWNER_APPROVE разрешала полный переход маршрута — одной валидной правкой CSV. Обширные
+# тесты symlink/hardlink/inode доказывали личность файла, а не неизменность событий.
+_jdg = _JP('mr_digest.csv')
+open(_jdg, 'w').write('asof,event,detail\n')
+M.test_configure(_jdg)
+M.append_event(_jdg, '2026-08-08', 'SWITCH_SIGNAL', 'E|s1')
+_read_ok = len(M.journal_rows(_jdg)) == 1
+open(_jdg, 'a').write('2026-08-08,OWNER_APPROVE,E|s1\n')      # правка «на месте»
+_caught = ''
+try: M.journal_rows(_jdg)
+except M.JournalCorrupt as _ex: _caught = str(_ex)
+chk('МР: правка нормативного журнала «на месте» ловится по digest',
+    _read_ok and 'мимо append_event' in _caught)
+# ПАРА К ОТКАЗУ: правка отменена, журнал заверен заново — законная запись обязана пройти.
+# Стенд, проверяющий только ОТКАЗ, пропустил бы поломку успешного пути (класс №11 30-го).
+open(_jdg, 'w').write('asof,event,detail\n2026-08-08,SWITCH_SIGNAL,E|s1\n')
+M.test_configure(_jdg)
+M.append_event(_jdg, '2026-08-09', 'SWITCH_SIGNAL', 'F|s2')
+chk('МР: законная запись заверяется и читается', len(M.journal_rows(_jdg)) == 2)
 _cl(); _sig('F', sid='s1')
 b9 = _B(netpos={'CBU0': 197120, 'ZN': 0}, nlv=10e6)
 r9 = T.execute(b9, SP, 10e6, {'BOND': dict(src=[('CBU0', 197120, 5.0)], dst=('ZN', 98560.0, 'FUT'))},
@@ -779,8 +854,8 @@ chk('Исполнитель: порядок ног канонический — 
     _rz['status'] == 'COMPLETE' and _bz.maxu <= 100_000.0 + 1e-6 and _bz.calls[0][1] == 'CBU0')
 _cl(); _sig('E', grant=98565.0)
 _plz = T.plan_lots(L1, 1e6)
-json.dump(dict(asof='2026-08-10', tid=T.transition_id('s1', 'F', 'E', 1e6, _plz), postponed=1, done=[], executed_usd=0.0,
-               order_ids=[], snapshot={'ZN': 1, 'CBU0': 0}, log=[], opened=True), open(SP, 'w'))
+_sp(asof='2026-08-10', tid=T.transition_id('s1', 'F', 'E', 1e6, _plz), postponed=1, done=[], executed_usd=0.0,
+               order_ids=[], snapshot={'ZN': 1, 'CBU0': 0}, log=[], opened=True)
 _bz2 = _B(netpos={'ZN': 1, 'CBU0': 0}); inc = False
 try: T.execute(_bz2, SP, 1e6, L1, signal_id='s1', **KW)
 except T.Incident: inc = True
@@ -808,7 +883,7 @@ try: T.execute(_B(netpos={'CSPX': 110}), SP, 1e6, {'EQ': dict(src=[('CSPX', 110,
 except T.Incident: inc = True
 chk('Исполнитель: класс цели привязан к маршруту (FUT при SWITCH_E = инцидент)', inc)
 # --- Контртесты вердикта ред. 16 ---
-_cl(); open(JX, 'w').write('asof,event,detail\n2026-08-10,SWITCH_SIGNAL,E|s1\n2026-08-10,OWNER_APPROVE,E|s1\n')
+_cl(); open(JX, 'w').write('asof,event,detail\n2026-08-10,SWITCH_SIGNAL,E|s1\n2026-08-10,OWNER_APPROVE,E|s1\n'); M.test_configure(JX)   # фикстура провизионируется (31-й, №13)
 inc = False
 try: T.execute(_B(netpos={'CSPX': 110}), SP, 1e6, {'EQ': dict(src=[('CSPX', 110, 700.0)], dst=('MES', 38428.0, 'ETF'))},
                signal_id='s1', from_route='E', to_route='E', **KW)
@@ -819,7 +894,7 @@ inc = False; _bA = _B(netpos={'MES': 2, 'ZN': 1, 'CSPX': 0})
 try: T.execute(_bA, SP, 1e6, {'EQ': dict(src=[('MES', 2, 38428.0)], dst=ETFc('CSPX', 700.0))}, signal_id='s1', **KW)
 except T.Incident: inc = True
 chk('Исполнитель: позиция класса источника вне плана (ZN) = инцидент до заявок', inc and len(_bA.calls) == 0)
-_cl(); open(JX, 'w').write('asof,event,detail\n2026-08-10,SWITCH_SIGNAL,E|s1\n2026-08-10,OWNER_APPROVE,E|s1\n')
+_cl(); open(JX, 'w').write('asof,event,detail\n2026-08-10,SWITCH_SIGNAL,E|s1\n2026-08-10,OWNER_APPROVE,E|s1\n'); M.test_configure(JX)   # фикстура провизионируется (31-й, №13)
 inc = False
 try: T.execute(_B(netpos={'CBU0': 19712}), SP, 1e6, {'BOND': dict(src=[('CBU0', 19712, 5.0)], dst=FUTc('ZN', 98560.0))},
                signal_id='s1', from_route='E', to_route='F', **KW)
@@ -834,7 +909,7 @@ try: T.execute(_bL, SP, 1e6, L1, signal_id='s1', **KW)
 except T.Incident: inc = True
 _f.flock(_lf, _f.LOCK_UN); _lf.close()
 chk('Исполнитель: журнал заблокирован извне = инцидент, заявок ноль', inc and len(_bL.calls) == 0)
-_cl(); open(JX, 'w').write('asof,event,detail\n2026-08-10,SWITCH_SIGNAL,E|s1\n2026-08-10,OWNER_APPROVE,E|s1\n')
+_cl(); open(JX, 'w').write('asof,event,detail\n2026-08-10,SWITCH_SIGNAL,E|s1\n2026-08-10,OWNER_APPROVE,E|s1\n'); M.test_configure(JX)   # фикстура провизионируется (31-й, №13)
 chk('МР: произвольный pre-OPEN ABORT отклоняется (строгая привязка к OPEN)',
     M.confirm_transition(JX, SX, '2026-08-10', 'E', kind='abort', tid='RANDOM', sid='s1') is False)
 M.grant_granularity(JX, SX, '2026-08-10', 's1', 98565.0)
@@ -943,7 +1018,7 @@ chk('Ред.32: сводка маржи и заявок сохраняется �
 # --- Контртесты вердикта ред. 17 ---
 import hashlib as _hl
 open(_JP('fakereg.csv'), 'w').write('instrument,sec_type,pair_group,exchange,currency,con_id\nMES,ETF,EQ,CME,USD,x\nCSPX,FUT,EQ,LSEETF,USD,x\n')
-_cl(); open(JX, 'w').write('asof,event,detail\n2026-08-10,SWITCH_SIGNAL,E|s1\n2026-08-10,OWNER_APPROVE,E|s1\n')
+_cl(); open(JX, 'w').write('asof,event,detail\n2026-08-10,SWITCH_SIGNAL,E|s1\n2026-08-10,OWNER_APPROVE,E|s1\n'); M.test_configure(JX)   # фикстура провизионируется (31-й, №13)
 inc = False
 try: T.execute(_B(netpos={'CSPX': 110}), SP, 1e6, {'EQ': dict(src=[('CSPX', 110, 700.0)], dst=('MES', 38428.0, 'ETF'))},
                signal_id='s1', from_route='E', to_route='E', registry=_JP('fakereg.csv'), **KW)
@@ -1412,8 +1487,26 @@ if not _pair_here:
             _rserm = {r['instrument'] for r in csv.DictReader(_fm)
                       if r.get('sec_type') == 'FUT'}
         _missm = sorted(_rserm - _mserm)
+        # ПОКРЫТИЕ ИМЁН — НЕ ЗАМЕР (тридцать первый круг, №17). Ворота проверяли ровно
+        # разность множеств ключей: файл с нужными именами и нулями, NaN, чужим счётом или
+        # прошлогодней датой печатал «машинная пара согласована», то есть требование «с
+        # 20.08 замер РЕАЛЬНО получен» подменялось доказательством существования ключей.
+        # Живой переход всё равно упал бы в _live_margins — уже после того, как выпуск
+        # объявил готовность. Спрашиваем ровно у того кода, который решает в бою: _meta.
+        # account против машинного пина, возраст, совпадение _meta.series с содержимым,
+        # конечность и положительность init/maint. Дублировать эти правила здесь значило бы
+        # завести второй норматив, который разойдётся с первым.
+        if not _missm:
+            _keep_mrg = _os1.environ.get('ADDFUT_MARGINS')
+            _os1.environ['ADDFUT_MARGINS'] = _mj_m
+            try:
+                T._live_margins()
+            finally:
+                _os1.environ.pop('ADDFUT_MARGINS', None)
+                if _keep_mrg is not None:
+                    _os1.environ['ADDFUT_MARGINS'] = _keep_mrg
     except Exception as _exm:
-        _missm = [f'машинная пара недоступна: {_exm}']
+        _missm = [f'машинная пара недоступна либо замер непригоден: {_exm}']
     if not _missm:
         chk('машинная пара «замер маржи <-> реестр» согласована', True, 'все серии покрыты')
     elif _today_s < _MRG_DEADLINE:

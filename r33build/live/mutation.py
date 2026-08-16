@@ -493,6 +493,33 @@ def _adapter_mutations():
             return [f'{sym}: ISIN не совпал']
         return orig, patched, FC
 
+    def series_unchecked_at_order():
+        """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №8: сверка личности на границе заявки снова БЕЗ разбора
+        имени — ровно тот набор, что был у _contract (реестр + ISIN). Согласованно
+        подменённая строка (ESU26 с полями ESZ26) проходит, и заявка уходит в декабрьскую
+        поставку под именем сентябрьской. Патчится contracts.identity_bad — единая точка
+        вызова обоих читателей: адаптера и сборщика (урок №3 тридцатого круга — раннер
+        обязан патчить ТОТ модуль, где защита живёт)."""
+        import contracts as CTm
+        orig = CTm.identity_bad
+        return orig, (lambda ib, name, c, row: CTm.mismatches(c, row)
+                      + CTm.verify_isin(ib, c, row)), CTm
+
+    def unit_ref_mes_x10():
+        """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №6: полоса единицы MES снова считается как у ES (котировка
+        умножается на 10). Правильный план Е->Ф отвергается «вне рыночной полосы»."""
+        import ib_broker as Bm
+        import sim_v13 as Sm
+        orig = Bm.IBBroker.unit_ref
+        def patched(self, instrument, cls):
+            r = orig(self, instrument, cls)
+            name = str(instrument)
+            root = ''.join(ch for ch in name if not ch.isdigit()).rstrip('UZHM') or name
+            if r and root == 'MES':
+                return (r[0] * 10.0, r[1] * 10.0)
+            return r
+        return orig, patched
+
     def future_identity_copied():
         """Поставка копируется из ответа биржи (как было до восемнадцатого круга, №7)."""
         import first_connect as FC
@@ -514,6 +541,9 @@ def _adapter_mutations():
             ('отмена по инструменту, а не по метке', 'cancel_order', cancel_by_instrument),
             ('барьер отчётов об исполнении снят', '_exec_barrier', no_exec_barrier),
             ('контракт без сверки личности', '_contract', no_identity_check),
+            ('серия имени не сверяется на границе заявки', 'identity_bad',
+             series_unchecked_at_order),
+            ('полоса единицы MES считается как у ES', 'unit_ref', unit_ref_mes_x10),
             ('пустой ISIN реестра пропускается', 'verify_isin', isin_empty_ok),
             ('ошибка запроса заявок глотается', 'open_orders', orders_req_swallow),
             ('неизвестность компенсации глотается', 'restore_to', restore_swallows_unknown),
@@ -636,6 +666,21 @@ def _feed_mutations():
         orig = CTm.series_mismatch
         return orig, (lambda name, c, row=None: []), CTm, 'series_mismatch'
 
+    def signal_digest_optional():
+        """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №7: сверка digest снова включается ТОЛЬКО при наличии
+        непустого сайдкара — удаление файла .sha256 выключает защиту живого ряда."""
+        orig = FD.verify_signal_digest
+        def patched(p, live_series):
+            import hashlib as _h
+            from pathlib import Path as _P
+            _dp = _P(str(p) + '.sha256')
+            if not _dp.exists():
+                return
+            _w = _dp.read_text(encoding='utf-8').strip()
+            if _w and _w != _h.sha256(_P(p).read_bytes()).hexdigest():
+                raise FD.FeedError('ряд не совпадает с digest')
+        return orig, patched, 'verify_signal_digest'
+
     def raw_es_price():
         """Цена ES подаётся КАК ЕСТЬ, без приведения к единице расчёта (дефект первой живой
         сессии). Прежняя редакция этой мутации умножала цену в источнике, а сборщик тут же
@@ -719,7 +764,8 @@ def _feed_mutations():
             ('состояние ноги через bool()', loose_bool),
             ('даты баров не проверяются', no_date_check),
             ('ориентиры без точной сессии', refs_loose_age),
-            ('нет строки месяца — берётся последняя', fallback_last_row)]
+            ('нет строки месяца — берётся последняя', fallback_last_row),
+            ('digest живого ряда не обязателен', signal_digest_optional)]
 
 
 def _run_mutations():
@@ -755,6 +801,25 @@ def _run_mutations():
                 ST.save(bp, replace(b, close_provisional=False), route, sess)
             return orig(ib, route, dry)
         return orig, patched, 'do_trade'
+
+    import daily as DLm
+
+    def o3e_cut_silent():
+        """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №2: признак состоявшегося среза снова игнорируется —
+        тревога зависит только от повторного замера, а он после удачного среза ВЫШЕ порога.
+        Аварийное сокращение проходит молча, причина не разбирается."""
+        orig = SS.post_o3e_alarm
+        def patched(cushion, book_after, cut=None):
+            if cushion is None:
+                return bool(getattr(book_after, 'n_eq', 0) or getattr(book_after, 'n_bd', 0))
+            return cushion < DLm.O3E_MIN
+        return orig, patched, SS, 'post_o3e_alarm'
+
+    def o3e_journal_off():
+        """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №11: исполнения аварийного среза снова не попадают в §7 —
+        крупнейший оборот сессии исключён из выборки издержек, а дата считается полной."""
+        orig = DLm.o3e_journal
+        return orig, (lambda journal_path, dec, nav, cut_orders, cut_placed: []), DLm, 'o3e_journal'
 
     def force_route_f():
         """Маршрут игнорируется: маршрут Е считается фьючерсным."""
@@ -843,13 +908,13 @@ def _run_mutations():
         только при известно-низком запасе, неизвестный принимается молча."""
         import daily as DLm
         orig = SS.post_o3e_alarm
-        return orig, (lambda pc, ba: pc is not None and pc < DLm.O3E_MIN), SS, 'post_o3e_alarm'
+        return orig, (lambda pc, ba, cut=None: pc is not None and pc < DLm.O3E_MIN), SS, 'post_o3e_alarm'
 
     def post_o3e_removed():
         """Пост-трейд проверка О-3-Е удалена целиком (как было до восемнадцатого круга,
         №1): запас после исполнений не смотрит никто."""
         orig = SS.post_o3e_alarm
-        return orig, (lambda pc, ba: False), SS, 'post_o3e_alarm'
+        return orig, (lambda pc, ba, cut=None: False), SS, 'post_o3e_alarm'
 
     def dry_writes_journal():
         """Наблюдение пишет строки §7 без итоговой (как было до девятнадцатого круга,
@@ -957,6 +1022,8 @@ def _run_mutations():
             ('журнал не проверяется перед торговлей', no_journal_verify),
             ('пост-трейд None глотается', post_o3e_swallow_none),
             ('пост-трейд проверка О-3-Е удалена', post_o3e_removed),
+            ('состоявшийся срез не поднимает тревогу', o3e_cut_silent),
+            ('исполнения среза не идут в журнал §7', o3e_journal_off),
             ('наблюдение пишет строки §7', dry_writes_journal),
             ('каталог тревог живёт своей жизнью', statedir_own_home),
             ('нет файла — «ФАЙЛА НЕТ» при успехе', worm_missing_ok),
@@ -1168,6 +1235,14 @@ def _transition_mutations():
         return orig, (lambda: __import__('pandas').Timestamp('2020-01-02').date()), \
                _FDm, 'exchange_today'
 
+    def mr_digest_off():
+        """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №13: содержимое нормативного журнала МР снова не
+        заверяется — пин сторожит только личность файла, и валидная правка «на месте»
+        (дописанный OWNER_APPROVE) разрешает перевод счёта в другой маршрут."""
+        import mr_engine as _Mm
+        orig = _Mm._verify_journal_digest
+        return orig, (lambda j, body: None), _Mm, '_verify_journal_digest'
+
     return [('дата перехода принимается на веру', asof_trusted),
             ('край общего окна не проверяется', gate_no_window),
             ('исполнение компенсации не сверяется', comp_unchecked),
@@ -1185,7 +1260,8 @@ def _transition_mutations():
             ('maint прежде init', maint_first),
             ('давность замера не проверяется', age_unchecked),
             ('тревога перехода не пишется', alarm_silent),
-            ('завершённые лоты исполняются повторно', replay_done)]
+            ('завершённые лоты исполняются повторно', replay_done),
+            ('содержимое журнала МР не заверяется', mr_digest_off)]
 
 
 def _roll_mutations():
@@ -1862,9 +1938,20 @@ def run_pack_mutations():
         orig = DLm.repack_excess
         return orig, (lambda before, after, unit_is_mes: (0, 0, 0)), 'repack_excess'
 
+    def cut_cost_by_count():
+        """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №4: издержки среза снова считаются по ЧИСЛУ срезанных
+        единиц (за каждую списывается ещё одна комиссия), а не по изменению оборота."""
+        import sim_v13 as Sm
+        orig = DLm.cut_cost_delta
+        def patched(n0, plan, final, u_e, u_b, roll_a=False, roll_b=False):
+            (_, _), (pe0, pb0), (ne, nb) = n0, plan, final
+            return Sm.COST * ((pe0 - ne) * u_e + (pb0 - nb) * u_b)
+        return orig, patched, 'cut_cost_delta'
+
     miss = []
     for label, make in (('избыток перекладки считает оборот ролла', excess_counts_roll),
-                        ('ворота капа без вычета избытка перекладки', excess_cap_gate_off)):
+                        ('ворота капа без вычета избытка перекладки', excess_cap_gate_off),
+                        ('издержки среза по числу единиц, а не по обороту', cut_cost_by_count)):
         orig, patched, attr = make()
         setattr(DLm, attr, patched)
         try:

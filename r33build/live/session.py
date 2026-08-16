@@ -61,13 +61,22 @@ def state_dir():
     return Path(ST.lock_dir())
 
 
-def post_o3e_alarm(cushion, book_after):
+def post_o3e_alarm(cushion, book_after, cut=None):
     """Нужна ли тревога ПОСЛЕ исполнений маршрута Е (девятнадцатый круг, №10).
 
     None при ЖИВОЙ книге — не «требования нет», а НЕИЗВЕСТНЫЙ запас: сводка брокера могла
     не обновиться после сделки. Прежнее условие «not None and < порога» глотало None и
     оставляло книгу ~2x без тревоги при фактическом запасе, возможно, ниже 1,40. None при
-    ПУСТОЙ книге штатен: требования действительно нет."""
+    ПУСТОЙ книге штатен: требования действительно нет.
+
+    СОСТОЯВШИЙСЯ СРЕЗ — ТРЕВОГА САМ ПО СЕБЕ (тридцать первый круг, №2). Удачное сокращение
+    поднимает запас ВЫШЕ порога, поэтому по одному лишь замеру тревоги не возникало вовсе:
+    аварийное сокращение до L=1 проходило молча, причина не разбиралась, и следующая сессия
+    полосой возвращала книгу к 2x. Признак среза приходит отдельным аргументом, а не
+    выводится из запаса, — иначе защита снова зависела бы от величины, которую сама же
+    и починила."""
+    if cut:
+        return True
     if cushion is None:
         return bool(getattr(book_after, 'n_eq', 0) or getattr(book_after, 'n_bd', 0))
     return cushion < DL.O3E_MIN
@@ -234,6 +243,153 @@ def do_close(ib, route):
     return closed
 
 
+def do_o3e_cut(ib, route):
+    """СОКРАЩЕНИЕ О-3-Е В УЖЕ ОТТОРГОВАННОЙ СЕССИИ (тридцать первый круг, №1).
+
+    Норматив §8: «live-отношение <1,40 — сокращение до L=1 В ТУ ЖЕ СЕССИЮ». Тридцатый круг
+    закрыл это для момента исполнения заявок (run_session сокращает книгу сразу после
+    сверки), но ВНУТРИДНЕВНАЯ вахта автопилота осталась только наблюдателем: обнаружив
+    провал запаса после traded-*, она писала ALARM — и этим же ALARM запрещала запуск,
+    который мог бы книгу сократить. Книга уходила в ночь около 2x именно в тот день, когда
+    запас уже пробит; небольшой следующий ход даёт margin call.
+
+    Это НЕ самолечение против О-5: сокращение до L=1 — предписанное нормой действие с
+    известной целью, а не «починка» расхождения с брокером. Тревога ставится в любом
+    исходе, торговля дальше не продолжается, причину разбирает человек.
+
+    Путь узкий намеренно: только маршрут Е, только сегодняшняя отторгованная и ещё не
+    замкнутая окончательно книга, только СОКРАЩЕНИЕ (o3e_reduce ограничен min(..., n0) и
+    нарастить не может), только внутри торгового окна. Всё остальное — отказ.
+    """
+    import state as ST
+    import journal as J
+    from dataclasses import replace as _rep
+
+    if route != 'E':
+        raise Refused(f'О-3-Е относится к маршруту Е, запрошен {route}')
+    _active = ST.active_route()
+    if _active != route:
+        raise Refused(f'запрошен маршрут {route}, а действующий — {_active}')
+    br = IBB.IBBroker(ib, account=_account_pin())
+    br.realtime_md = (os.environ.get('ADDFUT_REALTIME_MD') == '1')
+    bp = _book_path(route)
+    today = FD.exchange_today().strftime('%Y-%m-%d')
+    with ST.hold_book_lock():
+        book, sess, saved = ST.load(bp, DL.BookE)
+        if book is None:
+            raise Refused('нет сохранённой книги — сокращать нечего')
+        if saved != route:
+            raise Refused(f'книга записана для маршрута {saved}, запрошен {route}')
+        if book.last_session != today:
+            raise Refused(f'книга относится к сессии {book.last_session}, а сегодня '
+                          f'{today}: сокращение «в ту же сессию» неприменимо (О-5)')
+        if not getattr(book, 'close_provisional', False):
+            raise Refused(f'сессия №{sess} уже замкнута окончательно — заявки после '
+                          f'фиксации плеча закрытия переписали бы триггер капа §1')
+        _hf = ST.lock_dir() / f'handover-inflight-{route}.txt'
+        if _hf.exists():
+            raise Refused(f'{_hf}: передача книги не завершена — заявки запрещены (О-5)')
+        if ST.load_intent(bp) is not None:
+            raise Refused('на диске осталось намерение прошлого запуска — сокращение '
+                          'поверх неразобранного обрыва запрещено (О-5)')
+        # СВЕРКА ДО ЛЮБОГО РЕШЕНИЯ: считать сокращение от книги, которой у брокера нет,
+        # значит подать заявку в пустоту либо оставить short.
+        _pos, _oo = DL._snapshot_consistent(br)
+        _diff = ST.reconcile(book, route, _pos, open_orders=_oo)
+        if _diff:
+            raise Refused('книга расходится с брокером — сокращение отменено:\n  '
+                          + '\n  '.join(_diff))
+        _pc = br.margin_cushion()
+        if _pc is None:
+            raise Refused('живой запас О-3-Е недоступен при существующей книге — '
+                          'сокращение считалось бы по выдуманному числу (О-5)')
+        if float(_pc) >= DL.O3E_MIN:
+            print(f'запас О-3-Е {float(_pc):.2f}x не ниже {DL.O3E_MIN} — сокращение не требуется')
+            return None
+        jp = state_dir() / f'journal-{route}.csv'
+        try:
+            J.verify(jp)
+        except Exception as ex:
+            raise Refused(f'журнал §7 повреждён: {ex} — заявки запрещены (О-5)')
+        m, src = FD.build_market(ib, FD.exchange_today(), book, route=route)
+        refs = FD.reference_prices(ib, route=route)
+        refs = {k: v for k, v in refs.items() if not k.startswith('ОРИЕНТИР-НЕТ:')}
+        _n0e, _n0b = book.n_eq, book.n_bd
+        _share = 1.0 / max(float(m.st_eq) + float(m.st_bd), 1.0)
+        _nlv = float(br.net_liquidation())
+        _ne, _nb, _ = DL.o3e_reduce(_nlv, m, m.px_eq_prev, m.px_bd_prev,
+                                    _n0e, _n0b, _n0e, _n0b, _share)
+        _orders = [(i, q) for i, q in (('CSPX', _ne - _n0e), ('CBU0', _nb - _n0b)) if q]
+        if not _orders:
+            raise Refused(
+                f'запас О-3-Е {float(_pc):.2f}x ниже {DL.O3E_MIN}, но цель сокращения '
+                f'совпала с книгой ({_n0e}/{_n0b}) — норматив требует L=1, а арифметика '
+                f'его уже даёт: провал запаса вызван не размером книги. Ручной разбор (О-5)')
+        _deadline = FD.trade_deadline(route)
+        _cut = _rep(book, n_eq=_ne, n_bd=_nb)
+        ST.save_intent(bp, route, sess, book, _cut, _orders, session_date=today)
+        _placed = []
+        for _inst, _qty in _orders:
+            DL._window_gate(_deadline, what=f'О-3-Е (вахта) {_inst} {_qty:+g}')
+            try:
+                _rec = br.place(_inst, _qty, refs.get(_inst))
+            except BaseException as ex:
+                raise Refused(f'О-3-Е (вахта): {_inst} {_qty:+g} не подано ({ex}, исход '
+                              f'НЕИЗВЕСТЕН, повтор не выполняется) — ручной разбор (О-5)')
+            _placed.append(_rec)
+            if not DL._filled(_rec, _qty):
+                raise Refused(f'О-3-Е (вахта): {_inst} {_qty:+g} исполнено '
+                              f'{_rec.get("filled")} — книга в промежуточном состоянии, '
+                              f'состояние НЕ сохранено, ручной разбор (О-5)')
+        _pos2, _oo2 = DL._snapshot_consistent(br)
+        _after = ST.reconcile(_cut, route, _pos2, open_orders=_oo2)
+        if _after:
+            raise Refused('О-3-Е (вахта): после сокращения книга брокера не совпала с '
+                          'намеченной — состояние НЕ сохранено (О-5):\n  '
+                          + '\n  '.join(_after))
+        # ЖУРНАЛ §7: строки исполнения плюс ИТОГ, ЯВНО исключающий дату из выборки
+        # издержек. Строки ложатся ПОСЛЕ итога торговой сессии, значит её счётчик «строк N»
+        # перестал сходиться — дата и без пометки выпала бы из выборки, но молчаливое
+        # исключение оператору ничего не объясняет.
+        from types import SimpleNamespace as _SNS
+        _reason = (f'О-3-Е ВНУТРИДНЕВНАЯ ВАХТА: запас {float(_pc):.2f}× ниже {DL.O3E_MIN} — '
+                   f'книга сокращена в ту же сессию {_n0e}/{_n0b} -> {_ne}/{_nb} (§8)')
+        _dec = _SNS(date=m.date, leverage=float(book.prev_close_lev or 0.0),
+                    reasons=[_reason], refusals=[], roll_pairs=[])
+        for _row in J.rows_from_decision(_dec, _nlv, _orders,
+                                         {r['instrument']: r for r in _placed}):
+            J.append(jp, _row)
+        J.append(jp, dict(
+            date=today, leg='', instrument='ИТОГ', qty=0, px_order='-', px_fill='',
+            commission='', reason='', nav=_nlv, leverage='', roll_spread_near='',
+            roll_spread_far='',
+            note=f'О-3-Е сокращение после итога сессии {sess}: дата ИСКЛЮЧЕНА из выборки '
+                 f'издержек §7 ({_reason})'))
+        _closed = _rep(DL.close_out_e(_cut, m.px_eq_today, m.px_bd_today, _nlv),
+                       last_session=today, close_provisional=True)
+        ST.save(bp, _closed, route, sess, note=_reason)
+        ST.clear_intent(bp)
+    # ТРЕВОГА ОБЯЗАТЕЛЬНА И ПРИ УСПЕХЕ: сокращение состоялось, ПРИЧИНА не разобрана.
+    _af = state_dir() / f'ALARM-o3e-{today}.txt'
+    _msg = (f'{_reason}. Вход: {src}. Сокращение выполнено автоматикой по нормативу §8, '
+            f'но причина провала запаса НЕ разобрана: контур под этой тревогой не торгует '
+            f'до ручного снятия (О-5)\n')
+    try:
+        _af.write_text(_msg, encoding='utf-8')
+        if not _af.exists() or not _af.stat().st_size:
+            raise OSError('файл тревоги пуст после записи')
+    except Exception as _exa:
+        try:
+            (state_dir() / 'autopilot.STOP').write_text(
+                f'не удалось записать ALARM-o3e-{today}: {_exa}\n', encoding='utf-8')
+        except Exception:
+            pass
+        raise Refused(f'сокращение О-3-Е выполнено, но тревога НЕ записана ({_exa}) — '
+                      f'поставлен STOP, немедленный ручной разбор (О-5)')
+    print(_msg.strip())
+    return _closed
+
+
 def do_trade(ib, route, dry):
     import state as ST
 
@@ -324,7 +480,16 @@ def do_trade(ib, route, dry):
         # КРАЙ ТОРГОВОГО ОКНА ВНУТРЬ СЕССИИ (двадцатый круг, №6): один источник с
         # автопилотом (feed.trade_till), проверяется перед КАЖДОЙ заявкой.
         deadline=(None if dry else FD.trade_deadline(route)), **kw)
-    if route == 'E' and not dry and dec.trade and orders:
+    # СОСТОЯВШЕЕСЯ СОКРАЩЕНИЕ О-3-Е — САМО ПО СЕБЕ СОБЫТИЕ ДЛЯ ТРЕВОГИ (тридцать первый
+    # круг, №2). Условие входа было `dec.trade and orders`, а тревога ставилась только
+    # если ПОВТОРНЫЙ замер всё ещё ниже 1,40. Но удачный срез поднимает запас ВЫШЕ порога —
+    # значит в штатном исходе тревоги не возникало вовсе, и ветка «КНИГА СОКРАЩЕНА В ТУ ЖЕ
+    # СЕССИЮ» была практически недостижима. Следствие денежное: аварийное сокращение до
+    # L=1 прошло, причина не разобрана, а следующая сессия полосой наращивает книгу обратно
+    # к 2x. Плюс срез возможен и в сессии БЕЗ первоначального ребаланса (orders пуст) —
+    # такой день в эту ветку не заходил совсем.
+    _cut0 = getattr(dec, 'o3e_cut', None)
+    if route == 'E' and not dry and (bool(_cut0) or (dec.trade and orders)):
         # ЗАПАС ПОСЛЕ ИСПОЛНЕНИЙ (восемнадцатый круг, №1): предторговый замер относится к
         # СТАРОЙ книге; удвоение позиции могло увести фактический запас под порог, а
         # состояние сохранялось успешным. Пост-фактум сокращать нельзя (повторная торговля
@@ -333,13 +498,17 @@ def do_trade(ib, route, dry):
         _pc = br.margin_cushion()
         # None НЕ ГЛОТАЕТСЯ (девятнадцатый круг, №10): неизвестный запас при живой книге —
         # такая же тревога, как известно-низкий; иначе обход всей пост-трейд починки.
-        if post_o3e_alarm(_pc, dec.book_after):
+        if post_o3e_alarm(_pc, dec.book_after, _cut0):
             _day = f'{m.date:%Y-%m-%d}'
             _af = state_dir() / f'ALARM-o3e-{_day}.txt'
-            _txt = (f'запас О-3-Е ПОСЛЕ исполнений {_pc:.2f}x ниже {DL.O3E_MIN}'
-                    if _pc is not None else
-                    f'запас О-3-Е ПОСЛЕ исполнений НЕИЗВЕСТЕН (брокер не вернул '
-                    f'требование при живой книге)')
+            # ТЕКСТ НЕ ОБЪЯВЛЯЕТ НИЗКИМ ТО, ЧТО ИЗМЕРЕНО ВЫСОКИМ (№2): после удачного среза
+            # повторный замер штатно ВЫШЕ порога, и прежняя формулировка «X ниже 1,40» была
+            # бы прямой ложью в файле тревоги.
+            _txt = (f'запас О-3-Е ПОСЛЕ исполнений НЕИЗВЕСТЕН (брокер не вернул '
+                    f'требование при живой книге)' if _pc is None else
+                    (f'запас О-3-Е ПОСЛЕ исполнений {_pc:.2f}x ниже {DL.O3E_MIN}'
+                     if float(_pc) < DL.O3E_MIN else
+                     f'запас О-3-Е ПОСЛЕ исполнений {_pc:.2f}x (порог {DL.O3E_MIN})'))
             # ТЕКСТ НЕ ОБЕЩАЕТ ТОГО, ЧТО САМ ЖЕ ЗАПРЕЩАЕТ (двадцать девятый круг, №4).
             # Прежняя формулировка «сокращение обязано пройти следующей сессией» ложна:
             # под этим самым ALARM контур НЕ ТОРГУЕТ, значит сокращение не произойдёт ни
@@ -416,6 +585,12 @@ def main():
     g.add_argument('--dry', action='store_true', help='считать и сверить, заявок не подавать')
     g.add_argument('--live', action='store_true', help='подать заявки на счёт')
     g.add_argument('--close', action='store_true', help='замкнуть сессию после закрытия биржи')
+    # ОТДЕЛЬНЫЙ ВХОД ДЛЯ НОРМАТИВНОГО СОКРАЩЕНИЯ (тридцать первый круг, №1): вахта
+    # автопилота обязана не только увидеть провал запаса, но и выполнить предписанное §8
+    # сокращение в ту же сессию. Полный торговый путь для этого не годится — день уже
+    # отторгован, и повторный ребаланс запрещён.
+    g.add_argument('--o3e', action='store_true',
+                   help='сократить книгу маршрута Е до L=1 по §8 в уже отторгованной сессии')
     ap.add_argument('--route', default='F', choices=('F', 'E'))
     ap.add_argument('--client-id', type=int, default=33)
     a = ap.parse_args()
@@ -425,6 +600,8 @@ def main():
     try:
         if a.close:
             do_close(ib, a.route)
+        elif a.o3e:
+            do_o3e_cut(ib, a.route)
         else:
             do_trade(ib, a.route, dry=a.dry)
     except Refused as ex:

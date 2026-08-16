@@ -220,8 +220,7 @@ def contract_of(ib, name, reg=None):
     # ИМЯ СВЕРЯЕТСЯ С ПОСТАВКОЙ НЕЗАВИСИМО ОТ СТРОКИ РЕЕСТРА (тридцатый круг, №3):
     # mismatches сравнивает контракт с той же строкой, откуда взят con_id, — согласованно
     # подменённая строка проходит её целиком. Серию имени проверяет только series_mismatch.
-    bad = (CT.mismatches(c, reg[name]) + CT.series_mismatch(name, c, reg[name])
-           + CT.verify_isin(ib, c, reg[name]))
+    bad = CT.identity_bad(ib, name, c, reg[name])
     if bad:
         raise FeedError(f'{name}: con_id описывает другой контракт — {"; ".join(bad)}; '
                         f'цена чужого актива легла бы в основу размера книги. '
@@ -351,6 +350,41 @@ def yield_pct(ib, today, expected_prev=None):
     return y / 10.0, d               # TNX котируется в десятых долях процента
 
 
+def verify_signal_digest(p, live_series):
+    """DIGEST ЖИВОГО РЯДА ОБЯЗАТЕЛЕН (тридцать первый круг, №7).
+
+    Прежде сверка включалась только при существующем непустом сайдкаре — то есть УДАЛЕНИЕ
+    или обнуление файла .sha256 выключало её целиком: после отметки sigup-<месяц> ряд можно
+    было править весь месяц, а WORM заверял бы уже подменённое содержимое как норму. Один
+    бит ряда открывает или закрывает целую ногу порядка NLV, поэтому «нет доказательства»
+    здесь обязано означать отказ, а не разрешение (тот же класс, что молчаливое умолчание
+    route.txt, §7).
+
+    Живой ряд — взятый из ADDFUT_SIGNALS/~/.addfut без явного path: его пишет signal_update
+    и сам же заверяет на ОБЕИХ ветках (30-й круг, №9). Явный path (стенды, ручной разбор) и
+    исследовательский снимок сайдкара не имеют — для них отсутствие digest штатно.
+
+    Отдельной функцией — под парную мутацию: пока сверка сидела условием внутри
+    signal_state, «мягкая» её редакция не отличалась бы от строгой ни одним стендом.
+    """
+    import hashlib as _hl
+    _dp = Path(str(p) + '.sha256')
+    if not (_dp.exists() or live_series):
+        return
+    _want = _dp.read_text(encoding='utf-8').strip() if _dp.exists() else ''
+    if not _want and live_series:
+        raise FeedError(f'{p}: у ЖИВОГО сигнального ряда нет digest ({_dp.name} '
+                        f'отсутствует или пуст) — целостность ряда недоказуема, '
+                        f'торговля запрещена; заверить рядом с signal_update (О-5)')
+    if not _want:
+        return
+    _got = _hl.sha256(Path(p).read_bytes()).hexdigest()
+    if _want != _got:
+        raise FeedError(f'{p}: сигнальный ряд не совпадает с digest (записан '
+                        f'{_want[:12]}, факт {_got[:12]}) — ряд правили мимо '
+                        f'signal_update, торговля запрещена (О-5)')
+
+
 def signal_state(today, path=None, holidays=None):
     """Состояние сигнала §1 на сессию — из месячного ряда, без ежедневного пересчёта.
 
@@ -380,15 +414,7 @@ def signal_state(today, path=None, holidays=None):
     # целиком, и до сих пор был единственным источником истины без защиты целостности.
     # Отсутствие файла digest — не отказ (старые ряды и исследовательский снимок его не
     # имеют), но РАСХОЖДЕНИЕ — отказ: значит ряд правили мимо signal_update.
-    _dp = Path(str(p) + '.sha256')
-    if _dp.exists():
-        import hashlib as _hl
-        _want = _dp.read_text(encoding='utf-8').strip()
-        _got = _hl.sha256(Path(p).read_bytes()).hexdigest()
-        if _want and _want != _got:
-            raise FeedError(f'{p}: сигнальный ряд не совпадает с digest (записан '
-                            f'{_want[:12]}, факт {_got[:12]}) — ряд правили мимо '
-                            f'signal_update, торговля запрещена (О-5)')
+    verify_signal_digest(p, live_series=(path is None and p == live))
     df = pd.read_csv(p, parse_dates=[0])
     df = df.set_index(df.columns[0]).sort_index()
     cols = {c.lower(): c for c in df.columns}

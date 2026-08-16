@@ -49,7 +49,18 @@ class BrokerError(RuntimeError):
 
 
 class IBBroker:
-    UNIT_BAND = 0.15          # полоса unit_ref: ловит порядок величины, а не базисные пункты
+    # ПОЛОСЫ unit_ref — ПО КЛАССАМ, А НЕ ОДНА ШИРОКАЯ НА ВСЁ (тридцать первый круг, №5).
+    # Единая полоса 15% выбиралась по САМОМУ неопределённому случаю — ноге Б, где модельная
+    # единица несёт неизвестное исполнителю отношение d_fix/dref. Но для фондов и ноги А
+    # единица наблюдаема прямо: у ETF это биржевая цена доли, у ES/MES — ES_MULT x SPY, а
+    # расхождение котировки ES с SPY ограничено фьючерсным базисом (feed.BASIS_MAX = 2%).
+    # Держать там же 15% значило пропускать ошибку плана в 10-15%: завышенный dprice даёт
+    # недокупленную целевую ногу, заниженный unit_usd — фактическую непарную дельту выше
+    # лимита 1%. Сужаем там, где есть независимое измерение; для ZN широта остаётся
+    # ПРИЗНАННЫМ ПРЕДЕЛОМ (границы по крайним дюрациям норматива), а не выбором.
+    UNIT_BAND = 0.15          # нога Б: предел — d_fix книги исполнителю неизвестен
+    UNIT_BAND_ETF = 0.03      # фонд: единица = биржевая цена доли, сверять нечего сверх неё
+    UNIT_BAND_EQ = 0.05       # нога А: ES_MULT x SPY против ES/10, базис ограничен 2%
 
     def __init__(self, ib, registry=None, account=None, timeout_s=120, settle_s=SETTLE_S):
         miss = tz.missing()
@@ -326,8 +337,14 @@ class IBBroker:
         if not c.conId:
             raise BrokerError(f'{instrument}: con_id {cid} не подтверждён биржей')
         import contracts as CT
-        bad = CT.mismatches(c, self._meta.get(instrument, {})) \
-            + CT.verify_isin(self.ib, c, self._meta.get(instrument, {}))
+        # СЕРИЯ ИМЕНИ — И НА ГРАНИЦЕ ЗАЯВКИ (тридцать первый круг, №8). series_mismatch
+        # завели в тридцатом круге, но подключили только к feed.contract_of: согласованно
+        # подменённая строка (ESU26 с полями ESZ26) проходила ровно там, где подаётся
+        # заявка, — реестр и биржа подтверждают друг друга, а смысл ИМЕНИ не сверяется ни с
+        # чем. Заявка ушла бы в декабрьскую поставку под именем сентябрьской, а календарь
+        # роллов и зона поставки считаются ПО ИМЕНИ. Исправление одной точки вызова из
+        # двух — тот самый класс дефекта, ради которого круг и гоняется.
+        bad = CT.identity_bad(self.ib, instrument, c, self._meta.get(instrument, {}))
         if bad:
             raise BrokerError(f'{instrument}: con_id {cid} описывает другой контракт — '
                               f'{"; ".join(bad)}; обновить реестр first_connect.py')
@@ -424,14 +441,22 @@ class IBBroker:
         if str(cls) == 'ETF':
             px, _, _, _ = _FDu.closes(self.ib, _FDu.contract_of(self.ib, name), today)
             px = float(px)
-            return (px * (1.0 - self.UNIT_BAND), px * (1.0 + self.UNIT_BAND))
+            return (px * (1.0 - self.UNIT_BAND_ETF), px * (1.0 + self.UNIT_BAND_ETF))
         if root in ('ES', 'MES'):
             # Модельная единица ноги А — ES_MULT x SPY; котировка ES отличается от SPY
             # фьючерсным базисом, и es_to_unit приводит её к десятой доле индекса.
+            # MES КОТИРУЕТСЯ ТЕМ ЖЕ УРОВНЕМ ИНДЕКСА, ЧТО И ES (тридцать первый круг, №6).
+            # Здесь стояло es_to_unit(px * 10) для MES — как будто мини-контракт котируется
+            # десятой долей индекса. Он котируется тем же числом (~6000), а от ES отличается
+            # множителем ($5 против $50), и он уже учтён в mult. Полоса MES выходила ровно
+            # в ДЕСЯТЬ раз выше истины ($300 000 против $30 000): правильный план Е->Ф
+            # отвергался как «вне рыночной полосы», а подогнанный под ошибочную полосу
+            # купил бы десятую часть ноги А. Живая реализация не исполнялась ни одним
+            # стендом — все переходные стенды подменяют unit_ref своей таблицей.
             px, _, _, _ = _FDu.closes(self.ib, _FDu.contract_of(self.ib, name), today)
             mult = _Su.ES_MULT / 10.0 if root == 'MES' else _Su.ES_MULT
-            u = mult * _FDu.es_to_unit(float(px) * (10.0 if root == 'MES' else 1.0))
-            return (u * (1.0 - self.UNIT_BAND), u * (1.0 + self.UNIT_BAND))
+            u = mult * _FDu.es_to_unit(float(px))
+            return (u * (1.0 - self.UNIT_BAND_EQ), u * (1.0 + self.UNIT_BAND_EQ))
         if root == 'ZN':
             y, _ = _FDu.yield_pct(self.ib, today)
             dref = _FDu.dref_from_yield(float(y) / 100.0)

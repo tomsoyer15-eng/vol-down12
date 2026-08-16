@@ -105,7 +105,11 @@ def _read_deploy():
     try:
         d = json.loads(open(p, encoding='utf-8').read())
         return {'journal': d['journal'], 'dev': int(d['dev']), 'ino': int(d['ino']),
-                'uuid': d['uuid'], 'epoch': int(d['epoch'])}
+                'uuid': d['uuid'], 'epoch': int(d['epoch']),
+                # СОДЕРЖИМОЕ, А НЕ ТОЛЬКО ЛИЧНОСТЬ ФАЙЛА (тридцать первый круг, №13):
+                # старые конфигурации поля не имеют — тогда сверять нечем, и это честно
+                # видно по отсутствию ключа, а не выдаётся за пройденную проверку.
+                'sha256': d.get('sha256')}
     except Exception:
         raise JournalCorrupt('конфигурация развёртывания повреждена')
 
@@ -116,6 +120,63 @@ def _write_deploy(cfg):
         f.write(json.dumps(cfg)); _fsync_file(f)
     os.replace(tmp, p)
     _fsync_dir(p)
+
+def _journal_digest(path):
+    """SHA-256 нормативного журнала МР (тридцать первый круг, №13).
+
+    Хэшируется ТЕКСТ в том же режиме, в каком журнал читается (universal newlines):
+    csv.writer пишет CRLF, а читатель отдаёт LF — по сырым байтам заверение не сошлось бы
+    НИКОГДА, и первое же замыкание объявило бы законный журнал подделанным. Ровно тот
+    класс, что №11 тридцатого круга: заверяется не то тело, которое проверяется.
+    """
+    import hashlib as _hl
+    with open(path, encoding='utf-8') as _f:
+        return _hl.sha256(_f.read().encode('utf-8')).hexdigest()
+
+
+def _stamp_journal_digest(j):
+    """Записать свежий digest журнала в конфигурацию развёртывания.
+
+    ЗАЧЕМ. Пин защищал ПУТЬ и ЛИЧНОСТЬ файла (st_dev/st_ino, O_NOFOLLOW, symlink/hardlink),
+    но не его СОДЕРЖИМОЕ: `open(path, 'w')` сохраняет inode, и синтаксически правильная
+    правка — дописанный OWNER_APPROVE, подменённый sid или цель — проходила все проверки.
+    Одной валидной строкой CSV разрешался полный переход маршрута. Обширные тесты
+    symlink/hardlink/inode доказывали ЛИЧНОСТЬ файла, а не неизменность нормативных
+    событий — ровно ложное доказательство.
+
+    Дайджест живёт в ДРУГОМ файле (конфигурация развёртывания), поэтому правка журнала
+    «на месте» перестаёт быть одношаговой и становится видимой при первом же чтении.
+    Криптографической подписи это не заменяет (она признана и не реализована, §8), но
+    молчаливое расхождение превращает в отказ.
+    """
+    cur = _read_deploy()
+    if cur is None or cur['journal'] != os.path.realpath(j):
+        return
+    cur['sha256'] = _journal_digest(j)
+    _write_deploy(cur)
+
+
+def _verify_journal_digest(j, body):
+    """Сверить прочитанное тело журнала с дайджестом конфигурации развёртывания.
+
+    Сверяется ТОЛЬКО когда конфигурация есть, указывает на ЭТОТ журнал и несёт sha256:
+    стендовые журналы во временных каталогах никем не провизионированы, и требовать от них
+    дайджест значило бы доказывать фикстуру. Для боевого журнала конфигурация обязательна
+    (её требует configure), поэтому там сверка безусловна.
+    """
+    cur = _read_deploy()
+    if not cur or cur.get('sha256') is None:
+        return
+    if cur['journal'] != os.path.realpath(j):
+        return
+    import hashlib as _hl
+    _got = _hl.sha256(body.encode('utf-8')).hexdigest()
+    if _got != cur['sha256']:
+        raise JournalCorrupt(
+            f'журнал МР правился мимо append_event: содержимое ({_got[:12]}) не совпадает '
+            f'с заверенным при последней записи ({str(cur["sha256"])[:12]}). Событиями '
+            f'этого файла разрешается переход маршрута — исполнение запрещено (О-5)')
+
 
 def _validate_journal_file(path, want_stat=False):
     """Схема и личность читаются с ОДНОГО дескриптора — окна между проверками нет."""
@@ -259,7 +320,8 @@ def _provision_locked(journal_abspath, force):
         else:
             epoch = 1
         _write_deploy({'journal': j, 'dev': st.st_dev, 'ino': st.st_ino,
-                       'uuid': uuid.uuid4().hex, 'epoch': epoch})
+                       'uuid': uuid.uuid4().hex, 'epoch': epoch,
+                       'sha256': _journal_digest(j)})
         st2 = os.stat(j)
         if (st2.st_dev, st2.st_ino) != (st.st_dev, st.st_ino):
             raise JournalCorrupt('журнал подменён во время провизии — повторите команду')
@@ -296,6 +358,11 @@ def test_configure(journal_abspath):
     st = os.stat(j)
     if cur is None or cur['journal'] != j or (cur['dev'], cur['ino']) != (st.st_dev, st.st_ino):
         provision_journal_pin(j, force=cur is not None)
+    # ДАЙДЖЕСТ ЗАВЕРЯЕТСЯ ЗАНОВО (тридцать первый круг, №13). test_configure означает «этот
+    # журнал теперь развёрнутый»; фикстура могла быть переписана НА МЕСТЕ (тот же inode), и
+    # тогда provision не срабатывает, а старый digest объявил бы законную фикстуру
+    # подделкой. В бою re-stamp не происходит: configure() содержимое не заверяет.
+    _stamp_journal_digest(j)
     return configure(j)
 
 def canonical_journal(journal):
@@ -346,6 +413,7 @@ def journal_rows(journal, asof=None):
             _vf = _open_journal_verified(journal)
             try: _body = _vf.read()
             finally: _vf.close()
+        _verify_journal_digest(journal, _body)
         import io as _io2
         rd = csv.DictReader(_io2.StringIO(_body), restkey='_extra')
         if rd.fieldnames is not None and rd.fieldnames != ['asof', 'event', 'detail']:
@@ -468,6 +536,9 @@ def _append_raw(journal, asof, event, detail):
             f.seek(0, os.SEEK_END); f.write(buf.getvalue()); _fsync_file(f)
         finally:
             f.close()
+    # ЗАВЕРЕНИЕ СОДЕРЖИМОГО — ПОСЛЕ КАЖДОЙ ЗАКОННОЙ ЗАПИСИ (тридцать первый круг, №13):
+    # иначе первая же наша собственная строка выглядела бы как правка «на месте».
+    _stamp_journal_digest(j)
 
 def append_event(journal, asof, event, detail):
     # Имя события проверяется ДО записи: незнакомое имя не должно попадать в нормативный
