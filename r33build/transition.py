@@ -1297,6 +1297,17 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         if _fv != _fv or _fv in (float('inf'), float('-inf')):
             fail(f'{_k}: позиция брокера {_v!r} — не конечное число; такая величина '
                  f'проходит ВСЕ сравнения молча и дошла бы до COMPLETE')
+    # ЦЕЛОЧИСЛЕННОСТЬ ФЬЮЧЕРСНОЙ ПОЗИЦИИ (двадцать девятый круг, №10). Финальная сверка
+    # проверяла ДОЛЛАРОВЫЙ допуск до половины единицы цели, но не требовала, чтобы сама
+    # позиция была целой: дробный остаток фьючерса (следствие частичного фила или ошибки
+    # брокера) укладывался в допуск и уходил в книгу, где нога считается целыми контрактами.
+    for _kf, _vf in (now or {}).items():
+        if not str(_kf).startswith(('ES', 'MES', 'ZN')):
+            continue
+        _ff = float(_vf or 0)
+        if abs(_ff - round(_ff)) > 1e-9:
+            fail(f'{_kf}: дробная фьючерсная позиция {_ff:+g} у брокера — книга считает '
+                 f'ногу ЦЕЛЫМИ контрактами, COMPLETE запрещён (ручная сверка)')
     for name, spec in legs.items():
         di, dp = spec['dst'][0], spec['dst'][1]
         planned_usd = sum(n*u for _, n, u in spec['src'])
