@@ -274,7 +274,13 @@ def snap(day, bdir):
                         f'{_sha(dst, required=True)}\n')
     try:
         out = _write_anchor(day, body_full)
-        _git_commit_verified(out, body)
+        # СВЕРЯЕТСЯ ТО ТЕЛО, КОТОРОЕ ЗАПИСАНО (тридцатый круг, №11). Здесь стояло `body` —
+        # тело БЕЗ строки sha256 архива, тогда как в файл уходит body_full. Хэши не могли
+        # совпасть НИКОГДА: каждое замыкание помечало бы архив .rejected, поднимало ALARM,
+        # не ставило closed-* и останавливало автопилот до ручного разбора. Дефект внесён
+        # моей же правкой двадцать девятого круга (№16 двадцать восьмого), когда сверку
+        # перевели с файла на диске на проверенное тело — и передали не то тело.
+        _git_commit_verified(out, body_full)
     except BaseException as ex:
         _m = reject_archive(dst)
         raise RuntimeError(f'якорь не подтверждён ({ex}) — архив {dst.name} помечен '

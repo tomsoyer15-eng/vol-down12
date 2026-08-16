@@ -1322,7 +1322,8 @@ RUN_CASES = ('наблюдение', 'торговля', 'незамкнутая
              'worm: обязательный файл отсутствует',
              'worm: якорь аттестует действующие пути',
              'worm: подмена содержимого при коммите ловится',
-             'worm: архив разных поколений помечается')
+             'worm: архив разных поколений помечается',
+             'worm: ШТАТНЫЙ снимок проходит целиком')
 
 
 def _session_run(case):
@@ -2207,6 +2208,37 @@ def _worm_case(kind):
         # его всегда несёт. Прежняя фикстура его не создавала.
         (Path(tmp) / 'signals_levels.csv').write_text(
             ',IEF,SPY\n2026-07-31,92.630000,747.030000\n', encoding='utf-8')
+        if kind == 'worm: ШТАТНЫЙ снимок проходит целиком':
+            # ТРИДЦАТЫЙ КРУГ, №11. Успешный производственный путь snap() не исполнял НИ
+            # ОДИН стенд: единственный вызов проверял ОТКАЗ. Поэтому правка, из-за которой
+            # заверение не могло совпасть никогда (в файл уходило body_full, а сверялось
+            # body), прошла батарею, мутации, replay и выпуск — а в бою остановила бы
+            # автопилот на первом же замыкании. Здесь снимок обязан ПРОЙТИ: архив остаётся
+            # под рабочим именем, якорь лежит в HEAD, и его текст несёт sha256 архива.
+            bdir = Path(tmp) / 'backups'
+            rd = Path(tempfile.mkdtemp(prefix='addfut-git-ok-'))
+            subprocess.run(['git', 'init', '-q', str(rd)], check=True, capture_output=True)
+            for _k, _v in (('user.email', 'stend@local'), ('user.name', 'stend')):
+                subprocess.run(['git', '-C', str(rd), 'config', _k, _v],
+                               check=True, capture_output=True)
+            (rd / 'anchors').mkdir()
+            keep_root, keep_anch = WA.ROOT, WA.ANCHORS
+            WA.ROOT, WA.ANCHORS = rd, rd / 'anchors'
+            try:
+                WA.snap('2026-08-14', bdir)
+                _rab = sorted(x.name for x in bdir.glob('addfut-*.tgz'))
+                _rej = sorted(x.name for x in bdir.glob('addfut-*.tgz.rejected'))
+                _anch = sorted(x.name for x in (rd / 'anchors').glob('worm-*.txt'))
+                _txt = (rd / 'anchors' / _anch[0]).read_text(encoding='utf-8') if _anch else ''
+                _in_head = subprocess.run(
+                    ['git', '-C', str(rd), 'ls-tree', 'HEAD', '--', f'anchors/{_anch[0]}'],
+                    capture_output=True, text=True).stdout.strip() if _anch else ''
+                out['ok'] = (len(_rab) == 1 and not _rej and len(_anch) == 1
+                             and bool(_in_head) and 'sha256 архива' in _txt)
+                out['files'] = dict(рабочие=_rab, помеченные=_rej, якоря=_anch)
+            finally:
+                WA.ROOT, WA.ANCHORS = keep_root, keep_anch
+            return out
         if kind == 'worm: архив разных поколений помечается':
             # ДВАДЦАТЫЙ КРУГ, №22: _tar_state публикует addfut-*.tgz ДО повторного
             # вычисления тела. Состояние «меняется» между двумя вычислениями — снимок
@@ -2274,6 +2306,15 @@ def _worm_case(kind):
             if v is not None:
                 os.environ[k] = v
     return out
+
+
+@rinv('штатный снимок WORM проходит целиком, а не только отказывает',
+      needs=lambda r: r['case'] == 'worm: ШТАТНЫЙ снимок проходит целиком')
+def _r30a(r):
+    """ТРИДЦАТЫЙ КРУГ, №11. Все стенды WORM проверяли ОТКАЗЫ, и защита, сломанная так, что
+    заверение не совпадало никогда, оставалась зелёной во всём выпуске. Отказной стенд от
+    этого не спасает: он получает исключение и по ЛОЖНОЙ причине тоже."""
+    return not r['raised'] and r['ok'] is True
 
 
 @rinv('чужой процесс не берёт занятый замок и берёт свободный',
@@ -2518,6 +2559,26 @@ def check_ib_interface():
     no_live = [m for m in used if not hasattr(IB, m)]
     no_stub = [m for m in used if not hasattr(ib_stub.StubIB, m)]
     ok = not no_live and not no_stub
+    # СВЕРЯЕТСЯ НЕ ТОЛЬКО НАЛИЧИЕ ИМЕНИ, НО И СВОЙСТВО, РАДИ КОТОРОГО ОНО ЗОВЁТСЯ
+    # (тридцатый круг, №2). Замечание утверждало, что reqAccountSummary в 0.9.86 ходит на
+    # сервер лишь при пустом кэше, поэтому NLV и запас О-3-Е могут быть доторговыми.
+    # Проверено по исходнику и ОТКЛОНЕНО: условие `if not self.wrapper.acctSummary` живёт
+    # в accountSummaryAsync (АКСЕССОРЕ), а reqAccountSummaryAsync безусловно берёт новый
+    # reqId и шлёт запрос. Но методическая половина замечания верна — стенды доказывали
+    # СТАБ. Здесь проверяется само свойство живой библиотеки: барьер обязан быть
+    # безусловным. Апгрейд, сделавший его кэш-зависимым, покраснеет здесь, а не в бою.
+    import inspect as _insp
+    _bar = _insp.getsource(IB.reqAccountSummaryAsync)
+    _acc = _insp.getsource(IB.accountSummaryAsync)
+    _bar_uncond = 'acctSummary' not in _bar and 'reqAccountSummary(' in _bar
+    _acc_cached = 'if not self.wrapper.acctSummary' in _acc
+    if not _bar_uncond:
+        print('[FAIL] ib_insync.reqAccountSummaryAsync перестал быть БЕЗУСЛОВНЫМ запросом: '
+              'барьер свежести NLV/О-3-Е недостоверен')
+        ok = False
+    if not _acc_cached:
+        print('[ПРЕДУПРЕЖДЕНИЕ] accountSummaryAsync больше не кэширует по-прежнему — '
+              'перечитать §12 о барьере сводки')
     print(f'[{"OK  " if ok else "FAIL"}] интерфейс адаптера сверен с живым ib_insync.IB и '
           f'со стабом: {len(used)} имён')
     if no_live:
