@@ -1230,7 +1230,12 @@ def execute_roll(broker, orders, book_before=None, route='F', ref_prices=None,
             # фактическим placeOrder идут квалификация контракта, снимок котировки (2 с) и
             # ожидание подтверждения до 120 с. Ворота без запаса пропускали заявку, чей
             # placeOrder происходил уже ЗА краем окна.
-            _window_gate(deadline, what=f'ролл {inst} {qty:+g}', margin_min=True)
+            # РЕЗЕРВ ТРЕБУЕТСЯ ДО ПЕРВОГО ЗАКРЫТИЯ, А НЕ ПЕРЕД КАЖДЫМ (двадцать седьмой
+            # круг, №10). Пара ролла необратима с первой заявки: если после уже закрытой
+            # старой серии резерв «не хватает», отказ оставляет книгу РАЗОРВАННОЙ. Полный
+            # запас проверяется один раз, перед началом пары; дальше — только жёсткий край.
+            _window_gate(deadline, what=f'ролл {inst} {qty:+g}',
+                         margin_min=(not any(r.get('filled') for r in placed)))
             rec = broker.place(inst, qty, (ref_prices or {}).get(inst))
         except Exception as ex:
             bail(f'{inst} {qty:+d}: {ex} (статус заявки НЕИЗВЕСТЕН, повтор не выполняется)',
@@ -1313,7 +1318,13 @@ def _resume_intent(ST, bp, cls, route, book, sess, broker, dry_run):
         except Exception as ex:
             raise RuntimeError(f'намерение не разобрано: барьер исполнений недоступен '
                                f'({ex}) — ручной разбор (О-5)')
-        if not _ex_after and any(v for v in (pos or {}).values()):
+        # ЛИКВИДАЦИЯ В НОЛЬ — ТОЖЕ СДЕЛКА (двадцать седьмой круг, №13). Условие требовало
+        # НЕПУСТЫХ позиций, поэтому книга, сведённая к нулю, принималась без единого отчёта:
+        # «позиций нет» выглядело как «ничего не происходило», хотя это результат продаж.
+        _want_after = ST.expected_positions(after, route)
+        if not _ex_after and (any(v for v in (pos or {}).values())
+                              or any(v for v in (_want_after or {}).values())
+                              or any(v for v in (ST.expected_positions(before, route) or {}).values())):
             raise RuntimeError(
                 'книга у брокера совпала с НАМЕЧЕННОЙ, но отчётов исполнения за сегодня '
                 'НЕТ: либо снимок устарел, либо позиция появилась не нашими заявками — '

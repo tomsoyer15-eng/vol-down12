@@ -591,6 +591,10 @@ def _execute_guarded(broker, state_path, capital, legs, signal_id='', from_route
                      mr_state=None, asof=None, registry='instruments.csv', emergency=False):
     import mr_engine as _M
     import math as _math
+    # АВАРИЙНАЯ ОТМЕТКА — ПОСЛЕ СУХИХ ПРОВЕРОК (двадцать седьмой круг, №22). Прежде
+    # EMERGENCY_OVERRIDE ложился в нормативный журнал ДО всех проверок: отказ на любой из
+    # них оставлял в истории запись об аварийном обходе порога, которого не было. Сначала
+    # убеждаемся, что переход вообще возможен, и только потом фиксируем обход.
     if emergency and journal:
         # АВАРИЙНЫЙ ОБХОД ПОРОГА ЗАПИСЫВАЕТСЯ. Иначе признак emergency — молчаливый способ
         # обойти жёсткое ограничение §8, и по журналу нельзя отличить штатный переход от
@@ -684,7 +688,7 @@ def _execute_guarded(broker, state_path, capital, legs, signal_id='', from_route
         _ctx.__exit__(None, None, None)
 
 
-def _preflight_handover(from_route, to_route):
+def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None):
     """Сухая проверка условий передачи книги ДО первой заявки (двадцать пятый круг, №7).
 
     Повторяет те барьеры hand_over_book, которые не зависят от результата торговли:
@@ -706,6 +710,27 @@ def _preflight_handover(from_route, to_route):
         raise RuntimeError(f'у маршрута {to_route} осталось неразобранное намерение '
                            f'прошлой эпохи — разобрать ДО перехода (О-5)')
     _jp = _STp.lock_dir() / f'journal-{to_route}.csv'
+    # СЕРИЯ И d_fix — В ПРЕДПОЛЁТЕ (двадцать седьмой круг, №7 и №8). Обе проверки жили
+    # только в hand_over_book, то есть срабатывали ПОСЛЕ продажи источника и покупки цели.
+    if to_route == 'F':
+        try:
+            import feed as _FDp2
+            _keys_p = list(_FDp2.registry().keys())
+        except Exception:
+            _keys_p = []
+        if any(str(k) not in ('ES', 'MES', 'ZN') and
+               str(k).startswith(('ES', 'MES', 'ZN')) for k in _keys_p):
+            _bare = sorted({str(n) for n in _dst_names if str(n) in ('ES', 'MES', 'ZN')})
+            if _bare:
+                raise RuntimeError(
+                    f'цели плана {_bare} заданы БЕЗ поставочной серии, а живой реестр её '
+                    f'несёт: книга Ф вышла бы без ser_a/ser_b и не роллировалась')
+        _pbF, _, _ = _STp.load(_STp.book_path('F'), _DLp.Book)
+        if (_pbF is None or not getattr(_pbF, 'd_fix', 0)) and not hasattr(_broker_p, 'ib'):
+            raise RuntimeError(
+                'd_fix восстановить нечем: старой книги Ф нет и живой доходности у брокера '
+                'тоже — книга Ф получила бы d_fix=0 и ложное плечо закрытия уже ПОСЛЕ '
+                'покупки ZN')
     _rows = _Jp.read(_jp)
     if _rows:
         _Jp.verify_rows(_rows, _jp)
@@ -1006,8 +1031,9 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
                           f'COMPLETE ещё не записан\n', encoding='utf-8')
             # FSYNC (двадцать шестой круг, №11): без него барьер мог ИСЧЕЗНУТЬ после уже
             # начатых сделок при потере питания — то есть пропасть ровно тогда, когда нужен.
+            import os as _osf                      # локально: _os есть не во всех ветках
             with open(_f, 'r+b') as _fh:
-                _os.fsync(_fh.fileno())
+                _osf.fsync(_fh.fileno())
             _hoflags.append(_f)
     except Exception as _exf:
         raise RuntimeError(
@@ -1022,7 +1048,9 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
     # ежедневный контур сознательно не принимает. Те же проверки прогоняются сухо
     # ЗАРАНЕЕ; отказ здесь не стоит ничего, кроме отложенного перехода.
     try:
-        _preflight_handover(from_route, to_route)
+        _preflight_handover(from_route, to_route,
+                            _dst_names=[spec['dst'][0] for spec in legs.values()],
+                            _broker_p=broker)
     except Exception as _exph:
         raise Incident(f'предполётная проверка передачи книги не пройдена ({_exph}) — '
                        f'переход не начат, деньги не переведены')
@@ -1459,6 +1487,21 @@ def hand_over_book(broker, from_route, to_route, positions=None):
     # а весь выпускной набор ходит голыми именами, поэтому путь не проверялся ни разу.
     # Книга без серии не роллируется и падает на пустом теге уже ПОСЛЕ движения денег.
     if to_route == 'F':
+        # ТРЕБОВАНИЕ СЕРИИ — СВОЙСТВО АКТИВНОГО РЕЕСТРА (двадцать шестой круг, №6; итог
+        # 16.08). Реестр бывает двух видов: ПОСТАВЛЕННЫЙ шаблон с голыми корнями (его
+        # SHA-256 пинует исполнитель, подмена запрещена) и ЖИВОЙ, который пишет
+        # first_connect и который несёт поставочные серии. Требовать серию безусловно —
+        # значит ломать работу с шаблоном; не требовать вовсе — значит пустить книгу без
+        # ser_a, которая не роллируется. Правило: серия обязательна ровно тогда, когда её
+        # несёт активный реестр.
+        try:
+            import feed as _FDs
+            _reg_keys = list(_FDs.registry().keys())
+        except Exception:
+            _reg_keys = []
+        _reg_has_series = any(str(k) not in ('ES', 'MES', 'ZN') and
+                              str(k).startswith(('ES', 'MES', 'ZN'))
+                              for k in _reg_keys)
         def _ser_of(k):                    # ТА ЖЕ логика, что у state.book_from_broker
             k = str(k)
             if k.startswith('MES'): return k[3:]
@@ -1467,7 +1510,7 @@ def hand_over_book(broker, from_route, to_route, positions=None):
             return None
         _bad_ser = sorted({k for k, v in (_pos_src or {}).items()
                            if float(v or 0) and _ser_of(k) == ''})
-        if _bad_ser:
+        if _bad_ser and _reg_has_series:
             raise RuntimeError(
                 f'позиции {_bad_ser} без серии контракта: книга Ф получила бы пустой '
                 f'ser_a/ser_b, не смогла бы роллироваться и встала бы перед поставкой. '
