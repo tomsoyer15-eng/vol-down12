@@ -142,7 +142,7 @@ def _write_anchor(day, body):
     return out
 
 
-def _git_commit_verified(out):
+def _git_commit_verified(out, body=None):
     """add+commit якоря с ПРОВЕРКОЙ (№18): '|| true' прятал отказ, и «WORM создан»
     относился к файлу, не существующему нигде, кроме локального диска.
 
@@ -177,8 +177,14 @@ def _git_commit_verified(out):
     # процесс могли переписать и файл, и blob согласованно — сверка совпадала бы, заверяя
     # чужой текст. Хэшируем ТО ТЕЛО, которое проверено и записано, не перечитывая диск.
     import subprocess as _sp2
+    # ХЭШИРУЕТСЯ ПРОВЕРЕННОЕ ТЕЛО (двадцать девятый круг, №16). Прежний вариант читал файл
+    # с диска — пусть и через stdin, но ПОСЛЕ коммита: pre-commit hook или чужой процесс
+    # могли согласованно переписать и файл, и blob, и сверка совпала бы, заверяя чужой
+    # текст. Сравнивать надо с тем, что мы ПРОВЕРИЛИ, а не с тем, что сейчас лежит рядом.
+    _payload = (body.encode('utf-8') if isinstance(body, str)
+                else (body if body is not None else out.read_bytes()))
     r4 = _sp2.run(['git', '-C', str(ROOT), 'hash-object', '--stdin'],
-                  input=out.read_bytes(), capture_output=True)
+                  input=_payload, capture_output=True)
     _blob_body = r4.stdout.decode().strip() if r4.returncode == 0 else ''
     if not _blob_body:
         raise RuntimeError(f'git hash-object отказал: {r4.stderr.decode()[:120]}')
@@ -268,7 +274,7 @@ def snap(day, bdir):
                         f'{_sha(dst, required=True)}\n')
     try:
         out = _write_anchor(day, body_full)
-        _git_commit_verified(out)
+        _git_commit_verified(out, body)
     except BaseException as ex:
         _m = reject_archive(dst)
         raise RuntimeError(f'якорь не подтверждён ({ex}) — архив {dst.name} помечен '
@@ -295,7 +301,7 @@ def main(day):
             raise RuntimeError('файлы состояния изменились во время снятия якоря — '
                                'текст описывал бы два поколения; якорь не создан')
         out = _write_anchor(day, body)
-        _git_commit_verified(out)
+        _git_commit_verified(out, body)
     print(f'якорь: {out.name} (в HEAD)')
     return 0
 
