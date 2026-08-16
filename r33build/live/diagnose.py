@@ -93,6 +93,16 @@ def facts():
     st = Path.home() / '.addfut'
     alarms = sorted(p.name for p in st.glob('ALARM-*.txt'))
     out.append(f'тревог всего: {len(alarms)} {alarms[:4]}')
+    # STOP ВИДЕН ДИАГНОСТИКЕ (тридцатый круг, №19). Перебирались только ALARM-*.txt, и при
+    # одном STOP печаталось «тревог нет». Но STOP ставится ИМЕННО ТОГДА, когда записать
+    # ALARM не удалось, то есть в самом опасном состоянии: исход прошлой заявки неизвестен,
+    # а оператор получает ложное подтверждение здоровья.
+    _stop = st / 'autopilot.STOP'
+    if _stop.exists():
+        _txt = _stop.read_text(encoding='utf-8', errors='replace').strip()[:120]
+        out.append(f'СТОП-ФАЙЛ autopilot.STOP ЕСТЬ — контур остановлен: {_txt or "без текста"}')
+    else:
+        out.append('стоп-файла нет')
     log = st / 'autopilot.log'
     if log.exists():
         tail = log.read_text(encoding='utf-8', errors='replace').splitlines()[-3:]

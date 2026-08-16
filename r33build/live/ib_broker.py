@@ -466,7 +466,18 @@ class IBBroker:
             # больше модельных 5 б.п., и §7 мерил бы движение рынка, а не качество
             # исполнения. Пометка live ставится ТОЛЬКО при подписке реального времени;
             # задержанные данные дают ориентир, но строка из выборки издержек исключается.
-            _rt = bool(getattr(self, 'realtime_md', False))
+            # ФЛАГ ПО ФАКТУ, А НЕ ПО НАСТРОЙКЕ (тридцатый круг, №16). Прежде признак
+            # «котировка реального времени» выводился ИСКЛЮЧИТЕЛЬНО из того, что выставлен
+            # ADDFUT_REALTIME_MD=1. Но IB отдаёт delayed/frozen fallback, когда подписки на
+            # КОНКРЕТНЫЙ инструмент нет: тикер придёт задержанный, а строка §7 будет
+            # помечена live, и 15-минутное движение рынка «докажет» пересмотр 5 б.п.
+            # Спрашиваем сам тикер: marketDataType 1 — реальное время, 2 — frozen,
+            # 3 — delayed, 4 — delayed frozen. Настройка остаётся необходимым условием,
+            # но достаточным — только подтверждение от биржи.
+            _mdt = getattr(t, 'marketDataType', None)
+            _rt = bool(getattr(self, 'realtime_md', False)) and (_mdt in (None, 1))
+            if getattr(self, 'realtime_md', False) and _mdt not in (None, 1):
+                _rt = False
             _mid = (t.bid + t.ask) / 2 if (t.bid and t.ask) else None
             for v, live in ((t.last, _rt), (_mid, _rt), (t.close, False)):
                 v = float(v) if v is not None else float('nan')

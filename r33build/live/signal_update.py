@@ -346,6 +346,23 @@ def _check_levels(sym, live, me):
     return set(common)
 
 
+def _ensure_digest(path):
+    """Заверить ряд его же digest'ом (тридцатый круг, №9). Пишется атомарно: читатель
+    видит либо старый файл целиком, либо новый, и никогда полстроки."""
+    import hashlib as _hl, os as _os, pathlib as _pl, tempfile as _tf
+    _p = _pl.Path(path)
+    if not _p.exists():
+        return
+    _dg = _hl.sha256(_p.read_bytes()).hexdigest()
+    _dp = _pl.Path(str(_p) + '.sha256')
+    if _dp.exists() and _dp.read_text(encoding='utf-8').strip() == _dg:
+        return
+    _fd, _tmp = _tf.mkstemp(dir=str(_p.parent), prefix='.sha256-')
+    with _os.fdopen(_fd, 'w', encoding='utf-8') as _fh:
+        _fh.write(_dg + chr(10)); _fh.flush(); _os.fsync(_fh.fileno())
+    _os.replace(_tmp, _dp)
+
+
 def _commit_levels(live, pending):
     """Фиксация сайдкара — ТОЛЬКО после успешного обновления обеих ног и публикации ряда."""
     import pandas as pd
@@ -418,6 +435,13 @@ def _update_locked(ib, LIVE, pd):
     new_months = [d for d in new_months if d > ref.index[-1]]
     if not new_months:
         _commit_levels(LIVE, pending_levels)
+        # DIGEST ОБЯЗАТЕЛЕН И НА ЭТОЙ ВЕТКЕ (тридцатый круг, №9). Ранний возврат стоял ДО
+        # записи .sha256, а читатель отсутствие digest считает штатным (старые ряды и
+        # исследовательский снимок его не имеют). Значит после успешного signal_update
+        # автопилот ставил sigup-* и весь месяц торговал по ряду БЕЗ защиты целостности:
+        # правка одного бита переключает целую ногу. Файл здесь не менялся — тем более
+        # ничто не мешает заверить его текущее содержимое.
+        _ensure_digest(LIVE)
         return []
     # ПОЛНАЯ АТОМАРНАЯ ПЕРЕЗАПИСЬ (№18): временный файл, fsync, os.replace — читатель видит
     # либо старый файл целиком, либо новый целиком, и никогда полстроки.
