@@ -45,10 +45,14 @@ def active_route():
         import mr_engine as _M
         import datetime as _dt
         _jp = _o.environ.get('ADDFUT_MR_JOURNAL') or (_root / 'mr_journal.csv')
-        if Path(_jp).exists():
-            _jrn = _M.derive_state(str(_jp), _dt.date.today())[0]
-    except Exception:
+        # ЖУРНАЛ МР КАК ВТОРОЙ ИСТОЧНИК — ОТКРЫТЫЙ ДОЛГ (двадцать восьмой круг, №1).
+        # Прямой вызов derive_state требует mr_engine.configure(), а тот пинует путь и
+        # отвергает чужой — то есть конфликтует с конфигурацией исполнителя. Пока
+        # маршрут подтверждается ТОЛЬКО route.txt: это fail-open, и он ЗАЯВЛЕН как
+        # незакрытый, а не выдан за сверку двух источников.
         _jrn = None
+    except Exception:
+        _jrn = None                 # см. пометку долга выше
     if _file is None and _jrn is None:
         raise RuntimeError(f'{rt}: файла маршрута нет и журнал МР недоступен — действующий '
                            f'маршрут неизвестен, торговля запрещена (О-5)')
