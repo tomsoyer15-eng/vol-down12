@@ -919,23 +919,6 @@ def _run_mutations():
         return (DL._window_gate, (lambda deadline, what='', margin_min=False: None),
                 DL, '_window_gate')
 
-    def excess_counts_roll():
-        """ДВАДЦАТЬ ДЕВЯТЫЙ КРУГ, №6: избыток перекладки снова меряется ВМЕСТЕ со сменой
-        серии — на каждом ролле ложная тревога о недосписанных деньгах и ложный срез капа."""
-        orig = DL.repack_excess
-        def patched(before, after, unit_is_mes):
-            phys = DL.orders_from_books(before, after)          # БЕЗ приведения к общей серии
-            g_all = DL.repack_grid(phys, unit_is_mes) if phys else 0
-            net_g = abs(after.n_e - before.n_e) * (1 if unit_is_mes else 10)
-            return max(0, g_all - net_g), g_all, net_g
-        return orig, patched, DL, 'repack_excess'
-
-    def excess_cap_gate_off():
-        """ДВАДЦАТЬ ДЕВЯТЫЙ КРУГ, №6: избыток объявлен нулевым — ворота капа снова считают
-        по завышенному капиталу, и книга проходит 2,00 с уже известными издержками."""
-        orig = DL.repack_excess
-        return orig, (lambda before, after, unit_is_mes: (0, 0, 0)), DL, 'repack_excess'
-
     def rejected_archive_stays():
         """ДВАДЦАТЫЙ КРУГ, №22: отвергнутый архив остаётся под рабочим именем, и им можно
         восстановиться."""
@@ -944,8 +927,6 @@ def _run_mutations():
 
     return [('пин торгового счёта не требуется', pin_not_required),
             ('ворота торгового окна отключены', window_gate_off),
-            ('избыток перекладки считает оборот ролла', excess_counts_roll),
-            ('ворота капа без вычета избытка перекладки', excess_cap_gate_off),
             ('отвергнутый архив остаётся рабочим', rejected_archive_stays),
             ('книга после перехода пишется мимо контура', handover_wrong_path),
             ('входная сверка книги отключена', no_reconcile),
@@ -1828,6 +1809,50 @@ def _clean_baseline(label, run):
     return []
 
 
+def run_pack_mutations():
+    """ИЗБЫТОК УПАКОВКИ И ВОРОТА КАПА (двадцать девятый круг, №6). Своя группа, а не
+    адаптерная: обе защиты видны только точечным стендам PACK — перебор состояний до
+    нарушенной упаковки и до границы капа не достаёт, и первый прогон обеих мутаций
+    честно показал «не поймал никто», хотя утверждения держались на тысячах состояний."""
+    import daily as DLm
+    import invariants as I
+    miss = _clean_baseline('упаковка', lambda: I.run_pack())
+    if miss:
+        return miss
+    print(f"\n{'мутация упаковки':<40}{'поймана':>9}  какими утверждениями")
+
+    def excess_counts_roll():
+        """ДВАДЦАТЬ ДЕВЯТЫЙ КРУГ, №6: избыток перекладки снова меряется ВМЕСТЕ со сменой
+        серии — на каждом ролле ложная тревога о недосписанных деньгах и ложный срез капа."""
+        orig = DLm.repack_excess
+        def patched(before, after, unit_is_mes):
+            phys = DLm.orders_from_books(before, after)          # БЕЗ приведения к общей серии
+            g_all = DLm.repack_grid(phys, unit_is_mes) if phys else 0
+            net_g = abs(after.n_e - before.n_e) * (1 if unit_is_mes else 10)
+            return max(0, g_all - net_g), g_all, net_g
+        return orig, patched, 'repack_excess'
+
+    def excess_cap_gate_off():
+        """ДВАДЦАТЬ ДЕВЯТЫЙ КРУГ, №6: избыток объявлен нулевым — ворота капа снова считают
+        по завышенному капиталу, и книга проходит 2,00 с уже известными издержками."""
+        orig = DLm.repack_excess
+        return orig, (lambda before, after, unit_is_mes: (0, 0, 0)), 'repack_excess'
+
+    miss = []
+    for label, make in (('избыток перекладки считает оборот ролла', excess_counts_roll),
+                        ('ворота капа без вычета избытка перекладки', excess_cap_gate_off)):
+        orig, patched, attr = make()
+        setattr(DLm, attr, patched)
+        try:
+            _, bad = I.run_pack()
+        finally:
+            setattr(DLm, attr, orig)
+        print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
+        if not bad:
+            miss.append(label)
+    return miss
+
+
 def run_refusal_mutations():
     """Отказ §8 с ростом (шестнадцатый круг, №1/№6): пара к пересчёту под запретом."""
     import daily as DLm
@@ -1945,7 +1970,8 @@ if __name__ == '__main__':
               + run_session_mutations() + run_feed_mutations()
               + run_run_mutations() + run_transition_mutations()
               + run_roll_mutations() + run_signal_mutations()
-              + run_refusal_mutations() + run_j7_mutations())
+              + run_refusal_mutations() + run_j7_mutations()
+              + run_pack_mutations())
     if miss_a:
         print(f"\nМУТАЦИИ АДАПТЕРА, КОТОРЫХ НЕ ПОЙМАЛ НИКТО ({len(miss_a)}):")
         for m_ in miss_a:

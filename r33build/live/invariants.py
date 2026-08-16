@@ -3651,6 +3651,93 @@ def run_refusal():
     return cov, bad
 
 
+# ------------------------------------------------------- избыток упаковки и ворота капа
+# ДВАДЦАТЬ ДЕВЯТЫЙ КРУГ, №6. Перебор состояний сюда не достаёт: нарушенная упаковка
+# (вся сетка в MES при es_held=0) появляется только после передачи книги из маршрута Е, а
+# ворота капа по пессимистичному капиталу связывают лишь у самой границы 2,00. Точечные
+# сценарии — иначе обе защиты сняли бы бесследно (мутационный прогон это и показал).
+PACK = []
+
+
+def pkinv(name, needs=None):
+    def deco(fn):
+        PACK.append((name, fn, needs)); return fn
+    return deco
+
+
+PACK_CASES = ('ролл без смены упаковки', 'нарушенная упаковка у границы капа')
+
+
+def _pack_run(case):
+    out = dict(case=case, raised=False, error='', dec=None, exc=None)
+    try:
+        if case == 'ролл без смены упаковки':
+            b = DL.Book(n_e=333, n_b=10, unit_is_mes=True, d_fix=7.9, ser_a='U26',
+                        ser_b='U26', es_held=33)
+            after = DL.replace(b, ser_a='Z26', ser_b='Z26',
+                               es_held=DL.pack_es(b.es_held, 333, True, True))
+            out['exc'] = DL.repack_excess(b, after, True)
+        else:
+            # книга после Е->Ф: 260 единиц сетки лежат MES-ами, остаток 260 против
+            # допустимых 0..19 — перекладка вынужденная, её избыток известен ДО заявок.
+            b = DL.Book(n_e=260, n_b=0, unit_is_mes=True, d_fix=7.9, prev_close_lev=1.99,
+                        prev_st_eq=True, prev_st_bd=True, ser_a='U26', ser_b='U26',
+                        es_held=0, last_session='2026-08-11', close_provisional=False)
+            m = DL.Market(date=pd.Timestamp('2026-08-12'), px_eq_prev=776.0, dref_prev=7.9,
+                          dref_today=7.9, px_eq_today=776.0, roll_today=False,
+                          st_eq=True, st_bd=True)
+            out['dec'] = DL.step(b, m, 5_022_000.0)
+            out['exc'] = DL.repack_excess(b, out['dec'].book_after, True)
+    except Exception as ex:
+        out['raised'] = True; out['error'] = f'{type(ex).__name__}: {ex}'
+    return out
+
+
+@pkinv('оборот ролла не выдаётся за избыток перекладки',
+       needs=lambda r: r['case'] == 'ролл без смены упаковки')
+def _pk1(r):
+    """Замер брал разность физических книг ВМЕСТЕ со сменой серии: закрытие старой серии
+    плюс открытие новой давали 666 единиц сетки при чистом нуле, и каждый роллный день
+    оператор получал тревогу о недостаче денег — ролл оплачен нормативным 1 б.п."""
+    return (not r['raised']) and r['exc'] is not None and r['exc'][0] == 0
+
+
+@pkinv('кап срезает книгу по капиталу за вычетом несписанного избытка',
+       needs=lambda r: r['case'] == 'нарушенная упаковка у границы капа')
+def _pk2(r):
+    """Запись причины денег не возвращает и кап не соблюдает: издержки известны ДО заявок,
+    а порог 2,00 проверялся по капиталу, из которого они не вычтены."""
+    d = r['dec']
+    return (not r['raised'] and d is not None and r['exc'][0] > 0
+            and d.cap_correction
+            and any('ЗА ВЫЧЕТОМ' in x for x in d.reasons))
+
+
+@pkinv('избыток на смешанном пути посчитан и объявлен',
+       needs=lambda r: r['case'] == 'нарушенная упаковка у границы капа')
+def _pk3(r):
+    d = r['dec']
+    return (not r['raised'] and d is not None
+            and any('ИЗБЫТОК ОБОРОТА УПАКОВКИ' in x for x in d.reasons))
+
+
+def run_pack():
+    cov, bad = {}, {}
+    for case in PACK_CASES:
+        r = _pack_run(case)
+        for name, fn, needs in PACK:
+            if needs is not None and not needs(r):
+                continue
+            cov[name] = cov.get(name, 0) + 1
+            try:
+                ok = fn(r)
+            except Exception as ex:
+                ok = False; name = f'{name} [исключение: {type(ex).__name__}]'
+            if not ok:
+                bad.setdefault(name, []).append(f"{case}: избыток {r['exc']} {r['error'][:60]}")
+    return cov, bad
+
+
 # ---------------------------------------------------------------- обновлятор сигналов
 # Девятая рецензия, №28: signal_update не исполнялся ни одним стендом. Здесь проверяется
 # МЕХАНИКА (замок, атомарная публикация, сверка перекрытия, отказ на потерянном хвосте
@@ -4416,6 +4503,17 @@ if __name__ == '__main__':
         cases = fbad8.get(name, [])
         print(f'[{"OK  " if not cases else "FAIL"}] {name}: '
               f'{f"ДЕРЖИТСЯ на {cov}" if not cases else f"НАРУШЕН: {cases}"}')
+    # --- ИЗБЫТОК УПАКОВКИ И ВОРОТА КАПА: точечные сценарии вне перебора (29-й круг, №6).
+    pcov, pbad = run_pack()
+    print(f'\nслучаев упаковки: {len(PACK_CASES)}, утверждений упаковки: {len(PACK)}\n')
+    for name, _, _n in PACK:
+        cov = pcov.get(name, 0)
+        if cov == 0:
+            pbad.setdefault(name, []).append('ПОКРЫТИЕ НУЛЕВОЕ')
+            print(f'[FAIL] {name}: НИ РАЗУ НЕ ПРОВЕРЕН (покрытие 0)'); continue
+        cases = pbad.get(name, [])
+        print(f'[{"OK  " if not cases else "FAIL"}] {name}: '
+              f'{f"ДЕРЖИТСЯ на {cov}" if not cases else f"НАРУШЕН: {cases}"}')
     # --- ОБНОВЛЯТОР СИГНАЛОВ: механика замка, сверки и дописывания.
     gcov, gbad = run_signal()
     print(f'\nслучаев сигнала: {len(SIG_CASES)}, утверждений сигнала: {len(SIG)}\n')
@@ -4460,4 +4558,4 @@ if __name__ == '__main__':
         print(f'[FAIL] SAME_API не выполнен: {_exs}')
         _iface_ok = False
     sys.exit(0 if (_iface_ok and not (bad or sbad or abad or ibad or fbad or rbad or tbad
-                                      or lbad or gbad or fbad8 or jbad)) else 1)
+                                      or lbad or gbad or fbad8 or jbad or pbad)) else 1)
