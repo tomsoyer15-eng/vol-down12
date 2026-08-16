@@ -422,24 +422,43 @@ def _seed_books_from(netpos):
     Здесь книга собирается ИЗ ТЕХ ЖЕ позиций, что отдаёт стаб, для обоих маршрутов сразу —
     какой из них окажется исходным, решает план. Одно место вместо сорока пяти.
     """
-    import daily as _DLs, state as _STs
+    import daily as _DLs, state as _STs, journal as _Js
     _n = {str(k): float(v) for k, v in (netpos or {}).items()}
     _es = _n.get('ES', 0.0) + _n.get('ESU26', 0.0)
     _mes = _n.get('MES', 0.0) + _n.get('MESU26', 0.0)
     _zn = _n.get('ZN', 0.0) + _n.get('ZNU26', 0.0)
-    _STs.save(_STs.book_path('F'),
-              _DLs.Book(d_fix=7.9, n_e=int(_es * 10 + _mes), n_b=int(_zn),
-                        unit_is_mes=True, prev_st_eq=True, prev_st_bd=True,
-                        ser_a='U26', ser_b='U26', es_held=int(_es),
-                        last_session='2026-08-08', close_provisional=False,
-                        prev_close_lev=1.99),
-              'F', 1, note='фикстура стендов исполнителя: собрана из позиций стаба')
-    _STs.save(_STs.book_path('E'),
-              _DLs.BookE(n_eq=_n.get('CSPX', 0.0), n_bd=_n.get('CBU0', 0.0),
-                         prev_st_eq=True, prev_st_bd=True,
-                         last_session='2026-08-08', close_provisional=False,
-                         prev_close_lev=1.99),
-              'E', 1, note='фикстура стендов исполнителя: собрана из позиций стаба')
+    _eq, _bd = _n.get('CSPX', 0.0), _n.get('CBU0', 0.0)
+
+    def _j(route):
+        # У ТОРГОВАВШЕЙ КНИГИ ЕСТЬ ЖУРНАЛ (двадцать пятый круг, №14): книга с сессией №1
+        # без журнала описывает состояние, которого в бою не бывает, и предполёт честно
+        # объявляет историю утраченной. Первая редакция этого конструктора писала книгу
+        # без журнала — и выпуск упал ровно на этом, поделом.
+        _jp = _STs.lock_dir() / f'journal-{route}.csv'
+        if not _jp.exists():
+            _Js.append(_jp, dict(date='2026-08-08', leg='', instrument='ИТОГ', qty=0,
+                                 px_order='-', px_fill='', commission='', reason='',
+                                 nav='1000000', leverage='1.99', roll_spread_near='',
+                                 roll_spread_far='', note='итог сессии 1: строк 0'))
+
+    # КНИГА ЗАВОДИТСЯ ТОЛЬКО ДЛЯ МАРШРУТА С ПОЗИЦИЯМИ. Пустая книга с номером сессии — это
+    # тоже состояние, которого в бою не бывает: маршрут либо торговал, либо его нет.
+    if _es or _mes or _zn:
+        _STs.save(_STs.book_path('F'),
+                  _DLs.Book(d_fix=7.9, n_e=int(_es * 10 + _mes), n_b=int(_zn),
+                            unit_is_mes=True, prev_st_eq=True, prev_st_bd=True,
+                            ser_a='U26', ser_b='U26', es_held=int(_es),
+                            last_session='2026-08-08', close_provisional=False,
+                            prev_close_lev=1.99),
+                  'F', 1, note='фикстура стендов исполнителя: собрана из позиций стаба')
+        _j('F')
+    if _eq or _bd:
+        _STs.save(_STs.book_path('E'),
+                  _DLs.BookE(n_eq=_eq, n_bd=_bd, prev_st_eq=True, prev_st_bd=True,
+                             last_session='2026-08-08', close_provisional=False,
+                             prev_close_lev=1.99),
+                  'E', 1, note='фикстура стендов исполнителя: собрана из позиций стаба')
+        _j('E')
 
 
 # --- Исполнитель v6.1: журнал пишет сам, хук устранён ---
@@ -449,6 +468,9 @@ class _B:
         s.p = preview; s.t = timeout; s.f = frac; s.np = netpos or {}; s.nlv = nlv
         s.cn = cancelnone; s.oo = oo or []; s.n = 0; s.calls = []; s.u = 0.0; s.maxu = 0.0
         _seed_books_from(s.np)      # книги обоих маршрутов согласованы со стабом (№4)
+        # ЛИЧНОСТЬ СЧЁТА (тридцатый круг, №6): брокер обязан её сообщать, иначе
+        # позиции могут относиться к чужому счёту. Стенды пинуют DUTEST01.
+        s.account = __import__('os').environ.get('ADDFUT_ACCOUNT') or 'DUTEST01'
     def _px(s, i):
         i = str(i)
         if i.startswith('ZN'): return 98560.0

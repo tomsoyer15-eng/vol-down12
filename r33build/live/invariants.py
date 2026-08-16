@@ -2720,6 +2720,8 @@ class _TrBroker:
         self.short_buy = short_buy
         self.calls = []
         self.n = 0
+        # личность счёта (тридцатый круг, №6): переход её требует
+        self.account = __import__('os').environ.get('ADDFUT_ACCOUNT') or 'DUTEST01'
 
     def _f(self, instr, u):
         return u - 0.5 if self.frac_of == instr and u > 0 else u
