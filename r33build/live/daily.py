@@ -588,15 +588,50 @@ def step(book, m, capital, band=None, cap=CAP_LEV, route='F', check_guards=True,
     # ЧТО СДЕЛАНО ВМЕСТО: остаток БОЛЬШЕ НЕ МОЛЧИТ — он считается и попадает в причины дня,
     # то есть в §7 и в глаза оператору. Влияние ограничено одной сессией: живой капитал
     # берётся из NLV брокера следующей сессией, а он уже несёт фактические издержки.
-    _phys = orders_from_books(book, d.book_after)
-    _g_all = repack_grid(_phys, b.unit_is_mes) if _phys else 0
-    _net_g = abs(d.book_after.n_e - b.n_e) * (1 if b.unit_is_mes else 10)
-    if _g_all > _net_g and (d.orders or d.roll_pairs):
+    # ИЗБЫТОК МЕРЯЕТСЯ НА ОБЩЕЙ СЕРИИ (двадцать девятый круг, №6). Прежде он считался
+    # разностью ФИЗИЧЕСКИХ книг ВМЕСТЕ со сменой серии, и на ЛЮБОМ ролле закрытие старой
+    # серии плюс открытие новой давали (проверено) 666 единиц сетки при чистом изменении
+    # НОЛЬ: оператор получал тревогу о недосписанных деньгах каждый роллный день, тогда
+    # как ролл оплачен нормативным 1 б.п. и упаковка при этом не менялась вовсе. Приводим
+    # обе книги к ОДНОЙ серии — остаётся ровно перекладка ES/MES, ради которой замер и
+    # заводился.
+    _exc, _g_all, _net_g = repack_excess(book, d.book_after, b.unit_is_mes)
+    if _exc > 0 and (d.orders or d.roll_pairs):
+        def _ex_at(ne):
+            """Стоимость НЕСПИСАННОГО избытка перекладки при книге ноги А в ne единиц."""
+            _bk = replace(d.book_after, n_e=ne,
+                          es_held=pack_es(b.es_held, ne, b.unit_is_mes, roll_a))
+            return repack_cost(repack_excess(book, _bk, b.unit_is_mes)[0], u_e)
         d.reasons.append(
             f'ИЗБЫТОК ОБОРОТА УПАКОВКИ НЕ СПИСАН: физически {_g_all} единиц сетки против '
-            f'чистых {_net_g}; модельные ${repack_cost(_g_all - _net_g, u_e):,.0f} не входят '
+            f'чистых {_net_g}; модельные ${repack_cost(_exc, u_e):,.0f} не входят '
             f'в capital_after_costs (движок упаковки не знает, списание ломает 1e-12) — '
             f'капитал следующей сессии берётся из NLV брокера и уже их несёт')
+        # НО КАП ПО ЗАВЫШЕННОМУ КАПИТАЛУ БОЛЬШЕ НЕ ПРОХОДИТ (двадцать девятый круг, №6).
+        # Запись причины денег не возвращает и кап не соблюдает: издержки ИЗВЕСТНЫ до
+        # заявок, а книга проверялась порогом 2,00 по капиталу, из которого они не вычтены,
+        # и после исполнения стояла выше капа. NAV не трогаем — списание ломает
+        # нормативную эквивалентность 1e-12 (измерено 1,17e-05, §12, 21-й и 23-й круги);
+        # ворота считаем по ПЕССИМИСТИЧНОМУ капиталу, а capital_after_costs остаётся
+        # модельным. Срез сам меняет упаковку, поэтому избыток пересчитывается на каждом
+        # шаге, как и в ветке чистой перекладки.
+        _cut2 = []
+        while (exp_e + exp_b) > cap * (e - _ex_at(n_e)) and (n_e > 0 or n_b > 0):
+            if n_e > 0 and (u_e >= u_b or n_b == 0):
+                n_e -= 1; exp_e = n_e * u_e; _cut2.append('А')
+            else:
+                n_b -= 1; exp_b = n_b * u_b; _cut2.append('Б')
+        if _cut2:
+            d.book_after = replace(d.book_after, n_e=n_e, n_b=n_b,
+                                   es_held=pack_es(b.es_held, n_e, b.unit_is_mes, roll_a))
+            d.orders = orders_from_books(book, d.book_after)
+            d.cap_correction = True
+            d.cap_before = (n_e + sum(1 for x in _cut2 if x == 'А'),
+                            n_b + sum(1 for x in _cut2 if x == 'Б'))
+            d.reasons.append(
+                f'кап 2,00 пересчитан по капиталу ЗА ВЫЧЕТОМ несписанного избытка '
+                f'(${_ex_at(n_e):,.0f}): сокращено {len(_cut2)} единиц '
+                f'({"".join(_cut2)}), книга n_e={n_e}, n_b={n_b}')
     if (not d.refusals) and not d.orders and not d.roll_pairs:
         _repack = orders_from_books(book, d.book_after)
         if _repack:
@@ -745,6 +780,25 @@ def repack_grid(repack, unit_is_mes=True):
     k = 10 if unit_is_mes else 1
     return sum(abs(q) * (k if i.startswith('ES') else 1)
                for i, q in repack if i.startswith(('ES', 'MES')))
+
+
+def repack_excess(before, after, unit_is_mes):
+    """ИЗБЫТОК ФИЗИЧЕСКОГО ОБОРОТА ПЕРЕКЛАДКИ в единицах сетки (29-й круг, №6).
+
+    Считается на ОБЩЕЙ СЕРИИ. Прежде замер брал разность физических книг вместе со сменой
+    серии, и на любом ролле закрытие старой серии плюс открытие новой давали сотни единиц
+    при чистом изменении ноль: каждый роллный день оператор получал тревогу о недосписанных
+    деньгах, хотя ролл оплачен нормативным 1 б.п. и упаковка не менялась вовсе. Ложная
+    тревога хуже молчания — она приучает не читать причины.
+
+    Отдельной функцией — под мутацию: пока защита сидит выражением внутри step, снять её
+    можно только правкой, которую никакой стенд не заметит.
+    """
+    same = replace(after, ser_a=before.ser_a, ser_b=before.ser_b)
+    phys = orders_from_books(before, same)
+    g_all = repack_grid(phys, unit_is_mes) if phys else 0
+    net_g = abs(after.n_e - before.n_e) * (1 if unit_is_mes else 10)
+    return max(0, g_all - net_g), g_all, net_g
 
 
 def repack_cost(grid, u_e):

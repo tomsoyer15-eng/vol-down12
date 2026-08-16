@@ -49,6 +49,8 @@ class BrokerError(RuntimeError):
 
 
 class IBBroker:
+    UNIT_BAND = 0.15          # полоса unit_ref: ловит порядок величины, а не базисные пункты
+
     def __init__(self, ib, registry=None, account=None, timeout_s=120, settle_s=SETTLE_S):
         miss = tz.missing()
         if miss:
@@ -400,6 +402,44 @@ class IBBroker:
             rec['incident'] = ('недобор' if abs(filled) < abs(qty)
                                else 'исполнение больше заявки')
         return rec
+
+    def unit_ref(self, instrument, cls):
+        """ПОЛОСА ДОЛЛАРОВОЙ ЕДИНИЦЫ по рыночным данным (двадцать девятый круг, №3).
+
+        Исполнитель перехода получал unit_usd и dprice от вызывающего и проверял их лишь
+        на конечность: все дальнейшие ворота считались по тем же числам, то есть план
+        сверялся с планом. Здесь строится НЕЗАВИСИМАЯ полоса из закрытий и доходности.
+
+        Полоса нарочно широка. Модельная единица ноги Б — ZN_MODEL_PX_EQ x CTD_RATIO x
+        d_fix/dref, а d_fix принадлежит книге и исполнителю неизвестен; поэтому границы
+        берутся по крайним допустимым дюрациям. Задача полосы — поймать ПОРЯДОК величины
+        (десятикратную ошибку из денежного пути рецензии), а не базисные пункты.
+        Возвращает (низ, верх) в долларах за ОДНУ единицу или None для чужого класса.
+        """
+        import feed as _FDu
+        import sim_v13 as _Su
+        name = str(instrument)
+        root = ''.join(ch for ch in name if not ch.isdigit()).rstrip('UZHM') or name
+        today = _FDu.exchange_today()
+        if str(cls) == 'ETF':
+            px, _, _, _ = _FDu.closes(self.ib, _FDu.contract_of(self.ib, name), today)
+            px = float(px)
+            return (px * (1.0 - self.UNIT_BAND), px * (1.0 + self.UNIT_BAND))
+        if root in ('ES', 'MES'):
+            # Модельная единица ноги А — ES_MULT x SPY; котировка ES отличается от SPY
+            # фьючерсным базисом, и es_to_unit приводит её к десятой доле индекса.
+            px, _, _, _ = _FDu.closes(self.ib, _FDu.contract_of(self.ib, name), today)
+            mult = _Su.ES_MULT / 10.0 if root == 'MES' else _Su.ES_MULT
+            u = mult * _FDu.es_to_unit(float(px) * (10.0 if root == 'MES' else 1.0))
+            return (u * (1.0 - self.UNIT_BAND), u * (1.0 + self.UNIT_BAND))
+        if root == 'ZN':
+            y, _ = _FDu.yield_pct(self.ib, today)
+            dref = _FDu.dref_from_yield(float(y) / 100.0)
+            base = _Su.ZN_MODEL_PX_EQ * _Su.CTD_RATIO
+            # d_fix книги неизвестен: границы по крайним дюрациям норматива.
+            return (base * _FDu.DUR_MIN / dref * (1.0 - self.UNIT_BAND),
+                    base * _FDu.DUR_MAX / dref * (1.0 + self.UNIT_BAND))
+        return None
 
     def _quote_ref(self, instrument):
         """КОТИРОВОЧНЫЙ ОРИЕНТИР В МОМЕНТ ЗАЯВКИ (двадцать второй круг, №20).

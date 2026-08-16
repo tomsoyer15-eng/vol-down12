@@ -661,5 +661,17 @@
   "request_id": "req_3f7574f30ad1468b834a3efa6a75ab1b",
   "finished": "2026-08-16T05:46:58+00:00",
   "seconds": 1175.1
+ },
+ {
+  "created": "2026-08-16T07:43:41+00:00",
+  "label": "рецензия тридцатого круга",
+  "model": "gpt-5.6-sol",
+  "response_id": "resp_0b43d21a400cfef3006a816a2c235081a2a7402f6b5bc3a25a",
+  "status": "failed",
+  "chars": 1057946,
+  "fingerprint": "d9dec26c9e99a87c47d61952c1647075ccbe02e0d3e55e300cd3577a2247d5ea",
+  "request_id": "req_4d05200129e7414a87f83e17e0f0d5dc",
+  "finished": "2026-08-16T07:43:46+00:00",
+  "seconds": 5.3
  }
 ]

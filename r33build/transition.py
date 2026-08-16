@@ -517,6 +517,50 @@ def plan_lots(legs, capital):
                 left -= take; k += 1
     return lots
 
+def check_plan_prices(broker, legs, src_cls):
+    """Сверка долларовых единиц плана с НЕЗАВИСИМОЙ рыночной полосой (29-й круг, №3).
+
+    Прежде unit_usd и dprice проверялись ТОЛЬКО на конечность и положительность, а дальше
+    по ним считалось ВСЁ: число долей цели, лимит §8б, preflight-маржа, компенсации и
+    финальная сверка. Это круговое доказательство — план сверялся с планом: заниженная в
+    десять раз цена цели даёт примерно десятикратную покупку, формула got_units*dprice
+    сходится, и переход получает COMPLETE, тогда как фактическое плечо уходит за 2,00.
+
+    Полоса нарочно широка — она ловит ПОРЯДОК величины, а не базисные пункты (модельная
+    единица ноги Б несёт отношение d_fix/dref, исполнителю неизвестное). Метод обязателен:
+    брокер, не строящий полосу, не считается брокером перехода — иначе защиту выключал бы
+    сам вызывающий, чьи числа она и проверяет.
+    """
+    _uref = getattr(broker, 'unit_ref', None)
+    if not callable(_uref):
+        raise Incident('брокер не отдаёт unit_ref — цены плана непроверяемы, исполнение '
+                       'запрещено (сверка unit_usd и dprice с рынком обязательна)')
+    for _nm, _spec in sorted(legs.items()):
+        _items = [(str(_spec['dst'][0]), float(_spec['dst'][1]), _spec['dst'][2])]
+        _items += [(str(_i), float(_u), src_cls) for _i, _q, _u in _spec['src']]
+        for _instr, _val, _cls in _items:
+            try:
+                _band = _uref(_instr, _cls)
+            except Exception as ex:
+                raise Incident(f'{_instr}: полоса цены у брокера недоступна ({ex}) — цена '
+                               f'плана непроверяема, исполнение запрещено')
+            if not _band:
+                raise Incident(f'{_instr}: брокер не строит полосу цены — план опирался бы '
+                               f'только на собственное число, исполнение запрещено')
+            _lo, _hi = float(_band[0]), float(_band[1])
+            _fin = (_lo == _lo and _hi == _hi and _lo not in (float('inf'), float('-inf'))
+                    and _hi not in (float('inf'), float('-inf')))
+            if not (_fin and _lo > 0 and _hi >= _lo):
+                raise Incident(f'{_instr}: полоса цены {_band!r} недостоверна — '
+                               f'исполнение запрещено')
+            if not (_lo <= _val <= _hi):
+                raise Incident(
+                    f'{_instr}: долларовая единица плана ${_val:,.2f} вне рыночной полосы '
+                    f'[${_lo:,.2f}; ${_hi:,.2f}] — по ней считаются число долей цели, '
+                    f'лимит §8б и маржа; исполнение запрещено')
+    return True
+
+
 MIN_AUTO_NLV = 9_856_000.0   # ниже — автоматический переход невозможен: один ZN не входит в owner-cap 1%
 
 def unpaired_limit(legs, capital, grant_limit=None):
@@ -817,6 +861,10 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
                 f'капитал перехода ${float(capital):,.0f} расходится с NLV брокера '
                 f'${_nlv:,.0f} более чем на {CAPITAL_TOL:.0%}: по нему считаются лимит '
                 f'§8б, маржа и число долей цели — исполнение запрещено')
+    # ЦЕНЫ ПЛАНА СВЕРЯЮТСЯ С НЕЗАВИСИМЫМ ИСТОЧНИКОМ (двадцать девятый круг, №3) —
+    # см. check_plan_prices. Вынесено отдельной функцией: у стенда должна быть
+    # возможность проверить саму защиту, а не только сквозной путь.
+    check_plan_prices(broker, legs, src_cls)
     # ВОРОТА СЧИТАЮТСЯ ОТ МЕНЬШЕГО ИЗ ДВУХ ЧИСЕЛ (двадцать третий круг, №4). Допуск 2%
     # проверяет БЛИЗОСТЬ, но все ворота дальше считались по числу ВЫЗЫВАЮЩЕГО, а оно может
     # быть выше фактического NLV на весь допуск. Два денежных пути: (а) порог §8 проверен
@@ -1051,6 +1099,15 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         import mr_engine as _MJ
         _MJ.append_event(journal, str(asof or ''), 'EMERGENCY_OVERRIDE',
                          f'{from_route}->{to_route}|NLV={float(capital):.0f}|sid={signal_id}')
+    _wt = _window_till(asof)
+    if not hook('open'):                                      # проверяется ВСЕГДА, включая resume (идемпотентно)
+        raise Incident('журнал отклонил открытие перехода (нет сигнала/sid/чужой tid) — исполнение запрещено')
+    st['opened'] = True; _atomic(state_path, st)
+
+    # МЕТКИ — ПОСЛЕ ВОРОТ ОКНА И ЗАПИСИ OPEN (двадцать девятый круг, №8): прежде они
+    # ставились ДО _window_till и hook(open), и ошибка календаря, закрытое окно или отказ
+    # журнала оставляли метки навсегда — торговля и замыкание запирались, хотя ни одной
+    # заявки не подавалось. Здесь переход уже открыт, и следующий шаг — заявки.
     # МЕТКА СТАВИТСЯ ПЕРЕД ПЕРВОЙ ЗАЯВКОЙ, ПОСЛЕ ВСЕХ СУХИХ ПРОВЕРОК
     # (двадцать шестой круг, №11: прежде — до предполёта, и любой чистый отказ
     # оставлял метки навсегда, запирая торговлю и замыкание до ручной уборки)
@@ -1079,10 +1136,6 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
             f'метка незавершённой передачи не создана ({_exf}) — без неё обрыв между '
             f'публикацией книги и COMPLETE остался бы невидимым для контура; передача '
             f'не начата, деньги не переведены')
-    _wt = _window_till(asof)
-    if not hook('open'):                                      # проверяется ВСЕГДА, включая resume (идемпотентно)
-        raise Incident('журнал отклонил открытие перехода (нет сигнала/sid/чужой tid) — исполнение запрещено')
-    st['opened'] = True; _atomic(state_path, st)
 
     max_dp = max(spec['dst'][1] for spec in legs.values())
 
@@ -1488,16 +1541,26 @@ def hand_over_book(broker, from_route, to_route, positions=None):
         # Иерархия источников d_fix: прежняя книга Ф (если была) -> живая доходность через
         # брокера -> явная пометка в записи. Требовать .ib у ЛЮБОГО брокера нельзя — стабы
         # самопроверки его не имеют, и первый же прогон выпуска это показал.
-        try:
-            _oldF, _, _ = _ST2.load(_ST2.book_path('F'), _BF)
-            if _oldF is not None and getattr(_oldF, 'd_fix', 0.0):
-                _dfx = float(_oldF.d_fix)
-        except Exception:
-            pass
-        if not _dfx and getattr(broker, 'ib', None) is not None:
-            import feed as _FD2b
-            _y, _ = _FD2b.yield_pct(broker.ib, _FD2b.exchange_today())
-            _dfx = _FD2b.dref_from_yield(_y / 100.0)
+        # ПРИОРИТЕТ ОТДАЁТСЯ СВЕЖЕЙ ДОХОДНОСТИ (двадцать девятый круг, №5). Прежде ЛЮБОЙ
+        # ненулевой d_fix из старой книги Ф побеждал: но пока маршрут Е был активен, BookE
+        # дюрацию не хранит вовсе, и книга Ф лежит нетронутой — её d_fix относится к
+        # доходности НА МОМЕНТ УХОДА в Е, то есть может быть многомесячной давности. При
+        # возврате в Ф это дало бы неверный вклад ноги Б и ложное плечо закрытия. Живая
+        # доходность точнее по определению; старая книга — запасной путь.
+        import feed as _FD2b
+        if getattr(broker, 'ib', None) is not None:
+            try:
+                _y, _ = _FD2b.yield_pct(broker.ib, _FD2b.exchange_today())
+                _dfx = _FD2b.dref_from_yield(_y / 100.0)
+            except Exception:
+                _dfx = 0.0
+        if not _dfx:
+            try:
+                _oldF, _, _ = _ST2.load(_ST2.book_path('F'), _BF)
+                if _oldF is not None and getattr(_oldF, 'd_fix', 0.0):
+                    _dfx = float(_oldF.d_fix)
+            except Exception:
+                pass
     # КНИГА — ИЗ ПРОВЕРЕННОГО СНИМКА (двадцать первый круг, №3). Прежде здесь заново
     # спрашивались позиции, уже ПОСЛЕ финальной сверки и барьера заявок: поздний фил или
     # ручная сделка, пришедшие в этот зазор, записывались в состояние как законная книга и

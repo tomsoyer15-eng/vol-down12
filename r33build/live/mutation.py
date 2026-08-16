@@ -919,6 +919,23 @@ def _run_mutations():
         return (DL._window_gate, (lambda deadline, what='', margin_min=False: None),
                 DL, '_window_gate')
 
+    def excess_counts_roll():
+        """ДВАДЦАТЬ ДЕВЯТЫЙ КРУГ, №6: избыток перекладки снова меряется ВМЕСТЕ со сменой
+        серии — на каждом ролле ложная тревога о недосписанных деньгах и ложный срез капа."""
+        orig = DL.repack_excess
+        def patched(before, after, unit_is_mes):
+            phys = DL.orders_from_books(before, after)          # БЕЗ приведения к общей серии
+            g_all = DL.repack_grid(phys, unit_is_mes) if phys else 0
+            net_g = abs(after.n_e - before.n_e) * (1 if unit_is_mes else 10)
+            return max(0, g_all - net_g), g_all, net_g
+        return orig, patched, DL, 'repack_excess'
+
+    def excess_cap_gate_off():
+        """ДВАДЦАТЬ ДЕВЯТЫЙ КРУГ, №6: избыток объявлен нулевым — ворота капа снова считают
+        по завышенному капиталу, и книга проходит 2,00 с уже известными издержками."""
+        orig = DL.repack_excess
+        return orig, (lambda before, after, unit_is_mes: (0, 0, 0)), DL, 'repack_excess'
+
     def rejected_archive_stays():
         """ДВАДЦАТЫЙ КРУГ, №22: отвергнутый архив остаётся под рабочим именем, и им можно
         восстановиться."""
@@ -927,6 +944,8 @@ def _run_mutations():
 
     return [('пин торгового счёта не требуется', pin_not_required),
             ('ворота торгового окна отключены', window_gate_off),
+            ('избыток перекладки считает оборот ролла', excess_counts_roll),
+            ('ворота капа без вычета избытка перекладки', excess_cap_gate_off),
             ('отвергнутый архив остаётся рабочим', rejected_archive_stays),
             ('книга после перехода пишется мимо контура', handover_wrong_path),
             ('входная сверка книги отключена', no_reconcile),
@@ -975,6 +994,12 @@ def _transition_mutations():
         """Дробное исполнение фьючерса принимается вместо инцидента."""
         orig = TRN._int_fill
         return orig, (lambda fill, what: float(fill)), '_int_fill'
+
+    def price_band_off():
+        """Полоса цен плана снята: заниженная в десять раз цена цели проходит, и число
+        долей цели, лимит §8б и маржа считаются по числу вызывающего (29-й круг, №3)."""
+        orig = TRN.check_plan_prices
+        return orig, (lambda broker, legs, src_cls: True), 'check_plan_prices'
 
     def replay_done():
         """Завершённые лоты исполняются повторно: обрыв даёт ДВОЙНУЮ продажу."""
@@ -1151,6 +1176,7 @@ def _transition_mutations():
             ('лимит непарной дельты снят', limit_off),
             ('дробный остаток округляется вверх', round_up_tail),
             ('дробное исполнение фьючерса принимается', frac_fut_ok),
+            ('полоса цен плана снята', price_band_off),
             ('привязка замера маржи отключена', margins_unbound),
             ('дыры замера добираются константами', margin_gap_constants),
             ('частичный прогресс лота выбрасывается', partial_ignored),

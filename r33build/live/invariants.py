@@ -187,6 +187,41 @@ def _i11(b, m, cap0, d, o, ue, ub):
     return bool(d.refusals) or not grew
 
 
+@inv('избыток перекладки не приписывает себе оборот ролла',
+     needs=lambda b, m, cap0, d, o, ue, ub: m.roll_today and not d.refusals
+     and d.book_after.n_e == b.n_e and d.book_after.es_held == b.es_held)
+def _i12a(b, m, cap0, d, o, ue, ub):
+    """ДВАДЦАТЬ ДЕВЯТЫЙ КРУГ, №6. Избыток считался разностью физических книг ВМЕСТЕ со
+    сменой серии: на ролле без изменения экспозиции и упаковки закрытие старой серии и
+    открытие новой давали сотни единиц сетки при чистом нуле, и каждый роллный день
+    оператор получал тревогу о недосписанных деньгах — при том что ролл оплачен
+    нормативным 1 б.п. Ложная тревога хуже молчания: она приучает не читать причины."""
+    return not any('ИЗБЫТОК ОБОРОТА УПАКОВКИ' in r for r in d.reasons)
+
+
+@inv('кап 2,00 держится и по капиталу за вычетом несписанного избытка',
+     needs=lambda b, m, cap0, d, o, ue, ub: not d.refusals and (d.orders or d.roll_pairs)
+     and d.capital_after_costs and d.capital_after_costs > 0 and ue == ue and ue > 0)
+def _i12b(b, m, cap0, d, o, ue, ub):
+    """ДВАДЦАТЬ ДЕВЯТЫЙ КРУГ, №6. Запись причины денег не возвращает и кап не соблюдает:
+    издержки известны ДО заявок, а порог 2,00 проверялся по капиталу, из которого они не
+    вычтены. NAV не трогаем (списание ломает 1e-12), но ворота обязаны считаться по
+    пессимистичному капиталу."""
+    # Избыток пересчитывается СТЕНДОМ САМОСТОЯТЕЛЬНО, а не берётся из причин дня: иначе
+    # снятие защиты убирало бы и причину, и утверждение молчало бы вместе с ней.
+    _same = DL.replace(d.book_after, ser_a=b.ser_a, ser_b=b.ser_b)
+    _phys = DL.orders_from_books(b, _same)
+    _g = DL.repack_grid(_phys, b.unit_is_mes) if _phys else 0
+    _n = abs(d.book_after.n_e - b.n_e) * (1 if b.unit_is_mes else 10)
+    if _g <= _n:
+        return True
+    _ex = DL.repack_cost(_g - _n, ue)
+    _e = d.capital_after_costs - _ex
+    if _e <= 0:
+        return True                     # книга и так срезана до нуля — ворота отработали
+    return (d.exposure['А'] + d.exposure['Б']) <= DL.CAP_LEV * _e + 1e-9
+
+
 @inv('ниже механического пола книга не наращивается никогда',
      needs=lambda b, m, cap0, d, o, ue, ub: ue == ue and ue > 0 and ub == ub and ub > 0
      and (ub / 2 > 0.10 * cap0))
@@ -2538,6 +2573,8 @@ def tinv(name, needs=None):
 
 
 TR_CASES = ('план целых фьючерсов', 'план дробных долей фонда', 'дублированный источник',
+            'цена плана вне рыночной полосы', 'цена плана в полосе',
+            'брокер без полосы цен',
             'дробный фьючерс в плане', 'исполнение в лимите', 'дробное исполнение фьючерса',
             'повторный запуск после обрыва', 'ИСПОЛНЕНИЕ дробного источника',
             'источник мельче зерна цели', 'битый замер маржи', 'замер без привязки',
@@ -2590,6 +2627,18 @@ class _TrBroker:
 
     def buy_units(self, i, u):
         self.n += 1; self.calls.append(('buy', i, u)); return (f'b{self.n}', self._b(i, u))
+
+    def unit_ref(self, instrument, cls):
+        """Полоса долларовой единицы (двадцать девятый круг, №3): стенд повторяет живого
+        брокера — цены плана обязаны укладываться в рыночный порядок величины."""
+        # Фонды именуются целиком (CBU0, CSPX): срезание цифр и месячных букв превратило
+        # бы CBU0 в CB — полосы не нашлось бы и законный план был бы отвергнут.
+        tab = {'ZN': 98_560.0, 'ES': 384_280.0, 'MES': 38_428.0,
+               'CBU0': 5.0, 'CSBGU0': 5.0, 'CSPX': 700.0}
+        name = str(instrument)
+        root = ''.join(ch for ch in name if not ch.isdigit()).rstrip('UZHM')
+        base = tab.get(name, tab.get(root))
+        return None if base is None else (base * 0.5, base * 2.0)
 
     def cancel_order(self, o): return True
     def open_orders(self): return []
@@ -2869,6 +2918,20 @@ def _tr_run(case):
             out['lots'] = TRN.plan_lots(legs_dup, 10e6)
         elif case == 'дробный фьючерс в плане':
             out['lots'] = TRN.plan_lots(legs_bad, 10e6)
+        elif case == 'цена плана вне рыночной полосы':
+            # ДВАДЦАТЬ ДЕВЯТЫЙ КРУГ, №3: цену цели занижаем в десять раз. Прежде это
+            # проходило — dprice проверялся лишь на положительность, а число долей цели,
+            # лимит §8б и финальная сверка считались по нему же (план сверялся с планом).
+            _bad_px = {'Б': dict(src=[('ZNU26', 10, ZN_U)], dst=('CBU0', 0.5, 'ETF'))}
+            TRN.check_plan_prices(_TrBroker(), _bad_px, 'FUT')
+        elif case == 'цена плана в полосе':
+            out['ok'] = TRN.check_plan_prices(_TrBroker(), legs_fut, 'FUT')
+        elif case == 'брокер без полосы цен':
+            # Защиту нельзя выключить, не отдав unit_ref: иначе её отключал бы сам
+            # вызывающий, чьи числа она и проверяет.
+            class _NoBand:
+                pass
+            TRN.check_plan_prices(_NoBand(), legs_fut, 'FUT')
         else:
             # ДРОБНЫЙ ИСТОЧНИК ПРОГОНЯЕТСЯ ЧЕРЕЗ ИСПОЛНЕНИЕ, а не только через планировщик:
             # прежняя проверка сверяла сумму лотов и объявляла выход из маршрута Е рабочим,
@@ -2965,6 +3028,27 @@ def _t3(r):
       needs=lambda r: r['case'] == 'дробный фьючерс в плане')
 def _t4(r):
     return r['raised'] and 'целыми' in r['error']
+
+
+@tinv('цена плана вне рыночной полосы отвергается',
+      needs=lambda r: r['case'] == 'цена плана вне рыночной полосы')
+def _t3a(r):
+    """ДВАДЦАТЬ ДЕВЯТЫЙ КРУГ, №3. Заниженная в десять раз цена цели даёт десятикратную
+    покупку, а сверка got_units*dprice всё равно сходится — план доказывал сам себя."""
+    return r['raised'] and 'вне рыночной полосы' in r['error']
+
+
+@tinv('законная цена плана полосу проходит',
+      needs=lambda r: r['case'] == 'цена плана в полосе')
+def _t3b(r):
+    """Полоса обязана быть проходимой: защита, отвергающая всё, останавливает переход."""
+    return (not r['raised']) and r.get('ok') is True
+
+
+@tinv('брокер без полосы цен к переходу не допускается',
+      needs=lambda r: r['case'] == 'брокер без полосы цен')
+def _t3c(r):
+    return r['raised'] and 'unit_ref' in r['error']
 
 
 @tinv('непарная дельта НИ РАЗУ не превышает лимит §8б',

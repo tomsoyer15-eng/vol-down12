@@ -424,6 +424,9 @@ class _B:
     # fail-closed, брокер без метода отвергается. Стенды зовут execute с capital 1e6 и
     # 10e6 — стаб настраивается на фактический капитал вызова через атрибут nlv.
     def net_liquidation(s): return getattr(s, 'nlv', None) or 1e6
+    # unit_ref ОБЯЗАТЕЛЕН (двадцать девятый круг, №3): цены плана сверяются с рынком.
+    def unit_ref(s, i, cls):
+        p = s._px(i); return (p * 0.5, p * 2.0)
     def preview(s): return s.p
     def sell_units(s, i, u):
         s.n += 1; f = (u - 0.5 if s.f and u > 0 else u)
@@ -540,6 +543,16 @@ _cl(); open(JX, 'w').write('asof,event,detail\n'); b1 = _B(netpos={'MES': 4}); i
 try: T.execute(b1, SP, 1e6, {'EQ': dict(src=[('MES', 4, 38428.0)], dst=('CSPX', 700.0, 'ETF'))}, signal_id='s1', **KW)
 except T.Incident: inc = True
 chk('Исполнитель: журнал без сигнала = отказ open до ордеров', inc and len(b1.calls) == 0)
+# ЦЕНА ПЛАНА СВЕРЯЕТСЯ С РЫНКОМ (двадцать девятый круг, №3): сквозной путь, а не только
+# сама функция — защита обязана стоять ДО первой заявки, иначе занижённая цена цели
+# успевает превратиться в десятикратную покупку.
+_cl(); _sig('E', grant=98565.0); bpx = _B(netpos={'ZN': 1, 'CBU0': 0}); inc = False
+try:
+    T.execute(bpx, SP, 1e6, {'BOND': dict(src=[('ZN', 1, 98560.0)], dst=('CBU0', 0.5, 'ETF'))},
+              signal_id='s1', **KW)
+except T.Incident as _ex:
+    inc = 'вне рыночной полосы' in str(_ex)
+chk('Исполнитель: цена цели вне рыночной полосы = отказ до ордеров', inc and len(bpx.calls) == 0)
 _cl(); _sig('E'); L4 = {'EQ': dict(src=[('MES', 4, 38428.0)], dst=('CSPX', 700.0, 'ETF'))}
 _plan = T.plan_lots(L4, 1e6)
 json.dump(dict(asof='2026-08-10', tid=T.transition_id('s1', 'F', 'E', 1e6, _plan), postponed=0, done=[], executed_usd=1.0,
