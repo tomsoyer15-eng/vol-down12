@@ -20,6 +20,7 @@ ADJUSTED_LAST воспроизводит модель ПРИ НЕИЗМЕННО�
 """
 import math
 import os
+import pathlib
 import sys
 from pathlib import Path
 
@@ -432,6 +433,18 @@ def _update_locked(ib, LIVE, pd):
             f.write(f'{d:%Y-%m-%d},{int(r.iloc[0])},{int(r.iloc[1])}\n')
         f.flush(); os.fsync(f.fileno())
     os.replace(tmp, LIVE)
+    # DIGEST СИГНАЛЬНОГО РЯДА (двадцать девятый круг, №2). После создания отметки sigup-<мес>
+    # файл читался ВЕСЬ МЕСЯЦ без единой проверки целостности: книга, журнал и реестр
+    # защищены цепочкой хэшей или пином, а сигнальный ряд — ничем, хотя определяет позицию
+    # ЦЕЛИКОМ. Правка одной строки переключала бы ногу на месяц незаметно. Пишем digest
+    # рядом; читатель сверяет его при каждом чтении.
+    import hashlib as _hl
+    _dg = _hl.sha256(pathlib.Path(LIVE).read_bytes()).hexdigest()
+    _dp = pathlib.Path(str(LIVE) + '.sha256')
+    _dtmp = _dp.with_suffix('.sha256.tmp')
+    with open(_dtmp, 'w', encoding='utf-8') as _fd:
+        _fd.write(_dg + '\n'); _fd.flush(); os.fsync(_fd.fileno())
+    os.replace(_dtmp, _dp)
     _commit_levels(LIVE, pending_levels)
     return [(f'{d:%Y-%m-%d}', int(fresh['leg_eq'].loc[d]), int(fresh['leg_bond'].loc[d]))
             for d in new_months]

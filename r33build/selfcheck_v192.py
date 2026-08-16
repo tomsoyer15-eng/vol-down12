@@ -1320,9 +1320,34 @@ except Exception as _ex:
     _miss, _pair_here = [f'проверка невозможна: {_ex}'], True
 _today_s = _dt1.datetime.now(_dt1.timezone.utc).strftime('%Y-%m-%d')
 if not _pair_here:
-    print('[НЕПРИМЕНИМО] живой пары (instruments_live.csv + margins_live.json) в архиве '
-          'НЕТ — они принадлежат счёту и не пакуются; согласованность проверяется НА '
-          'МАШИНЕ, где их читает боевой код')
+    # СРОК ПРОВЕРЯЕТСЯ ПО МАШИНЕ, А НЕ ПО АРХИВУ (двадцать девятый круг, №18). Архив
+    # намеренно не содержит живой пары, поэтому на распакованной копии проверка всегда
+    # «неприменима» — то есть требование «с 20.08 отсутствие замера = провал выпуска» было
+    # НЕДОСТИЖИМО по построению. Читаем пару там, где она живёт: в ~/.addfut рядом с кодом
+    # контура. Отсутствие ПОСЛЕ срока — провал; до срока — предупреждение.
+    # живой слой лежит рядом с рабочим деревом проекта, а не в распакованном архиве
+    _REAL_LIVE = _os1.path.join(_os1.path.expanduser('~'), 'claude-projects', 'vol-down12',
+                                'r33build', 'live')
+    _mj_m = _os1.path.join(_REAL_LIVE, 'margins_live.json')
+    _rg_m = _os1.path.join(_REAL_LIVE, 'instruments_live.csv')
+    try:
+        _mjm = _json1.loads(open(_mj_m, encoding='utf-8').read())
+        _mserm = {k for k in _mjm if k != '_meta'}
+        with open(_rg_m, encoding='utf-8') as _fm:
+            _rserm = {r['instrument'] for r in csv.DictReader(_fm)
+                      if r.get('sec_type') == 'FUT'}
+        _missm = sorted(_rserm - _mserm)
+    except Exception as _exm:
+        _missm = [f'машинная пара недоступна: {_exm}']
+    if not _missm:
+        chk('машинная пара «замер маржи <-> реестр» согласована', True, 'все серии покрыты')
+    elif _today_s < _MRG_DEADLINE:
+        print(f'[ВНИМАНИЕ] машинный замер не покрывает серии реестра {_missm} — переход '
+              f'Ф<->Е ЗАБЛОКИРОВАН; провал выпуска с {_MRG_DEADLINE}')
+    else:
+        chk('машинная пара «замер маржи <-> реестр» согласована', False,
+            f'не покрыты {_missm}; срок {_MRG_DEADLINE} истёк')
+    print('[НЕПРИМЕНИМО НА АРХИВЕ] живой пары в архиве нет — она принадлежит счёту')
 elif not _miss:
     chk('поставленная пара «замер маржи <-> реестр» согласована', True, 'все серии покрыты')
 elif _today_s < _MRG_DEADLINE:

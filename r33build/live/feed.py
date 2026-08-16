@@ -372,6 +372,19 @@ def signal_state(today, path=None, holidays=None):
         else:
             raise FeedError(f'[SIGNAL_STALE] нет живого ряда {live}; торговля по пакетному '
                             f'снимку запрещена (переопределить можно только явно)')
+    # СВЕРКА DIGEST ПРИ КАЖДОМ ЧТЕНИИ (двадцать девятый круг, №2): ряд определяет позицию
+    # целиком, и до сих пор был единственным источником истины без защиты целостности.
+    # Отсутствие файла digest — не отказ (старые ряды и исследовательский снимок его не
+    # имеют), но РАСХОЖДЕНИЕ — отказ: значит ряд правили мимо signal_update.
+    _dp = Path(str(p) + '.sha256')
+    if _dp.exists():
+        import hashlib as _hl
+        _want = _dp.read_text(encoding='utf-8').strip()
+        _got = _hl.sha256(Path(p).read_bytes()).hexdigest()
+        if _want and _want != _got:
+            raise FeedError(f'{p}: сигнальный ряд не совпадает с digest (записан '
+                            f'{_want[:12]}, факт {_got[:12]}) — ряд правили мимо '
+                            f'signal_update, торговля запрещена (О-5)')
     df = pd.read_csv(p, parse_dates=[0])
     df = df.set_index(df.columns[0]).sort_index()
     cols = {c.lower(): c for c in df.columns}
