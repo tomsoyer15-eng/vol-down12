@@ -629,6 +629,13 @@ def _feed_mutations():
     Здесь сидели четыре из пяти дефектов первой живой сессии, и ни один не был пойман."""
     import feed as FD
 
+    def series_name_unchecked():
+        """ТРИДЦАТЫЙ КРУГ, №3: имя инструмента снова не сверяется с фактической поставкой —
+        согласованно подменённая строка реестра (ESU26 с полями ESZ26) проходит целиком."""
+        import contracts as CTm
+        orig = CTm.series_mismatch
+        return orig, (lambda name, c, row=None: []), CTm, 'series_mismatch'
+
     def raw_es_price():
         """Цена ES подаётся КАК ЕСТЬ, без приведения к единице расчёта (дефект первой живой
         сессии). Прежняя редакция этой мутации умножала цену в источнике, а сборщик тут же
@@ -706,7 +713,8 @@ def _feed_mutations():
             return out
         return orig, patched, 'reference_prices'
 
-    return [('множители биржи не сверяются с моделью', no_mult_check),
+    return [('серия имени не сверяется с поставкой', series_name_unchecked),
+            ('множители биржи не сверяются с моделью', no_mult_check),
             ('цена ES без приведения к единице', raw_es_price),
             ('состояние ноги через bool()', loose_bool),
             ('даты баров не проверяются', no_date_check),
@@ -1729,12 +1737,18 @@ def run_feed_mutations():
     _ = []
     print(f"\n{'мутация сборщика входов':<40}{'поймана':>9}  какими утверждениями")
     for label, make in _feed_mutations():
-        orig, patched, attr = make()
-        setattr(FD, attr, patched)
+        # НОСИТЕЛЬ МОЖЕТ БЫТЬ НЕ feed (тридцатый круг, №3): сверка имени с поставкой живёт
+        # в contracts, и патч по feed не тронул бы её вовсе — мутация била бы в пустоту, а
+        # таблица печатала «поймана» за счёт постороннего утверждения. Кортеж из четырёх
+        # элементов явно называет модуль, как в других группах.
+        _got = make()
+        orig, patched, attr = _got[0], _got[1], _got[-1]
+        holder = _got[2] if len(_got) == 4 else FD
+        setattr(holder, attr, patched)
         try:
             _, bad = I.run_feed()
         finally:
-            setattr(FD, attr, orig)
+            setattr(holder, attr, orig)
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
         if not bad:
             miss.append(label)

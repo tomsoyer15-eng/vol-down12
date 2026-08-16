@@ -217,7 +217,11 @@ def contract_of(ib, name, reg=None):
         raise FeedError(f'{name}: нет в реестре — обновить first_connect.py')
     c = Contract(conId=int(reg[name]['con_id']))
     ib.qualifyContracts(c)
-    bad = CT.mismatches(c, reg[name]) + CT.verify_isin(ib, c, reg[name])
+    # ИМЯ СВЕРЯЕТСЯ С ПОСТАВКОЙ НЕЗАВИСИМО ОТ СТРОКИ РЕЕСТРА (тридцатый круг, №3):
+    # mismatches сравнивает контракт с той же строкой, откуда взят con_id, — согласованно
+    # подменённая строка проходит её целиком. Серию имени проверяет только series_mismatch.
+    bad = (CT.mismatches(c, reg[name]) + CT.series_mismatch(name, c, reg[name])
+           + CT.verify_isin(ib, c, reg[name]))
     if bad:
         raise FeedError(f'{name}: con_id описывает другой контракт — {"; ".join(bad)}; '
                         f'цена чужого актива легла бы в основу размера книги. '
