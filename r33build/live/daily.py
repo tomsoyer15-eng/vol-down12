@@ -265,6 +265,11 @@ class Decision:
     # 2 ES + 9 MES после перехода Е->Ф). Без признака решение считалось «без сделки», заявки
     # не подавались, а финальная сверка падала на рассинхронизации КАЖДУЮ сессию.
     pack_change: bool = False
+    # СОКРАЩЕНИЕ О-3-Е ПОСЛЕ ИСПОЛНЕНИЙ (тридцатый круг, №1): None или
+    # (запас, n_eq до, n_bd до, n_eq после, n_bd после). Поле, а не
+    # приписанный на ходу атрибут: решение обязано нести признак того, что
+    # книга сокращена, иначе тревога и журнал опишут ДОсокращённую книгу.
+    o3e_cut: tuple = None
 
     @property
     def trade(self):
@@ -1822,6 +1827,67 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                     'у брокера требует ручного разбора (О-5):\n  ' +
                     '\n  '.join([f"{r['instrument']}: заявка {r['qty']:+g}, исполнено "
                                   f"{r.get('filled'):+g}" for r in bad] + after))
+            # О-3-Е ПОСЛЕ ИСПОЛНЕНИЙ — СОКРАЩЕНИЕ В ТУ ЖЕ СЕССИЮ (тридцатый круг, №1).
+            # Норматив, §8: «live-отношение <1,40 — сокращение до L=1 В ТУ ЖЕ СЕССИЮ».
+            # Прежде здесь не было ничего: сессия заканчивалась, а session.do_trade лишь
+            # писал тревогу. Под этой тревогой контур не торгует, поэтому сокращение не
+            # происходило ни в ту сессию, ни в следующую — вообще никогда, до человека.
+            # В двадцать девятом круге я переписал ТЕКСТ тревоги, убрав ложное обещание;
+            # текст стал честным, а норматив остался невыполненным — исправлена была
+            # формулировка, а не поведение.
+            #
+            # ЭТО НЕ САМОЛЕЧЕНИЕ ПРОТИВ О-5. О-5 запрещает автоматике чинить РАСХОЖДЕНИЕ
+            # исполнения; сокращение по О-3-Е — предписанное нормой действие с известной
+            # целью. Тревога всё равно ставится вызывающим: разбор обязателен, но книга
+            # уходит в ночь уже сокращённой, а не двухкратной.
+            _o3e_cut = None
+            if route == 'E' and _lcf is not None:
+                try:
+                    _pc = _lcf()
+                except Exception as ex:
+                    raise RuntimeError(f'запас О-3-Е после исполнений недоступен ({ex}) — '
+                                       f'сокращение невозможно, ручной разбор (О-5)')
+                _live_book = bool(getattr(dec.book_after, 'n_eq', 0)
+                                  or getattr(dec.book_after, 'n_bd', 0))
+                if _pc is not None and _live_book and float(_pc) < O3E_MIN:
+                    _pe, _pb = market.px_eq_prev, market.px_bd_prev
+                    _n0e = getattr(dec.book_after, 'n_eq', 0)
+                    _n0b = getattr(dec.book_after, 'n_bd', 0)
+                    _share = 1.0 / max(float(market.st_eq) + float(market.st_bd), 1.0)
+                    _cap_now = float(broker.net_liquidation())
+                    _ne, _nb, _ = o3e_reduce(_cap_now, market, _pe, _pb,
+                                             _n0e, _n0b, _n0e, _n0b, _share)
+                    # o3e_reduce ограничен min(..., n0) по построению — нарастить не может.
+                    _cut_orders = [(i, q) for i, q in (('CSPX', _ne - _n0e),
+                                                       ('CBU0', _nb - _n0b)) if q]
+                    if _cut_orders:
+                        _cut_placed = []
+                        for _inst, _qty in _cut_orders:
+                            _window_gate(deadline, what=f'О-3-Е сокращение {_inst} {_qty:+g}')
+                            _rec = broker.place(_inst, _qty, (ref_prices or {}).get(_inst))
+                            _cut_placed.append(_rec)
+                            if not _filled(_rec, _qty):
+                                raise RuntimeError(
+                                    f'О-3-Е: сокращение {_inst} {_qty:+g} исполнено '
+                                    f'{_rec.get("filled")} — книга в промежуточном '
+                                    f'состоянии, состояние НЕ сохранено, ручной разбор (О-5)')
+                        _pos_c, _oo_c = _snapshot_consistent(broker)
+                        _cut_book = replace(dec.book_after, n_eq=_ne, n_bd=_nb)
+                        _after_c = ST.reconcile(_cut_book, route, _pos_c, open_orders=_oo_c)
+                        if _after_c:
+                            raise RuntimeError(
+                                'О-3-Е: после сокращения книга брокера не совпала с '
+                                'намеченной — состояние НЕ сохранено (О-5):\n  '
+                                + '\n  '.join(_after_c))
+                        dec.book_after = _cut_book
+                        placed.extend(_cut_placed)
+                        _o3e_cut = (float(_pc), _n0e, _n0b, _ne, _nb)
+                        dec.reasons.append(
+                            f'О-3-Е ПОСЛЕ ИСПОЛНЕНИЙ: запас {float(_pc):.2f}× ниже '
+                            f'{O3E_MIN} — книга сокращена в ту же сессию '
+                            f'{_n0e}/{_n0b} -> {_ne}/{_nb} (норматив §8)')
+            dec.o3e_cut = _o3e_cut
+
             # ЗАМЫКАНИЕ СЕССИИ: без него prev_close_lev остаётся NaN, сравнение с капом
             # всегда ложно, и нормативный триггер «плечо фактического закрытия предыдущей
             # сессии» в бою просто не работает.

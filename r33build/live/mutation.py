@@ -919,6 +919,15 @@ def _run_mutations():
         return (DL._window_gate, (lambda deadline, what='', margin_min=False: None),
                 DL, '_window_gate')
 
+    def o3e_cut_off():
+        """ТРИДЦАТЫЙ КРУГ, №1: сокращение О-3-Е после исполнений не режет книгу — целью
+        объявляется то, что уже есть. Книга ~2x уходит в ночь при запасе ниже 1,40."""
+        orig = DL.o3e_reduce
+        return (orig,
+                (lambda capital, m, p_e, p_b, n_eq, n_bd, n0_eq, n0_bd, share:
+                 (n_eq, n_bd, float(capital))),
+                DL, 'o3e_reduce')
+
     def rejected_archive_stays():
         """ДВАДЦАТЫЙ КРУГ, №22: отвергнутый архив остаётся под рабочим именем, и им можно
         восстановиться."""
@@ -927,6 +936,7 @@ def _run_mutations():
 
     return [('пин торгового счёта не требуется', pin_not_required),
             ('ворота торгового окна отключены', window_gate_off),
+            ('сокращение О-3-Е не режет книгу', o3e_cut_off),
             ('отвергнутый архив остаётся рабочим', rejected_archive_stays),
             ('книга после перехода пишется мимо контура', handover_wrong_path),
             ('входная сверка книги отключена', no_reconcile),
