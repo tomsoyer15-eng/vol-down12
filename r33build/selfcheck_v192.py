@@ -408,12 +408,47 @@ _c2 = M.run(_JP('wpi.csv'), 'mr_tariff.csv', _JP('wps.csv'), _JP('wpj.csv'), '20
 chk('МР: параллельный/повторный запуск не плодит сигналы (HOLD, сигнал один)',
     _c1 == M.SWITCH_E and _c2 == M.HOLD and open(_JP('wpj.csv')).read().count('SWITCH_SIGNAL') == 1)
 
+def _seed_books_from(netpos):
+    """КНИГИ МАРШРУТОВ СОГЛАСОВАНЫ С ПОЗИЦИЯМИ СТАБА (тридцатый круг, №4).
+
+    Предполёт перехода теперь сверяет книгу ИСХОДНОГО маршрута с брокером: прежде она
+    грузилась только ради существования, и переход «отмывал» расхождение — новая книга
+    строилась из фактического счёта, а старое расхождение исчезало вместе со старой
+    книгой, без О-5. Но стенды описывали состояние, которого в бою не бывает: общая
+    фикстура Ф несла 26 единиц сетки и 10 ZN, а стабы отдавали один ZN — и переходы
+    «проходили». Это ровно тот системный источник ложной зелени, что записан в §12:
+    фикстура беднее реальности.
+
+    Здесь книга собирается ИЗ ТЕХ ЖЕ позиций, что отдаёт стаб, для обоих маршрутов сразу —
+    какой из них окажется исходным, решает план. Одно место вместо сорока пяти.
+    """
+    import daily as _DLs, state as _STs
+    _n = {str(k): float(v) for k, v in (netpos or {}).items()}
+    _es = _n.get('ES', 0.0) + _n.get('ESU26', 0.0)
+    _mes = _n.get('MES', 0.0) + _n.get('MESU26', 0.0)
+    _zn = _n.get('ZN', 0.0) + _n.get('ZNU26', 0.0)
+    _STs.save(_STs.book_path('F'),
+              _DLs.Book(d_fix=7.9, n_e=int(_es * 10 + _mes), n_b=int(_zn),
+                        unit_is_mes=True, prev_st_eq=True, prev_st_bd=True,
+                        ser_a='U26', ser_b='U26', es_held=int(_es),
+                        last_session='2026-08-08', close_provisional=False,
+                        prev_close_lev=1.99),
+              'F', 1, note='фикстура стендов исполнителя: собрана из позиций стаба')
+    _STs.save(_STs.book_path('E'),
+              _DLs.BookE(n_eq=_n.get('CSPX', 0.0), n_bd=_n.get('CBU0', 0.0),
+                         prev_st_eq=True, prev_st_bd=True,
+                         last_session='2026-08-08', close_provisional=False,
+                         prev_close_lev=1.99),
+              'E', 1, note='фикстура стендов исполнителя: собрана из позиций стаба')
+
+
 # --- Исполнитель v6.1: журнал пишет сам, хук устранён ---
 class _B:
     def __init__(s, preview=True, timeout=False, frac=False, netpos=None, cancelnone=False, oo=None,
                  nlv=1e6):
         s.p = preview; s.t = timeout; s.f = frac; s.np = netpos or {}; s.nlv = nlv
         s.cn = cancelnone; s.oo = oo or []; s.n = 0; s.calls = []; s.u = 0.0; s.maxu = 0.0
+        _seed_books_from(s.np)      # книги обоих маршрутов согласованы со стабом (№4)
     def _px(s, i):
         i = str(i)
         if i.startswith('ZN'): return 98560.0
@@ -424,6 +459,11 @@ class _B:
     # fail-closed, брокер без метода отвергается. Стенды зовут execute с capital 1e6 и
     # 10e6 — стаб настраивается на фактический капитал вызова через атрибут nlv.
     def net_liquidation(s): return getattr(s, 'nlv', None) or 1e6
+    # ОТЧЁТЫ ОБ ИСПОЛНЕНИИ (тридцатый круг, №5): ABORT требует ДОКАЗАННОГО отсутствия
+    # сделок. Стаб честно отдаёт то, что исполнил: пусто — значит нечего и доказывать
+    # иначе. Без метода любой исход становился бы MIXED, и ABORT стал бы недостижим.
+    def todays_executions(s):
+        return [c for c in s.calls if c[0] in ('sell', 'buy')]
     # unit_ref ОБЯЗАТЕЛЕН (двадцать девятый круг, №3): цены плана сверяются с рынком.
     def unit_ref(s, i, cls):
         p = s._px(i); return (p * 0.5, p * 2.0)
