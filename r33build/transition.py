@@ -595,13 +595,6 @@ def _execute_guarded(broker, state_path, capital, legs, signal_id='', from_route
     # EMERGENCY_OVERRIDE ложился в нормативный журнал ДО всех проверок: отказ на любой из
     # них оставлял в истории запись об аварийном обходе порога, которого не было. Сначала
     # убеждаемся, что переход вообще возможен, и только потом фиксируем обход.
-    if emergency and journal:
-        # АВАРИЙНЫЙ ОБХОД ПОРОГА ЗАПИСЫВАЕТСЯ. Иначе признак emergency — молчаливый способ
-        # обойти жёсткое ограничение §8, и по журналу нельзя отличить штатный переход от
-        # обхода: событие пишется ДО первой заявки, а не после.
-        import mr_engine as _MJ
-        _MJ.append_event(journal, str(asof or ''), 'EMERGENCY_OVERRIDE',
-                         f'{from_route}->{to_route}|NLV={float(capital):.0f}|sid={signal_id}')
     if to_route == 'F' and float(capital) < MIN_NLV_F and not emergency:
         raise Incident(f'переход в Ф запрещён: NLV {float(capital):,.0f} ниже порога '
                        f'{MIN_NLV_F:,.0f} (§8); требуется решение заказчика. Аварийный '
@@ -681,6 +674,17 @@ def _execute_guarded(broker, state_path, capital, legs, signal_id='', from_route
     except RuntimeError:
         raise Incident('strategy-lock (стратегия+счёт) занят другим процессом — параллельное исполнение запрещено')
     try:
+        # АВАРИЙНАЯ ОТМЕТКА — ПОСЛЕ ВСЕХ СУХИХ ПРОВЕРОК (двадцать восьмой круг, №14).
+        # Прежде EMERGENCY_OVERRIDE ложился в нормативный журнал ПЕРВЫМ: отказ на любой
+        # последующей проверке оставлял в истории запись об обходе порога, которого не
+        # было. Пишем ровно перед исполнением, когда переход уже признан возможным.
+        if emergency and journal:
+            # АВАРИЙНЫЙ ОБХОД ПОРОГА ЗАПИСЫВАЕТСЯ. Иначе признак emergency — молчаливый способ
+            # обойти жёсткое ограничение §8, и по журналу нельзя отличить штатный переход от
+            # обхода: событие пишется ДО первой заявки, а не после.
+            import mr_engine as _MJ
+            _MJ.append_event(journal, str(asof or ''), 'EMERGENCY_OVERRIDE',
+                             f'{from_route}->{to_route}|NLV={float(capital):.0f}|sid={signal_id}')
         return _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to_route,
                                in_common_window, resume, journal, mr_state, asof, registry,
                                plan, tid, reg, want_cls, src_cls, _M, emergency)
@@ -1767,8 +1771,12 @@ def _run_lots(broker, plan, st, state_path, lim, unp, dst_bought, fail, _M=None,
             # оценки — упор фиксируется ДО заявки, с MIXED, а не отказами IB посреди книги.
             # ПЕРЕД ПРОДАЖЕЙ — МЕСТО НА ПАРУ (№2, №3): продажа необратима, и разрешать её
             # без гарантии, что парная покупка успеет по квоте и по времени, нельзя.
+            # РЕЗЕРВ НА ВСЮ ТРОЙКУ (двадцать восьмой круг, №11): продажа, парная покупка И
+            # компенсация недобора. Прежде резервировались только две заявки, и компенсация
+            # упиралась в лимит или в край окна — то есть непарный остаток оставался жить
+            # до следующей сессии ровно в том случае, ради которого компенсация и заведена.
             _order_gate(st, broker, fail, window_till=_wt, where=f'продажа {lot["src"]}',
-                        need=2)
+                        need=3)
             oid, f = broker.sell_units(lot['src'], step)
             st['order_ids'].append(oid)
             try:

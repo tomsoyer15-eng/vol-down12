@@ -753,8 +753,21 @@ def closing_values(ib, route, book):
                         f'идут; дневной бар существует, но НЕ ЗАВЕРШЁН. Замыкание после {gate}')
     reg = registry()
     if route == 'E':
-        _, _, pe_t, d1 = closes(ib, contract_of(ib, 'CSPX', reg), today)
-        _, _, pb_t, d2 = closes(ib, contract_of(ib, 'CBU0', reg), today)
+        # ОБЩАЯ СЕССИЯ — НИЖНЯЯ ГРАНИЦА И ПРИ ЗАМЫКАНИИ (двадцать восьмой круг, №18;
+        # открытый долг №11 двадцать седьмого). Здесь closes звался БЕЗ календаря, поэтому
+        # применялся плоский допуск в пять дней: после связки LSE/SIX (29.12.2026 — разрыв
+        # шесть дней; 1 и 4 мая 2026) замыкание падало ровно там же, где падал сбор рынка.
+        # Исправление сбора без замыкания оставляло книгу Е незамкнутой — то есть кап §1
+        # считался бы по чужому закрытию.
+        try:
+            _hol_c = eu_holidays(today.year, today.year + 1)
+        except FeedError:
+            _hol_c = eu_holidays(today.year)
+        _exp_c = prev_session(today, _hol_c)
+        _, _, pe_t, d1 = closes(ib, contract_of(ib, 'CSPX', reg), today,
+                                expected_prev=None, min_prev=_exp_c)
+        _, _, pb_t, d2 = closes(ib, contract_of(ib, 'CBU0', reg), today,
+                                expected_prev=None, min_prev=_exp_c)
         if pe_t is None or pb_t is None:
             raise FeedError('сегодняшний бар фондов ещё не закрыт — замыкать рано')
         return pe_t, None, pb_t, dict(CSPX=(pe_t, str(d1.date())), CBU0=(pb_t, str(d2.date())))
