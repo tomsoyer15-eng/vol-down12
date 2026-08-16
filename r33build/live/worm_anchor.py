@@ -70,8 +70,14 @@ def _anchor_body(day):
     import journal as J
     import state as STm
     st = _state_root()               # действующий каталог, не жёсткий ~/.addfut (№18)
+    # МАРШРУТ БЕРЁТСЯ ЧЕРЕЗ ОБЩУЮ ФУНКЦИЮ, А НЕ УГАДЫВАЕТСЯ (двадцать восьмой круг, №16).
+    # Прежде при отсутствии route.txt подставлялся 'F': после перехода старая книга Ф обычно
+    # остаётся на диске, поэтому якорь ЗАВЕРЯЛ НЕАКТИВНУЮ книгу как действующую, когда
+    # фактическая позиция уже в Е. Тот же источник истины, что у сессии; неизвестный
+    # маршрут — отказ снимать якорь, а не догадка.
     rt = st / 'route.txt'
-    route = rt.read_text().strip() if rt.exists() else 'F'
+    import state as _STw
+    route = _STw.active_route()
     cls = daily.BookE if route == 'E' else daily.Book
     # КНИГА — ЧЕРЕЗ state.load (№18): digest сверяется загрузчиком, а не переписывается
     # из сырого JSON, где порчу payload никто бы не заметил.
@@ -166,11 +172,17 @@ def _git_commit_verified(out):
         blob_head = r3.stdout.split()[2]
     except IndexError:
         raise RuntimeError(f'ls-tree вернул неразбираемое: {r3.stdout[:80]!r}')
-    r4 = subprocess.run(['git', '-C', str(ROOT), 'hash-object', str(out)],
-                        capture_output=True, text=True)
-    if r4.returncode != 0 or not r4.stdout.strip():
-        raise RuntimeError(f'git hash-object отказал: {r4.stderr.strip()[:120]}')
-    if blob_head != r4.stdout.strip():
+    # СВЕРКА С ПРОВЕРЕННЫМ ТЕЛОМ, А НЕ С ФАЙЛОМ ПОСЛЕ HOOK (двадцать восьмой круг, №17).
+    # hash-object считал хэш файла НА ДИСКЕ уже после коммита: pre-commit hook или чужой
+    # процесс могли переписать и файл, и blob согласованно — сверка совпадала бы, заверяя
+    # чужой текст. Хэшируем ТО ТЕЛО, которое проверено и записано, не перечитывая диск.
+    import subprocess as _sp2
+    r4 = _sp2.run(['git', '-C', str(ROOT), 'hash-object', '--stdin'],
+                  input=out.read_bytes(), capture_output=True)
+    _blob_body = r4.stdout.decode().strip() if r4.returncode == 0 else ''
+    if not _blob_body:
+        raise RuntimeError(f'git hash-object отказал: {r4.stderr.decode()[:120]}')
+    if blob_head != _blob_body:
         raise RuntimeError('содержимое якоря в HEAD НЕ СОВПАДАЕТ с записанным файлом '
                            '(подмена между add и commit) — заверение ложно')
 

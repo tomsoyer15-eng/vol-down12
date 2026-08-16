@@ -156,6 +156,12 @@ alarm_write() {
     fi
     logger -t addfut "КРИТИЧНО: не удалось записать тревогу $f: $*" 2>/dev/null || true
     log "КРИТИЧНО: тревога НЕ записана ни в $f, ни в $alt — контур останавливается"
+    # МЕЖПРОЦЕССНЫЙ СТОП (двадцать восьмой круг, №9): return 1 останавливает ТЕКУЩИЙ тик,
+    # но следующий cron о нём не знает — файлов-тревог нет, и он снова входит в торговлю.
+    if ! : > "$ST/autopilot.STOP" 2>/dev/null; then
+        rm -f "$ST"/traded-* "$ST"/closed-* 2>/dev/null || true
+        logger -t addfut "КРИТИЧНО: не удалось поставить autopilot.STOP" 2>/dev/null || true
+    fi
     return 1
 }
 
@@ -338,7 +344,12 @@ BK0
             return 1
         fi
         log "торговля $day: ок"
-    elif [ "$(cd "$LIVE" && "$PY" - "$day" <<'BK2' 2>/dev/null
+    # ВЕТКА BK2 НЕ ПЕРЕХВАТЫВАЕТ ЧЕСТНЫЙ ПОВТОР (двадцать восьмой круг, №8): она
+    # стояла РАНЬШЕ проверки «не новее последней завершённой» и делала её
+    # недостижимой — любой повтор при книге сегодняшней даты давал тревогу и
+    # остановку контура вместо штатного «день уже отторгован».
+    elif ! printf '%s' "$out" | grep -qE 'не новее последней завершённой' \
+         && [ "$(cd "$LIVE" && "$PY" - "$day" <<'BK2' 2>/dev/null
 import sys
 from pathlib import Path
 import daily, state as ST
@@ -476,6 +487,11 @@ tick() {
     # следующей сессией не могло даже начаться (для него нужен триггер капа замыкания).
     # Замыкание НЕ подаёт заявок — это запись фактических цен и NLV, то есть наблюдение;
     # О-5 не нарушается: лечить по-прежнему нечем и некому.
+    # СТОП-ФАЙЛ ЧИТАЕТСЯ ПЕРВЫМ (№9): он ставится, когда тревогу записать НЕ удалось.
+    if [ -e "$ST/autopilot.STOP" ]; then
+        log "СТОП-ФАЙЛ — торговля и замыкание запрещены до ручного разбора"
+        return 0
+    fi
     if ls "$ST"/ALARM-*.txt >/dev/null 2>&1; then
         local _d0
         _d0=$(chicago %F)
@@ -483,6 +499,31 @@ tick() {
            && [ "$(chicago %H%M)" -ge "$(close_after)" ]; then
             log "тревога стоит, но день $_d0 отторгован и не замкнут — выполняю ТОЛЬКО замыкание"
             ensure_gw && run_close "$_d0"
+        fi
+        # НАБЛЮДЕНИЕ ЗА ЗАПАСОМ НЕ ОТКЛЮЧАЕТСЯ ТРЕВОГОЙ (двадцать восьмой круг, №13).
+        # Любой ALARM выводил тик ДО вахты О-3-Е, а тревога может стоять сутками до ручного
+        # разбора: именно тогда маржинальная книга Е и остаётся без единого замера. Тревога
+        # запрещает ДЕЙСТВИЯ (заявки), а не измерения — то же разделение, что и в
+        # неторговый день. Замер не подаёт заявок и не меняет состояние.
+        if [ "$(route)" = E ] && [ ! -e "$ST/ALARM-o3e-blind-$_d0.txt" ]; then
+            _cwa=$(cd "$LIVE" && timeout -k 10 90 "$PY" -c "
+import sys
+sys.path.insert(0, '.')
+from ib_insync import IB
+import ib_broker as IBB, daily as DL
+ib = IB()
+try:
+    ib.connect('127.0.0.1', 4002, clientId=96, timeout=15)
+    c = IBB.IBBroker(ib).margin_cushion()
+    ib.disconnect()
+except Exception as ex:
+    sys.stdout.write('SKIP %r' % (ex,)); raise SystemExit
+sys.stdout.write(('LOW %.3f' % c) if (c is not None and c < DL.O3E_MIN)
+                 else ('OK %.3f' % c if c is not None else 'SKIP запаса нет'))" 2>&1)
+            case "$_cwa" in
+                LOW\ *) log "ВНИМАНИЕ под тревогой: запас О-3-Е $_cwa ниже порога" ;;
+                *) : ;;
+            esac
         fi
         return 0                                         # торговли под тревогой нет
     fi

@@ -81,7 +81,12 @@ def _connect(client_id):
     # базиса, но НЕ для измерения качества исполнения: за 15 минут рынок проходит больше
     # модельных 5 б.п. (двадцать пятый круг, №15). Адаптер помечает такие строки как
     # НЕ-котировку момента, и §7 их в выборку издержек не берёт.
-    ib.reqMarketDataType(3)
+    # ТИП ДАННЫХ — ИЗ ОКРУЖЕНИЯ, И АДАПТЕР ОБ ЭТОМ ЗНАЕТ (двадцать восьмой круг, №15).
+    # Прежде сессия всегда просила тип 3, а IBBroker.realtime_md не выставлялся НИГДЕ в
+    # боевом пути: значит после покупки подписки §7 всё равно не начал бы набирать выборку,
+    # а обещание «наберётся после подписки» было ложным. Переключатель один и явный.
+    _mdt = 1 if os.environ.get('ADDFUT_REALTIME_MD') == '1' else 3
+    ib.reqMarketDataType(_mdt)
     return ib
 
 
@@ -163,6 +168,9 @@ def do_close(ib, route):
     """
     import state as ST
     br = IBB.IBBroker(ib, account=_account_pin())
+    # признак реального времени доходит до адаптера (№15): без него px_order_live всегда
+    # False, и §7 не начал бы набирать выборку даже при купленной подписке
+    br.realtime_md = (os.environ.get('ADDFUT_REALTIME_MD') == '1')
     bp = _book_path(route)
     cls = DL.BookE if route == 'E' else DL.Book
     with ST.hold_book_lock():
@@ -230,6 +238,9 @@ def do_trade(ib, route, dry):
     import state as ST
 
     br = IBB.IBBroker(ib, account=_account_pin())
+    # признак реального времени доходит до адаптера (№15): без него px_order_live всегда
+    # False, и §7 не начал бы набирать выборку даже при купленной подписке
+    br.realtime_md = (os.environ.get('ADDFUT_REALTIME_MD') == '1')
     nlv = br.net_liquidation()
     pos = br.net_positions()
     alien = [k for k in pos if k.startswith('НЕИЗВЕСТНЫЙ')]
