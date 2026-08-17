@@ -215,6 +215,17 @@ def _live_margins():
     if not isinstance(_cids, dict) or not _cids:
         raise Incident(f'{p}: замер без привязки к поколению реестра (_meta.con_ids) — '
                        f'формат до тридцать второго круга; переснять first_connect')
+    # КАРТА ПОКОЛЕНИЯ ОБЯЗАНА БЫТЬ ПОЛНОЙ (тридцать третий круг, №2). Проверялось только,
+    # что словарь непуст и что ПЕРЕЧИСЛЕННЫЕ в нём ключи совпадают с реестром: достаточно
+    # было оставить правильный ESU26 и УБРАТЬ ZNZ26 с исправленным con_id — и старый замер
+    # ноги Б проходил ворота целиком. Заниженная маржа прежнего контракта завышает
+    # preflight-запас, и переход открывает книгу, чей фактический запас уже ниже О-3.
+    # Карта сверяется с содержимым замера, а не сама с собой.
+    if set(_cids) != set(entries):
+        raise Incident(
+            f'{p}: карта поколения неполна — con_ids {sorted(_cids)} против замера '
+            f'{sorted(entries)}; отсутствующая серия прошла бы со старым контрактом. '
+            f'Переснять first_connect')
     try:
         with open(rp, encoding='utf-8') as _fr:
             _reg_now = {r['instrument']: str(r['con_id']) for r in _csv.DictReader(_fr)}
@@ -892,17 +903,50 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None):
         _pbF, _, _ = _STp.load(_STp.book_path('F'), _DLp.Book)
         # hasattr(broker,'ib') — НЕ ДОКАЗАТЕЛЬСТВО (двадцать восьмой круг, №5): атрибут
         # может быть, а доходность недоступна. Спрашиваем ФАКТ: получается ли dref.
+        # D ФИКСИРУЕТСЯ ПРИ ОТКРЫТИИ НОГИ, ЗНАЧИТ СЕГОДНЯШНЕЙ ДОХОДНОСТЬЮ (33-й круг, №3).
+        # Прежде старая книга Ф считалась ДОСТАТОЧНЫМ источником, и полученное живое
+        # значение всё равно выбрасывалось; hand_over_book потом спрашивал доходность
+        # заново и при сбое молча брал d_fix прежней книги. Но пока маршрут Е был активен,
+        # BookE дюрацию не хранит, книга Ф лежит нетронутой — её d_fix относится к моменту
+        # УХОДА в Е и может быть многомесячным. prev_st_bd переносится из Е, поэтому
+        # следующая step() переключения ноги Б не видит и D не перефиксирует: ZN месяцами
+        # оценивается по чужой дюрации — полоса, количество ZN и плечо закрытия неверны.
+        # Возврат в Ф с ЖИВОЙ ногой Б требует свежей доходности; старая книга больше не
+        # доказательство. Стендам — явная калитка, как у замера маржи и даты перехода.
+        import os as _osd3
+        _zn_target = any(str(_n).startswith('ZN') for _n in (_dst_names or ()))
         _dfx_ok = False
-        if _pbF is not None and getattr(_pbF, 'd_fix', 0):
-            _dfx_ok = True
-        elif hasattr(_broker_p, 'ib'):
-            try:
-                import feed as _FDd
-                _y, _ = _FDd.yield_pct(_broker_p.ib, _FDd.exchange_today())
-                _dfx_ok = bool(_FDd.dref_from_yield(float(_y) / 100.0))
-            except Exception:
-                _dfx_ok = False
-        if not _dfx_ok:
+        _dfx_val = 0.0
+        try:
+            import feed as _FDd
+            # ДАТА БАРА СВЕРЯЕТСЯ (тридцать четвёртый круг, №3): без expected_prev
+            # feed.closes допускает бар возрастом до пяти календарных дней, и во вторник
+            # при пропущенном понедельнике проходила ПЯТНИЧНАЯ доходность. «Сегодняшний»
+            # d_fix оказывался позапрошлым, а по нему считаются модельная единица ZN,
+            # количество контрактов, полоса и плечо закрытия.
+            _t_d = _FDd.exchange_today()
+            _prev_d = _FDd.prev_session(_t_d, holidays=_DLp.holidays_for(_t_d.year))
+            _y, _yd = _FDd.yield_pct(_broker_p.ib, _t_d, expected_prev=_prev_d)
+            _dfx_val = float(_FDd.dref_from_yield(float(_y) / 100.0))
+            _dfx_ok = bool(_dfx_val)
+        except Exception:
+            _dfx_ok = False
+            _dfx_val = 0.0
+        if not _dfx_ok and _zn_target and _osd3.environ.get('ADDFUT_DFIX_TEST') != '1':
+            raise RuntimeError(
+                'свежая доходность недоступна, а нога Б открывается заново: D фиксируется '
+                'при открытии ноги, и d_fix прежней книги Ф относится к моменту ухода в Е '
+                '(возможно, многомесячной давности) — переход запрещён. Стендам: '
+                'ADDFUT_DFIX_TEST=1')
+        # ПРОВЕРЕННОЕ ЗНАЧЕНИЕ ИДЁТ В ПЕРЕДАЧУ (тридцать четвёртый круг, №4): предполёт
+        # получал _dfx_val и выбрасывал его, а hand_over_book запрашивал доходность ЗАНОВО —
+        # уже ПОСЛЕ продажи фондов и покупки фьючерсов. Второй запрос мог отказать, хотя
+        # предполёт прошёл: брокер держит фьючерсы, книга и маршрут ещё Е, передача уходит
+        # в MIXED. Проверка обязана относиться к тому значению, которое будет сохранено.
+        if _dfx_ok:
+            _PREFLIGHT_DFIX['value'] = _dfx_val
+            _PREFLIGHT_DFIX['asof'] = str(_FDd.exchange_today())
+        if not _dfx_ok and not (_pbF is not None and getattr(_pbF, 'd_fix', 0)):
             raise RuntimeError(
                 'd_fix восстановить нечем: старой книги Ф нет и живой доходности у брокера '
                 'тоже — книга Ф получила бы d_fix=0 и ложное плечо закрытия уже ПОСЛЕ '
@@ -920,6 +964,13 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None):
                                f'(сессия №{_dsess}) — история утрачена (О-5)')
 
 
+# ЗНАЧЕНИЕ d_fix, ПРОВЕРЕННОЕ ПРЕДПОЛЁТОМ (тридцать четвёртый круг, №4): предполёт стоит
+# ДО первой заявки, hand_over_book — ПОСЛЕ необратимого перевода денег. Разные чтения одной
+# величины делают проверку формальной; передаём ровно то, что проверено, и только в пределах
+# ТОГО ЖЕ биржевого дня.
+_PREFLIGHT_DFIX = {'value': 0.0, 'asof': ''}
+
+
 def _drop_handover(flags):
     """Снять барьеры незавершённой передачи, поставленные ЭТИМ вызовом (31-й круг, №12).
 
@@ -931,15 +982,35 @@ def _drop_handover(flags):
     Отдельной функцией — под парную мутацию: пока снятие сидит циклом внутри процедуры,
     у него не может быть собственного стенда.
     """
+    import os as _osd
+    _dirs, _left = set(), []
     for _f in list(flags or ()):
         try:
+            _dirs.add(str(_f.parent))
             _f.unlink()
         except FileNotFoundError:
             pass
-        except Exception:
-            pass                      # уборка чистого отказа не смеет маскировать причину
+        except Exception as _exu:
+            _left.append(f'{_f}: {_exu}')
+    # УДАЛЕНИЕ ДОЛГОВЕЧНО (тридцать третий круг, №7): без fsync каталога снятая метка может
+    # вернуться после сбоя питания, и завершённый переход снова запрёт контур.
+    for _d in _dirs:
+        try:
+            _fd = _osd.open(_d, _osd.O_DIRECTORY)
+            try:
+                _osd.fsync(_fd)
+            finally:
+                _osd.close(_fd)
+        except Exception as _exd:
+            _left.append(f'{_d}: fsync каталога не выполнен ({_exd})')
     if isinstance(flags, list):
         flags.clear()
+    # ОШИБКИ УБОРКИ НЕ ГЛОТАЮТСЯ (тридцать четвёртый круг, №8). Прежде unlink и fsync
+    # стояли под `except: pass`, а список меток очищался НЕЗАВИСИМО от результата: осталась
+    # или «воскресла» метка — торговля и замыкание обоих маршрутов запрещены навсегда, а
+    # код считает, что убрал за собой. На Ф это прямой путь к пропущенному роллу и
+    # поставочной зоне. Возвращаем неубранное — вызывающий обязан сказать вслух.
+    return _left
 
 
 def _snapshot_pair(broker, attempts=3):
@@ -1351,7 +1422,26 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         _exf = getattr(broker, 'todays_executions', None)
         if callable(_exf):
             try:
-                _ex_proof = list(_exf() or [])
+                _all_ex = list(_exf() or [])
+                # ОТЧЁТЫ СОПОСТАВЛЯЮТСЯ С НАШИМИ ЗАЯВКАМИ (тридцать четвёртый круг, №9).
+                # Прежде брался ВЕСЬ список дня: обычный утренний ребаланс идёт под тем же
+                # orderRef='ADDFUT', поэтому к запуску перехода список уже непуст — и ЛЮБОЙ
+                # последующий чистый отказ классифицировался как MIXED. Следствие: pending
+                # и обе метки передачи остаются, торговля и замыкание заблокированы, хотя
+                # переход не подал ни одной заявки; ближайший ролл может быть пропущен.
+                # Сопоставляем с номерами ЭТОГО перехода; полное сопоставление отчётов с
+                # намерением — открытый долг 28-го круга №3, и он назван отдельно.
+                _mine = {str(x) for x in (st.get('order_ids') or [])}
+                if _mine:
+                    _ex_proof = [e for e in _all_ex
+                                 if any(_m in str(e) for _m in _mine)]
+                    if _all_ex and not _ex_proof:
+                        _ex_note = (' | отчёты дня есть, но НИ ОДИН не относится к заявкам '
+                                    'этого перехода')
+                else:
+                    # Заявок перехода не записано вовсе: любой отчёт дня — чужой, и
+                    # доказательством сделки ПЕРЕХОДА он не является.
+                    _ex_proof = []
             except Exception as _exe:
                 _ex_note = f' | БАРЬЕР ОТЧЁТОВ НЕ ОТРАБОТАЛ ({_exe}) — исход не ABORT'
         else:
@@ -1379,6 +1469,17 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         # исполнение до handover) жил только в журнале МР, который автопилот НЕ читает:
         # после освобождения замка книги дневной контур мог подать заявки поверх позднего
         # исполнения при устойчиво старом снимке позиций у брокера.
+        # МЕТКИ СНИМАЮТСЯ ПРИ ДОКАЗАННОМ ЧИСТОМ ABORT (тридцать третий круг, №7). Метки
+        # ставятся ДО журнального OPEN (32-й круг, №12), и чистый отказ ПОСЛЕ открытия —
+        # например, ворота лота при менее чем 45 минутах до края окна — оставлял их
+        # навсегда: брокер не тронут, pending снят, а торговля и замыкание ОБОИХ маршрутов
+        # запрещены до ручной уборки; ближайший ролл пропускается, серия идёт к поставке.
+        # Только ABORT: при MIXED книга могла измениться, и барьер обязан остаться.
+        if kind == 'abort':
+            _left_ho = _drop_handover(_hoflags)
+            if _left_ho:
+                msg += (f' | МЕТКИ ПЕРЕДАЧИ НЕ СНЯТЫ {_left_ho} — торговля и замыкание '
+                        f'останутся запрещены до ручной уборки (О-5)')
         # тревога уже поставлена внутри _mixed (№14) — второй раз не ставим
         raise Incident(msg)
 
@@ -1681,11 +1782,14 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         raise Incident('журнал отклонил COMPLETE — книга переведена, состояние MIXED, '
                        'ручная сверка' + _al)
     # МЕТКА ПЕРЕДАЧИ СНИМАЕТСЯ ТОЛЬКО ЗДЕСЬ — после принятого COMPLETE (№15).
-    for _f in _hoflags:
-        try:
-            _f.unlink()
-        except FileNotFoundError:
-            pass
+    # СНЯТИЕ ТОЖЕ ДОЛГОВЕЧНО (тридцать третий круг, №7): без fsync каталога завершённый
+    # переход после сбоя питания «воскресает» незавершённым и даёт тот же стоп контура.
+    _left_fin = _drop_handover(_hoflags)
+    if _left_fin:
+        _al2 = _alarm_transition(asof, f'COMPLETE записан, но метки передачи НЕ сняты '
+                                       f'{_left_fin} — контур останется заперт')
+        raise Incident(f'переход завершён, но метки передачи не сняты {_left_fin}: '
+                       f'торговля и замыкание запрещены до ручной уборки (О-5){_al2}')
     # СУММА МОДУЛЕЙ И ЗДЕСЬ (двадцать второй круг, №19): отчёт со знаковой суммой при
     # остатках +$49k/-$49k показывал unpaired_usd=0 — ложное доказательство полного
     # спаривания, хотя это два разных риска и полоса 10% может не исправить ни один.
@@ -1782,19 +1886,32 @@ def hand_over_book(broker, from_route, to_route, positions=None):
         # возврате в Ф это дало бы неверный вклад ноги Б и ложное плечо закрытия. Живая
         # доходность точнее по определению; старая книга — запасной путь.
         import feed as _FD2b
-        if getattr(broker, 'ib', None) is not None:
+        # СНАЧАЛА — ЗНАЧЕНИЕ, ПРОВЕРЕННОЕ ПРЕДПОЛЁТОМ (тридцать четвёртый круг, №4).
+        _pf = _PREFLIGHT_DFIX.get('value') or 0.0
+        if _pf and _PREFLIGHT_DFIX.get('asof') == str(_FD2b.exchange_today()):
+            _dfx = float(_pf)
+        if not _dfx and getattr(broker, 'ib', None) is not None:
             try:
                 _y, _ = _FD2b.yield_pct(broker.ib, _FD2b.exchange_today())
                 _dfx = _FD2b.dref_from_yield(_y / 100.0)
             except Exception:
                 _dfx = 0.0
         if not _dfx:
-            try:
-                _oldF, _, _ = _ST2.load(_ST2.book_path('F'), _BF)
-                if _oldF is not None and getattr(_oldF, 'd_fix', 0.0):
-                    _dfx = float(_oldF.d_fix)
-            except Exception:
-                pass
+            # ОТКАТ К СТАРОЙ КНИГЕ — ТОЛЬКО КОГДА НОГИ Б НЕТ (тридцать третий круг, №3).
+            # При живом ZN дюрация старой книги Ф относится к моменту ухода в Е, и молчаливый
+            # откат к ней означал бы месяцы оценки ноги Б по чужому D. Предполёт уже
+            # потребовал свежую доходность (или явную калитку стендов) — здесь тот же порядок.
+            import os as _osd4
+            _zn_now = any(str(k).startswith('ZN') and float(v)
+                          for k, v in ((positions if positions is not None
+                                        else broker.net_positions()) or {}).items())
+            if not _zn_now or _osd4.environ.get('ADDFUT_DFIX_TEST') == '1':
+                try:
+                    _oldF, _, _ = _ST2.load(_ST2.book_path('F'), _BF)
+                    if _oldF is not None and getattr(_oldF, 'd_fix', 0.0):
+                        _dfx = float(_oldF.d_fix)
+                except Exception:
+                    pass
     # КНИГА — ИЗ ПРОВЕРЕННОГО СНИМКА (двадцать первый круг, №3). Прежде здесь заново
     # спрашивались позиции, уже ПОСЛЕ финальной сверки и барьера заявок: поздний фил или
     # ручная сделка, пришедшие в этот зазор, записывались в состояние как законная книга и

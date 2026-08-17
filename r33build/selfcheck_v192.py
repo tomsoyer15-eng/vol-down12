@@ -601,6 +601,12 @@ _J0.append(_ST0.lock_dir() / 'journal-F.csv', dict(
 # только здесь. Сама защита проверяется стендом 'переход задним числом запрещён' в
 # invariants.py — БЕЗ калитки, иначе она была бы отключена во всём выпуске разом.
 os.environ['ADDFUT_ASOF_OVERRIDE'] = '1'
+# КАЛИТКА d_fix ДЛЯ СТЕНДОВ (тридцать третий круг, №3): брокер-макет _B не имеет .ib, а
+# живая доходность нужна для Е→Ф с ногой Б. Прежде это молчаливо покрывалось откатом к
+# старой книге Ф — то есть стенд закреплял как норму именно тот путь, который в бою даёт
+# месяцы оценки ZN по чужой дюрации. Дверь названа явно, в бою не выставляется (env_guard
+# автопилота запрещает переопределения ADDFUT_* на торговом входе).
+os.environ['ADDFUT_DFIX_TEST'] = '1'
 KW = dict(journal=JX, mr_state=SX, asof='2026-08-10')
 L1 = {'BOND': dict(src=[('ZN', 1, 98560.0)], dst=('CBU0', 5.0, 'ETF'))}
 _cl(); _sig('E', grant=98565.0); rr = []
@@ -750,6 +756,28 @@ open(_jdg, 'w').write('asof,event,detail\n2026-08-08,SWITCH_SIGNAL,E|s1\n')
 M.test_configure(_jdg)
 M.append_event(_jdg, '2026-08-09', 'SWITCH_SIGNAL', 'F|s2')
 chk('МР: законная запись заверяется и читается', len(M.journal_rows(_jdg)) == 2)
+# ТРИДЦАТЬ ТРЕТИЙ КРУГ, №14: ПРОИЗВОДСТВЕННЫЙ вызов перехода — БЕЗ калитки ADDFUT_ASOF_
+# OVERRIDE. Все полные переходы выше идут с ней, а отказной стенд «переход задним числом»
+# передаёт object() вместо брокера и /nonexistent-пути: он гарантированно падает на
+# следующем, постороннем барьере. Значит регрессия «любой вызов без калитки отвергается»
+# осталась бы незамеченной, а маршрут не сменился бы перед роллом. Проверяем ровно одно и
+# честно: сегодняшний asof НЕ отвергается воротами даты. Дальше вызов может отказать по
+# окну или календарю — это другие ворота, и они названы.
+_cl(); _sig('E', grant=98565.0)
+import feed as _FDsc
+_today_sc = _FDsc.exchange_today().strftime('%Y-%m-%d')
+_keep_ov = _os1.environ.pop('ADDFUT_ASOF_OVERRIDE', None)
+_asof_blocked = ''
+try:
+    _KWn = dict(KW); _KWn['asof'] = _today_sc
+    T.execute(_B(netpos={'ZN': 1, 'CBU0': 0}), SP, 1e6, L1, signal_id='s1', **_KWn)
+except Exception as _exn:
+    _asof_blocked = str(_exn)
+finally:
+    if _keep_ov is not None:
+        _os1.environ['ADDFUT_ASOF_OVERRIDE'] = _keep_ov
+chk('Исполнитель: производственный вызов (без калитки asof) не отвергается воротами даты',
+    'биржевым сегодня' not in _asof_blocked, _asof_blocked[:80] or 'прошёл до конца')
 _cl(); _sig('F', sid='s1')
 b9 = _B(netpos={'CBU0': 197120, 'ZN': 0}, nlv=10e6)
 r9 = T.execute(b9, SP, 10e6, {'BOND': dict(src=[('CBU0', 197120, 5.0)], dst=('ZN', 98560.0, 'FUT'))},

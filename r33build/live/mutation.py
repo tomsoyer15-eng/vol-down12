@@ -520,6 +520,53 @@ def _adapter_mutations():
             return r
         return orig, patched
 
+    def etf_expect_off():
+        """ТРИДЦАТЬ ТРЕТИЙ КРУГ, №4: личность фонда снова доказывается строкой реестра —
+        независимое пинованное ожидание не спрашивается, и согласованная подмена
+        листинговой линии проходит на границе заявки."""
+        import contracts as CTe
+        orig = CTe.etf_expectation_bad
+        return orig, (lambda name, c, row: []), CTe
+
+    def wild_maint_ok():
+        """ТРИДЦАТЬ ТРЕТИЙ КРУГ, №13: проверяется снова только NaN — inf даёт cushion 0,
+        отрицательное требование даёт отрицательный, и вахта продаёт половину книги."""
+        orig = B.IBBroker.margin_cushion
+        def patched(self):
+            self._summary_barrier()
+            vals = (self.ib.accountSummary(self.account) if self.account
+                    else self.ib.accountSummary())
+            ewl = maint = None
+            for v in vals:
+                if v.tag == 'EquityWithLoanValue' and v.currency == 'USD':
+                    ewl = float(v.value)
+                if v.tag == 'MaintMarginReq' and v.currency == 'USD':
+                    maint = float(v.value)
+            if ewl is None or ewl != ewl:
+                raise B.BrokerError('нет EquityWithLoanValue')
+            if maint is not None and maint != maint:
+                raise B.BrokerError('MaintMarginReq = NaN')
+            if not maint:
+                return None
+            return ewl / maint
+        return orig, patched
+
+    def mdt_none_live():
+        """ТРИДЦАТЬ ТРЕТИЙ КРУГ, №12: отсутствие подтверждения биржи снова считается
+        подтверждением реального времени — задержанная котировка попадает в §7 как live."""
+        orig = B.IBBroker._quote_ref
+        def patched(self, instrument):
+            t = self.ib.reqMktData(self._contract(instrument), '', True, False)
+            self.ib.sleep(0)
+            _mdt = getattr(t, 'marketDataType', None)
+            _rt = bool(getattr(self, 'realtime_md', False)) and (_mdt in (None, 1))
+            for v, live in ((t.last, _rt), (t.close, False)):
+                v = float(v) if v is not None else float('nan')
+                if v == v and v > 0:
+                    return v, live
+            return None, False
+        return orig, patched
+
     def future_identity_copied():
         """Поставка копируется из ответа биржи (как было до восемнадцатого круга, №7)."""
         import first_connect as FC
@@ -549,6 +596,11 @@ def _adapter_mutations():
             ('неизвестность компенсации глотается', 'restore_to', restore_swallows_unknown),
             ('ключ заявки — голый orderId', 'open_orders', bare_order_ids),
             ('NaN-запас О-3-Е принимается', 'margin_cushion', nan_cushion_ok),
+            ('inf и отрицательное требование маржи принимаются', 'margin_cushion',
+             wild_maint_ok),
+            ('отсутствие подтверждения биржи = реальное время', '_quote_ref', mdt_none_live),
+            ('личность фонда без независимого ожидания', 'etf_expectation_bad',
+             etf_expect_off),
             ('Cancelled считается неисполнением', 'place', cancel_is_failure)]
 
 
@@ -835,11 +887,27 @@ def _run_mutations():
             return d
         return orig, patched, DLm, 'step_e'
 
+    def o3e_delayed_lost():
+        """ТРИДЦАТЬ ЧЕТВЁРТЫЙ КРУГ, №13: строки среза пишутся, но признак ЗАДЕРЖАННОГО
+        ориентира теряется (delayed_out не передаётся). В сессии без первоначального
+        ребаланса строки аварийного среза с данными типа 3 будут признаны полноценным
+        измерением, и пятнадцать минут движения рынка попадут в «издержки» §7."""
+        orig = DLm.o3e_journal
+
+        def patched(journal_path, dec, nav, cut_orders, cut_placed):
+            rows, _ = orig(journal_path, dec, nav, cut_orders, cut_placed)
+            return rows, []
+        return orig, patched, DLm, 'o3e_journal'
+
     def o3e_journal_off():
         """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №11: исполнения аварийного среза снова не попадают в §7 —
         крупнейший оборот сессии исключён из выборки издержек, а дата считается полной."""
+        # МУТАЦИЯ ЛОМАЕТ ПРИЗНАК, А НЕ СИГНАТУРУ (тридцать четвёртый круг, №13): прежняя
+        # редакция возвращала [] вместо пары (rows, delayed) и ловилась ошибкой распаковки,
+        # то есть доказывала совместимость вызова, а не запись строк среза в §7.
         orig = DLm.o3e_journal
-        return orig, (lambda journal_path, dec, nav, cut_orders, cut_placed: []), DLm, 'o3e_journal'
+        return orig, (lambda journal_path, dec, nav, cut_orders, cut_placed: ([], [])), \
+            DLm, 'o3e_journal'
 
     def force_route_f():
         """Маршрут игнорируется: маршрут Е считается фьючерсным."""
@@ -1045,6 +1113,7 @@ def _run_mutations():
             ('состоявшийся срез не поднимает тревогу', o3e_cut_silent),
             ('предторговый срез не оставляет следа', o3e_pre_cut_silent),
             ('исполнения среза не идут в журнал §7', o3e_journal_off),
+            ('признак задержанного ориентира среза теряется', o3e_delayed_lost),
             ('наблюдение пишет строки §7', dry_writes_journal),
             ('каталог тревог живёт своей жизнью', statedir_own_home),
             ('нет файла — «ФАЙЛА НЕТ» при успехе', worm_missing_ok),
@@ -1256,6 +1325,36 @@ def _transition_mutations():
         return orig, (lambda: __import__('pandas').Timestamp('2020-01-02').date()), \
                _FDm, 'exchange_today'
 
+    def gen_map_subset():
+        """ТРИДЦАТЬ ЧЕТВЁРТЫЙ КРУГ, №14: полнота карты поколения ослаблена до проверки
+        только перечисленных ключей — серию с исправленным con_id снова можно убрать из
+        con_ids, и старый замер ноги Б пройдёт ворота."""
+        import transition as _Tg
+        orig = _Tg._live_margins
+        def patched():
+            import json as _j, os as _o, csv as _c
+            from pathlib import Path as _P
+            _p = _P(_o.environ.get('ADDFUT_MARGINS') or 'live/margins_live.json')
+            _raw = _j.loads(_p.read_text(encoding='utf-8'))
+            _meta = _raw.get('_meta') or {}
+            _cids = dict(_meta.get('con_ids') or {})
+            _meta['con_ids'] = {k: v for k, v in _cids.items()}
+            _entries = {k: v for k, v in _raw.items() if k != '_meta'}
+            _meta['con_ids'] = {k: _cids.get(k, '') for k in _cids}   # только свои ключи
+            _raw['_meta'] = dict(_meta, con_ids={k: _cids[k] for k in _cids})
+            # ослабление: дополняем карту недостающими ключами их же реестровыми значениями
+            try:
+                _rp = _o.environ.get('ADDFUT_REGISTRY')
+                with open(_rp, encoding='utf-8') as _f:
+                    _reg = {r['instrument']: str(r['con_id']) for r in _c.DictReader(_f)}
+                for _k in _entries:
+                    _raw['_meta']['con_ids'].setdefault(_k, _reg.get(_k, ''))
+            except Exception:
+                pass
+            _p.write_text(_j.dumps(_raw), encoding='utf-8')
+            return orig()
+        return orig, patched, _Tg, '_live_margins'
+
     def mr_digest_off():
         """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №13: содержимое нормативного журнала МР снова не
         заверяется — пин сторожит только личность файла, и валидная правка «на месте»
@@ -1282,7 +1381,8 @@ def _transition_mutations():
             ('давность замера не проверяется', age_unchecked),
             ('тревога перехода не пишется', alarm_silent),
             ('завершённые лоты исполняются повторно', replay_done),
-            ('содержимое журнала МР не заверяется', mr_digest_off)]
+            ('содержимое журнала МР не заверяется', mr_digest_off),
+            ('карта поколения сверяется только по своим ключам', gen_map_subset)]
 
 
 def _roll_mutations():
@@ -1675,6 +1775,25 @@ def _j7_mutations():
                         verdict=J._verdict(ratio))
         return J._roll_block, patched, '_roll_block'
 
+    def roll_sub_lot_zero():
+        """ТРИДЦАТЬ ТРЕТИЙ КРУГ, №11: ролловая доля меньше одного лота снова округляется в
+        ноль — закрывающая сторона уходит в обычные сделки, и _roll_block достраивает её
+        половиной номинала открывающей, удваивая результат MES-стороны."""
+        import journal as _Jm
+        orig = _Jm.rows_from_decision   # раннер §7 патчит модуль journal по имени атрибута
+
+        def patched(dec, nav, orders, fills=None, delayed_out=None):
+            rows = orig(dec, nav, orders, fills, delayed_out=delayed_out)
+            out = []
+            for r in rows:
+                if (str(r.get('note', '')).startswith('ролл')
+                        and abs(int(float(r['qty']))) == 1
+                        and str(r['instrument']).startswith('ES')):
+                    r = dict(r, note='')          # доля меньше ES снова теряет пометку
+                out.append(r)
+            return out
+        return orig, patched, 'rows_from_decision'
+
     return [('пометки исключения не читаются', marks_unread),
             ('дата без ИТОГ считается полной', no_total_ok),
             ('пустая комиссия считается нулевой', commission_zero),
@@ -1682,7 +1801,8 @@ def _j7_mutations():
             ('счётчик итога не сверяется', counter_unchecked),
             ('пустые цены отбрасываются молча', empty_dropped_silently),
             ('NaN проходит арифметику', nan_passes),
-            ('ролловый номинал двусторонний', roll_two_sided)]
+            ('ролловый номинал двусторонний', roll_two_sided),
+            ('ролловая доля меньше лота округляется в ноль', roll_sub_lot_zero)]
 
 
 def run_j7_mutations():

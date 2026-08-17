@@ -858,10 +858,16 @@ def o3e_journal(journal_path, dec, nav, cut_orders, cut_placed):
     cut_dec = _SNS(date=dec.date, leverage=dec.leverage,
                    reasons=[dec.reasons[-1]] if dec.reasons else [], refusals=[],
                    roll_pairs=[])
-    rows = J.rows_from_decision(cut_dec, nav, cut_orders, fills)
+    # ЗАДЕРЖАННЫЙ ОРИЕНТИР СРЕЗА НЕ ТЕРЯЕТСЯ (тридцать третий круг, №10). Вызов шёл БЕЗ
+    # delayed_out, и признак px_order_live=False оставался во внутреннем списке функции.
+    # Если первоначальных заявок не было, единственными строками дня становятся заявки
+    # среза — и при задержанной подписке они попали бы в §7 как полноценное измерение
+    # исполнения, хотя fill−ориентир содержит пятнадцать минут движения рынка.
+    delayed = []
+    rows = J.rows_from_decision(cut_dec, nav, cut_orders, fills, delayed_out=delayed)
     for row in rows:
         J.append(journal_path, row)
-    return rows
+    return rows, delayed
 
 
 def cut_cost_delta(n0, plan, final, u_e, u_b, roll_a=False, roll_b=False):
@@ -1570,6 +1576,10 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
     dry_run=True считает и сверяет, но не подаёт заявок и не меняет состояние — режим
     наблюдения без позиции, требуемый протоколом П-2.
     """
+    # ТРЕВОГА О-3-Е — КОЛБЭКОМ ИЗНУТРИ СЕССИИ (тридцать третий круг, №6). Извлекается из
+    # kw ДО передачи остального в step/step_e: лишний именованный аргумент там сломал бы
+    # расчёт, а хранить признак снаружи значит опаздывать за долговечным завершением.
+    o3e_alarm_fn = kw.pop('o3e_alarm_fn', None)
     import state as ST
     import journal as J
     cls = BookE if route == 'E' else Book
@@ -2014,6 +2024,31 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                         # через restore_to, как в основном цикле.
                         _pre_cut = dec.book_after
                         _cut_book = replace(_pre_cut, n_eq=_ne, n_bd=_nb)
+                        # ДОСТИГНУТОЕ СОСТОЯНИЕ ФИКСИРУЕТСЯ ДО СРЕЗА (тридцать четвёртый
+                        # круг, №1). Намерение основной сделки («старая книга -> цель»)
+                        # перезаписывалось намерением среза, хотя _pre_cut на диск ещё не
+                        # попадала: при отказе среза — даже с УДАЧНЫМ возвратом брокера к
+                        # _pre_cut — функция выходила исключением, на диске оставалась
+                        # старая книга, у брокера отребалансированная, и перехода между
+                        # ними не описывало уже ничто. День не получал traded-*, замыкание
+                        # не выполнялось, книга с пробитым О-3-Е оставалась около 2x и
+                        # неуправляемой. Сохраняем промежуточную книгу ПЕРЕД срезом: она
+                        # фактически достигнута и сверена, а номер сессии тот же.
+                        # СВЕРКА ПЕРЕД ПЕРВОЙ ЗАЯВКОЙ СРЕЗА (тридцать третий круг, №5):
+                        # между финальной сверкой сессии и этими заявками идут замер
+                        # запаса и чтение NLV, а поздний fill в этом окне делает объём
+                        # среза посчитанным от устаревшей книги.
+                        _pos_pre, _oo_pre = _snapshot_consistent(broker)
+                        _diff_pre = ST.reconcile(_pre_cut, route, _pos_pre,
+                                                 open_orders=_oo_pre)
+                        if _diff_pre:
+                            raise RuntimeError(
+                                'книга изменилась между сверкой сессии и заявками среза '
+                                'О-3-Е — объём среза считался по устаревшему счёту:\n  '
+                                + '\n  '.join(_diff_pre))
+                        _mid = replace(_pre_cut, last_session=cur, close_provisional=True)
+                        ST.save(bp, _mid, route, sess + 1,
+                                note='книга после основных заявок; идёт срез О-3-Е')
                         ST.save_intent(bp, route, sess + 1, _pre_cut, _cut_book,
                                        _cut_orders, session_date=cur)
                         _cut_placed = []
@@ -2054,13 +2089,19 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                             if not _filled(_rec, _qty):
                                 raise _cut_fail(_inst, _qty,
                                                 f'исполнено {_rec.get("filled")}')
-                        _pos_c, _oo_c = _snapshot_consistent(broker)
-                        _after_c = ST.reconcile(_cut_book, route, _pos_c, open_orders=_oo_c)
+                        # ФИНАЛЬНЫЕ СВЕРКИ — ПОД ТЕМ ЖЕ РАЗБОРОМ (№5): раньше они
+                        # поднимались напрямую, без отмены заявок и попытки возврата.
+                        try:
+                            _pos_c, _oo_c = _snapshot_consistent(broker)
+                            _after_c = ST.reconcile(_cut_book, route, _pos_c,
+                                                    open_orders=_oo_c)
+                        except BaseException as _exsc:
+                            raise _cut_fail(_cut_orders[-1][0], _cut_orders[-1][1],
+                                            f'снимок счёта после среза недоступен ({_exsc})')
                         if _after_c:
-                            raise RuntimeError(
-                                'О-3-Е: после сокращения книга брокера не совпала с '
-                                'намеченной — состояние НЕ сохранено (О-5):\n  '
-                                + '\n  '.join(_after_c))
+                            raise _cut_fail(_cut_orders[-1][0], _cut_orders[-1][1],
+                                            'книга брокера не совпала с намеченной: '
+                                            + '; '.join(_after_c))
                         dec.book_after = _cut_book
                         placed.extend(_cut_placed)
                         _o3e_cut = (float(_pc), _n0e, _n0b, _ne, _nb)
@@ -2081,6 +2122,17 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                             f'О-3-Е ПОСЛЕ ИСПОЛНЕНИЙ: запас {float(_pc):.2f}× ниже '
                             f'{O3E_MIN} — книга сокращена в ту же сессию '
                             f'{_n0e}/{_n0b} -> {_ne}/{_nb} (норматив §8); {_ach}')
+                        # ТРЕВОГА — ДО ДОЛГОВЕЧНОГО ЗАВЕРШЕНИЯ (тридцать третий круг, №6;
+                        # ВЫЗОВ ПОТЕРЯЛСЯ ПРИ ПРАВКЕ И ВОССТАНОВЛЕН В ТРИДЦАТЬ ЧЕТВЁРТОМ,
+                        # №5 — колбэк извлекался из kw и не звался НИКЕМ, то есть порядок
+                        # «сначала тревога, потом состояние» существовал только на словах).
+                        # Прежний порядок: книга сохранена, intent снят, итог §7 записан —
+                        # и лишь потом внешний do_trade писал ALARM. Потеря питания в этом
+                        # окне оставляет штатно выглядящую сокращённую книгу без тревоги:
+                        # следующий запуск объявит день повтором, а полоса вернёт книгу к 2x
+                        # с неразобранной причиной.
+                        if o3e_alarm_fn is not None:
+                            o3e_alarm_fn(dec.reasons[-1])
                         # ИСПОЛНЕНИЯ СРЕЗА ИДУТ В ЖУРНАЛ §7 (тридцать первый круг, №11).
                         # Строки наблюдения и ИТОГ строятся ВЫШЕ, до среза, и после него
                         # уже не менялись: самый крупный аварийный оборот сессии
@@ -2090,9 +2142,10 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                         # интерфейс брокера отдаёт и цену, и комиссию: это не долг
                         # переходного исполнителя (№17 тридцатого круга), а пропуск.
                         if journal_path:
-                            _cut_rows = o3e_journal(journal_path, dec, nlv, _cut_orders,
-                                                    _cut_placed)
+                            _cut_rows, _cut_delayed = o3e_journal(
+                                journal_path, dec, nlv, _cut_orders, _cut_placed)
                             _rows = list(_rows) + list(_cut_rows)
+                            _delayed = list(_delayed) + list(_cut_delayed)   # №10
                             # ИТОГ ПЕРЕСЧИТЫВАЕТСЯ, А НЕ ДОПИСЫВАЕТСЯ: сессия без
                             # первоначального ребаланса своего ИТОГА не имела вовсе, и
                             # строки среза остались бы без маркера полноты.

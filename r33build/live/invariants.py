@@ -551,6 +551,73 @@ def _a3(beh):
     return abs(r['filled'] - 1) < 1e-9        # 77 из чужого отчёта попасть не должно
 
 
+@ainv('согласованная подмена листинговой линии фонда не торгуется',
+      needs=lambda b: b == 'etf_line_swap')
+def _a33e(beh):
+    """ТРИДЦАТЬ ТРЕТИЙ КРУГ, №4. У фьючерса имя само несёт поставку (series_mismatch), у
+    фонда независимого отображения не было: mismatches() и verify_isin() сравнивают ответ
+    биржи со строкой, из которой взят con_id. Согласованная замена CBU0 на другой USD STK
+    с его настоящими полями проходила целиком — цена чужого фонда размерила бы ногу Б, а
+    сверка с брокером осталась бы зелёной. Ловит только пинованное ожидание (ETF_EXPECT)."""
+    import ib_broker as IBB
+    br, ib, rows = _adapter(beh)
+    try:
+        br.place('CBU0', 1)
+    except IBB.BrokerError as ex:
+        return (not ib._fills) and 'листинговая линия' in str(ex)
+    return False
+
+
+@ainv('бесконечное требование маржи — отказ, а не приказ на продажу',
+      needs=lambda b: b == 'inf_maint')
+def _a33i(beh):
+    """ТРИДЦАТЬ ТРЕТИЙ КРУГ, №13. У EquityWithLoanValue конечность проверялась с 26-го
+    круга, у MaintMarginReq — только NaN. inf даёт cushion РОВНО 0, отрицательное —
+    отрицательный: оба МОЛЧА проходят порог 1,40 и с тридцать первого круга запускают уже
+    не тревогу, а ПРОДАЖУ половины книги по ошибке сводки IBKR."""
+    import ib_broker as IBB
+    br, ib, rows = _adapter(beh)
+    try:
+        br.margin_cushion()
+    except IBB.BrokerError as ex:
+        return 'не конечное положительное' in str(ex)
+    return False
+
+
+@ainv('отрицательное требование маржи — отказ, а не приказ на продажу',
+      needs=lambda b: b == 'neg_maint')
+def _a33n(beh):
+    import ib_broker as IBB
+    br, ib, rows = _adapter(beh)
+    try:
+        br.margin_cushion()
+    except IBB.BrokerError as ex:
+        return 'не конечное положительное' in str(ex)
+    return False
+
+
+@ainv('котировка реального времени помечается live только при подтверждении биржи',
+      needs=lambda b: b == 'realtime_md')
+def _a33r(beh):
+    """ТРИДЦАТЬ ТРЕТИЙ КРУГ, №12. Проверялась только отрицательная ветка: стаб не задавал
+    marketDataType вовсе, а SAME_API не включал realtime_md. Значит возврат условия к
+    `_mdt in (None, 1)` (то есть «отсутствие ответа считаем подтверждением») не изменил бы
+    ни одного утверждения, а в бою delayed-fallback снова доказывал бы 5 б.п. движением
+    рынка. Проверяются ОБА конца: подтверждённое реальное время даёт live=True, задержанные
+    данные и молчание биржи — False."""
+    br, ib, rows = _adapter(beh)
+    br.realtime_md = True
+    ib.quote_px = 100.0
+    ib.md_type = 1
+    _px, _live_rt = br._quote_ref(rows[0]['instrument'])
+    ib.md_type = 3
+    _px3, _live_d = br._quote_ref(rows[0]['instrument'])
+    ib.md_type = None
+    _px0, _live_n = br._quote_ref(rows[0]['instrument'])
+    return (_live_rt is True and _live_d is False and _live_n is False
+            and _px == 100.0)
+
+
 @ainv('согласованно подменённая серия не торгуется на границе заявки',
       needs=lambda b: b == 'coherent_series_swap')
 def _a31s(beh):
@@ -881,7 +948,13 @@ ADAPTER_CASES = ('normal', 'partial', 'reject', 'disconnect', 'cancelled_but_fil
                  # подтверждают друг друга, лжёт только ИМЯ): №8. unit_ref — ЖИВАЯ полоса
                  # долларовой единицы, которую все переходные стенды подменяли своей
                  # таблицей и потому не исполняли ни разу: №6.
-                 'coherent_series_swap', 'unit_ref')
+                 'coherent_series_swap', 'unit_ref',
+                 # ТРИДЦАТЬ ТРЕТИЙ КРУГ: №13 — inf и отрицательное требование маржи (была
+                 # только NaN-ветка), №12 — УСПЕШНЫЙ путь признака реального времени.
+                 'inf_maint', 'neg_maint', 'realtime_md',
+                 # №4: согласованная подмена листинговой линии фонда — ловится только
+                 # независимым ожиданием, а не сверкой ответа биржи со строкой реестра.
+                 'etf_line_swap')
 
 
 def run_adapter():
@@ -2043,6 +2116,10 @@ def _r31b(r):
     tot = [x for x in rows if x['date'] == day and x.get('instrument') == 'ИТОГ']
     if not tot:
         return False
+    # ПОМЕТКА ИСКЛЮЧЕНИЯ ТРЕБУЕТСЯ ЯВНО (тридцать четвёртый круг, №13): без неё потеря
+    # признака задержанного ориентира у строк среза остаётся незамеченной.
+    if not any('ИСКЛЮЧЕНА' in (x.get('note') or '') for x in tot):
+        return False
     m = _re31.search(r'строк (\d+)', tot[-1].get('note') or '')
     # заявки среза: ровно те количества, что записаны в o3e_cut
     want = {('CSPX', ne - n0e), ('CBU0', nb - n0b)}
@@ -3025,7 +3102,8 @@ TR_CASES = ('план целых фьючерсов', 'план дробных �
             'лимит заявок: покупка №391 не подаётся',
             'маржа цели: фактическая книга дороже отображённой',
             'замер с нечисловой маржой', 'замер устарел',
-            'замер: init прежде maint', 'тревога перехода — файл в каталоге автопилота',
+            'замер: init прежде maint', 'замер: карта поколения неполна',
+            'тревога перехода — файл в каталоге автопилота',
             'общее окно закрылось: заявка не подаётся',
             'компенсация исполнена не полностью',
             'переход задним числом запрещён',
@@ -3099,6 +3177,10 @@ def _tr_run(case):
     _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     import transition as TRN
 
+    # КАЛИТКА d_fix (тридцать третий круг, №3): у макета брокера нет .ib, живой доходности
+    # взять неоткуда; дверь названа явно, чтобы откат к старой книге Ф не выглядел нормой.
+    import os as _osdf
+    _osdf.environ.setdefault('ADDFUT_DFIX_TEST', '1')
     out = dict(case=case, raised=False, error='', lots=None, peak=None,
                calls=None, second_calls=None, log=None)
     ZN_U = 98_560.0
@@ -3208,6 +3290,16 @@ def _tr_run(case):
                                            'ESZ25': {'maint': 30000.0}}), encoding='utf-8')
             elif case == 'замер не покрывает корень':
                 mp.write_text(_json.dumps({'_meta': {'date': _today, 'account': 'DUTEST01', 'series': ['ZNU26'], 'con_ids': {'ZNU26': '2'}},
+                                           'ZNU26': {'maint': 2500.0}}), encoding='utf-8')
+            elif case == 'замер: карта поколения неполна':
+                # ТРИДЦАТЬ ЧЕТВЁРТЫЙ КРУГ, №14: entries и _meta.series ПОЛНЫ, а con_ids —
+                # правильное непустое ПОДМНОЖЕСТВО (ZN пропущен). Ровно дефект до правки
+                # 33-го круга: достаточно убрать серию с исправленным con_id, и старый
+                # замер ноги Б проходит ворота целиком.
+                mp.write_text(_json.dumps({'_meta': {'date': _today, 'account': 'DUTEST01',
+                                                     'series': ['ESU26', 'ZNU26'],
+                                                     'con_ids': {'ESU26': '1'}},
+                                           'ESU26': {'maint': 40000.0},
                                            'ZNU26': {'maint': 2500.0}}), encoding='utf-8')
             elif case == 'живой замер покрывает':
                 mp.write_text(_json.dumps({'_meta': {'date': _today, 'account': 'DUTEST01',
@@ -3673,6 +3765,16 @@ def _t_m1(r):
 def _t_m2(r):
     """Шестнадцатый круг, №4: файл без _meta (дата, серии) неотличим от устаревшего."""
     return r['raised'] and 'без привязки' in r['error']
+
+
+@tinv('неполная карта поколения замера не проходит',
+      needs=lambda r: r['case'] == 'замер: карта поколения неполна')
+def _t34(r):
+    """ТРИДЦАТЬ ЧЕТВЁРТЫЙ КРУГ, №14. Полнота con_ids была реализована в 33-м круге, но не
+    наблюдалась ничем: сценария, где карта — правильное ПОДМНОЖЕСТВО замера, не было, и
+    регрессия «сверяем только перечисленные ключи» прошла бы батарею. Денежное следствие:
+    старая маржа ноги Б разрешает Е→Ф при фактическом запасе ниже О-3."""
+    return r['raised'] and 'карта поколения неполна' in r['error']
 
 
 @tinv('замер прежней серии живым не считается',
@@ -4577,7 +4679,9 @@ def jinv(name, needs=None):
 
 J7_CASES = ('пометка исключения', 'счётчик итога расходится', 'пустая цена в живой строке',
             'нечисловое наблюдение', 'ролловый номинал односторонний',
-            'комиссия не пришла', 'нет строки ИТОГ', 'ролл без своих двадцати сессий')
+            'комиссия не пришла', 'нет строки ИТОГ', 'ролл без своих двадцати сессий',
+            # ТРИДЦАТЬ ТРЕТИЙ КРУГ, №11: ролловая доля меньше одного ES округлялась в ноль.
+            'ролл меньше одного ES')
 
 
 def _j7_row(date, inst, qty, po, pf, note='', leg='Б', commission='0'):
@@ -4605,6 +4709,26 @@ def _j7_run(case):
                 J.append(jp, _j7_row(d, 'ZNZ26', 1, '100', '100.05', note='ролл'))
                 J.append(jp, _j7_row(d, 'ИТОГ', 0, '-', '', note=f'итог сессии {i + 1}: строк 2'))
             out['res'] = J.reconcile(jp)
+        elif case == 'ролл меньше одного ES':
+            # ТРИДЦАТЬ ТРЕТИЙ КРУГ, №11. Старая упаковка — 1 ES (10 единиц сетки), цель
+            # после ролла — 5 MES: переносится 5 единиц, то есть МЕНЬШЕ одного ES.
+            # `int(take // 10)` давал ноль, вся продажа ES уходила в обычные сделки, и
+            # _roll_block подставлял вместо недостающей закрывающей стороны половину
+            # номинала открывающей — результат MES-стороны удваивался.
+            import journal as _Jr
+            from types import SimpleNamespace as _SN
+            import pandas as _pdr
+            # ВНУТРЕННИЕ ЕДИНИЦЫ СЕТКИ, КАК В НАСТОЯЩЕМ Decision (тридцать четвёртый круг,
+            # №11): roll_pairs несёт единицы сетки (1 ES = 10), а не контракты.
+            _dec = _SN(date=_pdr.Timestamp('2026-08-26'), leverage=1.5,
+                       reasons=['ролл'], refusals=[],
+                       roll_pairs=[{'leg': 'А', 'close': ('U26', -10), 'open': ('Z26', 5)}])
+            _rows = _Jr.rows_from_decision(
+                _dec, 1e6, [('ESU26', -1), ('MESZ26', 5)],
+                {'ESU26': dict(px_fill=7000.0, commission='2'),
+                 'MESZ26': dict(px_fill=700.0, commission='1')})
+            out['rows'] = _rows
+            out['res'] = None
         elif case == 'пометка исключения':
             J.append(jp, _j7_row('2026-08-01', 'ZNU26', 1, '100', '100.1'))
             J.append(jp, _j7_row('2026-08-01', 'ИТОГ', 0, '-', '',
@@ -4757,6 +4881,27 @@ def _j5(r):
     # строки давали n=40 и выглядели вдвое более доказанными, чем есть.
     return (roll.get('n') == 20 and roll.get('n_rows') == 40
             and abs(roll.get('bp', 0.0) - 10.0) < 0.2)
+
+
+@jinv('ролловая доля меньше одного ES не теряется',
+       needs=lambda r: r['case'] == 'ролл меньше одного ES')
+def _j33(r):
+    """ТРИДЦАТЬ ТРЕТИЙ КРУГ, №11: закрывающая сторона обязана быть помечена роллом, иначе
+    сверка §7 сравнивает ролловые издержки не с той моделью, а _roll_block достраивает
+    недостающую сторону половиной номинала открывающей."""
+    rows = r.get('rows') or []
+    if r['raised'] or not rows:
+        return False
+    es = [x for x in rows if x['instrument'] == 'ESU26']
+    mes = [x for x in rows if x['instrument'] == 'MESZ26']
+    # ПРОВЕРЯЮТСЯ КОЛИЧЕСТВА, А НЕ НАЛИЧИЕ СЛОВА «ролл» (тридцать четвёртый круг, №11):
+    # переносится 5 единиц сетки из 10, значит ролловая доля ES — ровно половина контракта,
+    # остаток — обычная сделка. Прежняя редакция стенда была зелёной и когда весь ES уходил
+    # в ролл, то есть закрепляла как норму ровно тот дефект, ради которого заведена.
+    _es_roll = sum(float(x['qty']) for x in es if 'ролл' in (x.get('note') or ''))
+    _es_rest = sum(float(x['qty']) for x in es if 'ролл' not in (x.get('note') or ''))
+    return (abs(_es_roll + 0.5) < 1e-9 and abs(_es_rest + 0.5) < 1e-9
+            and any('ролл' in (x.get('note') or '') for x in mes))
 
 
 def run_j7():

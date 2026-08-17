@@ -94,7 +94,10 @@ close_after() {
         case "$g" in
             [0-9][0-9][0-9][0-9]) echo "$g"; return;;
         esac
-        echo "ворота Е не вычислены (ответ: '$g')" > "$ST/ALARM-calendar-e.txt"
+        # ЗАПИСЬ ТРЕВОГИ ПРОВЕРЯЕТСЯ (тридцать четвёртый круг, №10):
+        # голый echo при ENOSPC/ACL оставлял ветку без тревоги и без STOP.
+        alarm_write "$ST/ALARM-calendar-e.txt" "ворота Е не вычислены (ответ: '$g')" \
+            || : > "$ST/autopilot.STOP" 2>/dev/null || true
         (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-calendar-e.txt" >> "$ST/ALARM-calendar-e.txt" 2>&1) || true
         echo 2359
     else
@@ -329,10 +332,25 @@ except Exception:
     sys.exit(1)
 HS
     then rm -f "$ST/gw-fails"; log "шлюз поднят, API отвечает"; return 0; fi
-    n=$(( $(cat "$ST/gw-fails" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$ST/gw-fails"
+    n=$(( $(cat "$ST/gw-fails" 2>/dev/null || echo 0) + 1 ))
+    # СЧЁТЧИК И ТРЕВОГА ШЛЮЗА — С ПРОВЕРКОЙ (тридцать третий круг, №8). Обе записи шли
+    # голым echo: если счётчик не пишется, каждый тик снова видит старое значение и порог
+    # трёх отказов НЕДОСТИЖИМ; если счётчик пишется, а тревогу создать нельзя, ensure_gw
+    # просто возвращает 1, тик заканчивается нулём и STOP не ставится. Cron при этом
+    # выглядит успешным, а ни сессии, ни замыкания, ни ролла нет — позиция доживает до
+    # поставочной зоны без единой видимой тревоги. В 32-м круге я починил три счётчика
+    # О-3-Е и пропустил этот, денежно более прямой.
+    if ! echo "$n" > "$ST/gw-fails" || [ ! -s "$ST/gw-fails" ]; then
+        alarm_write "$ST/ALARM-gateway.txt" \
+            "счётчик отказов шлюза не записывается ($ST/gw-fails) — порог трёх тиков недостижим, молчание контура необнаружимо (О-5)" \
+            || : > "$ST/autopilot.STOP" 2>/dev/null || true
+        log "КРИТИЧНО: счётчик отказов шлюза не записан"
+    fi
     log "шлюз/API не отвечает (подряд: $n)"
     if [ "$n" -ge 3 ]; then
-        echo "шлюз или API мертвы три тика подряд" > "$ST/ALARM-gateway.txt"
+        alarm_write "$ST/ALARM-gateway.txt" "шлюз или API мертвы три тика подряд" \
+            || { log "КРИТИЧНО: тревога шлюза не записана — ставлю STOP"
+                 : > "$ST/autopilot.STOP" 2>/dev/null || log "КРИТИЧНО: и STOP не записан"; }
         (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-gateway.txt" >> "$ST/ALARM-gateway.txt" 2>&1) || true
         log "ТРЕВОГА: шлюз мёртв три тика подряд — автопилот остановлен"
     fi
@@ -684,7 +702,10 @@ except Exception as ex:
     fi
     is_trade_day; _td=$?
     if [ "$_td" -eq 2 ]; then
-        echo "календарь маршрута $(route) не покрывает текущий год" > "$ST/ALARM-calendar.txt"
+        # ЗАПИСЬ ТРЕВОГИ ПРОВЕРЯЕТСЯ (тридцать четвёртый круг, №10):
+        # голый echo при ENOSPC/ACL оставлял ветку без тревоги и без STOP.
+        alarm_write "$ST/ALARM-calendar.txt" "календарь маршрута $(route) не покрывает текущий год" \
+            || : > "$ST/autopilot.STOP" 2>/dev/null || true
         (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-calendar.txt" >> "$ST/ALARM-calendar.txt" 2>&1) || true
         log "ТРЕВОГА: календарь не покрыт — автопилот остановлен"
         return 0
@@ -743,7 +764,10 @@ sys.stdout.write(('LOW %.3f' % c) if (c is not None and c < DL.O3E_MIN)
                                             # круг, №7: суббота — не поломка календаря)
         2)  # непокрытый год таблиц — тревога, как и заявлял python-подпроцесс
             if [ ! -e "$ST/ALARM-calendar.txt" ]; then
-                echo "календарь маршрута $(route) не покрывает текущий год" > "$ST/ALARM-calendar.txt"
+                # ЗАПИСЬ ТРЕВОГИ ПРОВЕРЯЕТСЯ (тридцать четвёртый круг, №10):
+                # голый echo при ENOSPC/ACL оставлял ветку без тревоги и без STOP.
+                alarm_write "$ST/ALARM-calendar.txt" "календарь маршрута $(route) не покрывает текущий год" \
+                    || : > "$ST/autopilot.STOP" 2>/dev/null || true
                 (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-calendar.txt" >> "$ST/ALARM-calendar.txt" 2>&1) || true
                 log "ТРЕВОГА: календарь не покрывает год"
             fi
@@ -751,7 +775,10 @@ sys.stdout.write(('LOW %.3f' % c) if (c is not None and c < DL.O3E_MIN)
         *)  # поломка календарного подпроцесса (восемнадцатый круг, №10): молчаливый
             # «выходной» прятал бы мёртвый контур неделями — только тревога.
             if [ ! -e "$ST/ALARM-calendar-broken.txt" ]; then
-                echo "календарный подпроцесс вернул код $_td — контур не может определить торговый день" > "$ST/ALARM-calendar-broken.txt"
+                # ЗАПИСЬ ТРЕВОГИ ПРОВЕРЯЕТСЯ (тридцать четвёртый круг, №10):
+                # голый echo при ENOSPC/ACL оставлял ветку без тревоги и без STOP.
+                alarm_write "$ST/ALARM-calendar-broken.txt" "календарный подпроцесс вернул код $_td — контур не может определить торговый день" \
+                    || : > "$ST/autopilot.STOP" 2>/dev/null || true
                 (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-calendar-broken.txt" >> "$ST/ALARM-calendar-broken.txt" 2>&1) || true
                 log "ТРЕВОГА: календарь сломан (код $_td)"
             fi
@@ -930,17 +957,29 @@ backup_state() {
         else
             local pf=0
             [ -f "$ST/push-fails" ] && pf=$(cat "$ST/push-fails")
-            pf=$((pf + 1)); echo "$pf" > "$ST/push-fails"
+            pf=$((pf + 1))
+            # СЧЁТЧИК ОБЯЗАН ЗАПИСАТЬСЯ (тридцать четвёртый круг, №10): иначе порог трёх
+            # отказов подряд недостижим, и отсутствие внешних копий не станет тревогой.
+            if ! echo "$pf" > "$ST/push-fails" || [ ! -s "$ST/push-fails" ]; then
+                alarm_write "$ST/ALARM-push.txt" "счётчик неудачных выгрузок не записывается — порог недостижим (О-5)" \
+                    || : > "$ST/autopilot.STOP" 2>/dev/null || true
+            fi
             log "внешняя выгрузка копий не удалась ($pf подряд)"
             if [ "$pf" -ge 3 ]; then
-                echo "backup_push.sh не удаётся $pf замыканий подряд — внешних копий нет" > "$ST/ALARM-push.txt"
+                # ЗАПИСЬ ТРЕВОГИ ПРОВЕРЯЕТСЯ (тридцать четвёртый круг, №10):
+                # голый echo при ENOSPC/ACL оставлял ветку без тревоги и без STOP.
+                alarm_write "$ST/ALARM-push.txt" "backup_push.sh не удаётся $pf замыканий подряд — внешних копий нет" \
+                    || : > "$ST/autopilot.STOP" 2>/dev/null || true
                 (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-push.txt" >> "$ST/ALARM-push.txt" 2>&1) || true
                 log "ТРЕВОГА: внешние копии не выгружаются — автопилот остановлен"
                 return 1
             fi
         fi
     else
-        echo "снимок состояния/WORM за $day не создан: $wa" > "$ST/ALARM-backup-$day.txt"
+        # ЗАПИСЬ ТРЕВОГИ ПРОВЕРЯЕТСЯ (тридцать четвёртый круг, №10):
+        # голый echo при ENOSPC/ACL оставлял ветку без тревоги и без STOP.
+        alarm_write "$ST/ALARM-backup-$day.txt" "снимок состояния/WORM за $day не создан: $wa" \
+            || : > "$ST/autopilot.STOP" 2>/dev/null || true
         (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-backup-$day.txt" >> "$ST/ALARM-backup-$day.txt" 2>&1) || true
         log "ТРЕВОГА: резервная копия $day не создана — автопилот остановлен"
         return 1
@@ -990,6 +1029,15 @@ case "${1:-tick}" in
         # заявками не могла зафиксировать триггер капа — тупик на самой опасной книге.
         # Замыкание заявок не подаёт; торговый вход по-прежнему под полным guard_manual.
         day=$(chicago %F)
+        # СТОП-ФАЙЛ ЧИТАЕТСЯ ПЕРВЫМ И ЗДЕСЬ (тридцать третий круг, №9). guard_manual его
+        # проверяет, но при существующем ALARM ветка close guard_manual не звала вовсе — то
+        # есть STOP обходился ровно тогда, когда он и ставится: прошлую критическую тревогу
+        # записать НЕ удалось, исход неизвестен. tick STOP-ом запрещает и торговлю, и
+        # замыкание; ручной вход обязан вести себя так же, иначе close финализирует книгу и
+        # снимет backup/WORM с состояния, которое может быть устаревшим.
+        if [ -e "$ST/autopilot.STOP" ]; then
+            echo "стоит СТОП-ФАЙЛ $ST/autopilot.STOP — замыкание запрещено до разбора"; exit 1
+        fi
         if ls "$ST"/ALARM-*.txt >/dev/null 2>&1; then
             if traded_today "$day" && [ ! -e "$ST/closed-$day" ]; then
                 echo "тревога стоит, но день $day отторгован и не замкнут — замыкаю (только запись цен/NLV)"

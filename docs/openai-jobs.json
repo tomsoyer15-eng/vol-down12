@@ -715,9 +715,45 @@
   "label": "рецензия тридцать третьего круга",
   "model": "gpt-5.6-sol",
   "response_id": "resp_066405edff0834e8006a8299d98808819fa4646cea77f5e545",
-  "status": "queued",
+  "status": "completed",
   "chars": 1196541,
   "fingerprint": "e4e386f9bd35e554656b4c3e6685a2953001dd000f2a88ede66fe66dfa4a1a82",
-  "request_id": "req_1d54366be2594752bd81983eee33ab76"
+  "request_id": "req_1d54366be2594752bd81983eee33ab76",
+  "finished": "2026-08-17T05:43:39+00:00",
+  "seconds": 1456.8
+ },
+ {
+  "created": "2026-08-17T06:37:05+00:00",
+  "label": "рецензия тридцать четвёртого круга",
+  "model": "gpt-5.6-sol",
+  "response_id": "resp_0bdf268b16de32ec006a82ac1097a8819f87449b5dbf37d7ce",
+  "status": "failed",
+  "chars": 1225209,
+  "fingerprint": "a1ed5fa57d35819ff93a513fb7b97c9ea2d9366cf1023c8cceef6487d8f040d2",
+  "request_id": "req_f2919bb62dec49bb8b40d9fa73ab6df1",
+  "finished": "2026-08-17T06:37:10+00:00",
+  "seconds": 5.3
+ },
+ {
+  "created": "2026-08-17T06:39:45+00:00",
+  "label": "рецензия тридцать четвёртого круга",
+  "model": "gpt-5.6-sol",
+  "response_id": "resp_0b93df7075e6145a006a82acb03c54819fb49ed8d4d46bc512",
+  "status": "completed",
+  "chars": 1225209,
+  "fingerprint": "a1ed5fa57d35819ff93a513fb7b97c9ea2d9366cf1023c8cceef6487d8f040d2",
+  "request_id": "req_dade429713eb4e50aaafe0f1dab20d6e",
+  "finished": "2026-08-17T06:58:45+00:00",
+  "seconds": 1140.7
+ },
+ {
+  "created": "2026-08-17T07:08:46+00:00",
+  "label": "рецензия тридцать пятого круга",
+  "model": "gpt-5.6-sol",
+  "response_id": "resp_0dbbfd0ebe35ce6a006a82b37d837481a2917271bd79d1dee0",
+  "status": "queued",
+  "chars": 1240955,
+  "fingerprint": "d61f74f50df1ca282050918c6a2107a4c8c703b353556245cb332b2b72b51e52",
+  "request_id": "req_421bbdbb9804433ea07ea8de6e9d6ea1"
  }
 ]

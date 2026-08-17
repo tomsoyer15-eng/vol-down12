@@ -251,6 +251,19 @@ class StubIB:
         # 'thin_after' — запас тонкий ТОЛЬКО когда позиции уже есть (пост-трейд путь,
         # девятнадцатый круг, №10 / восемнадцатый, №1); 'no_maint' — требование не
         # возвращается вовсе (неполный ответ после исполнения).
+        if self.behaviour == 'inf_maint':
+            # ТРИДЦАТЬ ТРЕТИЙ КРУГ, №13: сводка отдаёт бесконечное требование. Прежде
+            # проверялся только NaN: inf даёт cushion РОВНО 0, и вахта продала бы половину
+            # книги по ошибке сводки, а не по факту рынка.
+            out.append(_Val('EquityWithLoanValue', f'{self._nlv:.2f}'))
+            out.append(_Val('MaintMarginReq', 'inf'))
+            return out
+        if self.behaviour == 'neg_maint':
+            # ТРИДЦАТЬ ТРЕТИЙ КРУГ, №13: отрицательное требование даёт отрицательный
+            # cushion — тот же ложный приказ на ликвидацию.
+            out.append(_Val('EquityWithLoanValue', f'{self._nlv:.2f}'))
+            out.append(_Val('MaintMarginReq', '-1000.00'))
+            return out
         if self.behaviour == 'thin_cushion':
             maint = self._nlv / 1.2
         elif self.behaviour == 'no_maint':
@@ -333,6 +346,13 @@ class StubIB:
         t.close = float('nan')
         t.bid = float('nan')
         t.ask = float('nan')
+        # ТИП ДАННЫХ ОТДАЁТСЯ, КАК У ЖИВОГО ТИКЕРА (тридцать третий круг, №12). Стаб не
+        # выставлял marketDataType вовсе, поэтому УСПЕШНАЯ ветка признака «котировка
+        # реального времени» не исполнялась ни разу: возврат боевого условия к
+        # `_mdt in (None, 1)` не изменил бы ни одного утверждения, а в бою delayed-fallback
+        # снова помечался бы как live и доказывал издержки движением рынка.
+        # 1 — реальное время, 3 — задержанные; повадка задаётся полем md_type.
+        t.marketDataType = getattr(self, 'md_type', 3)
         return t
 
     def qualifyContracts(self, *cs):
@@ -357,6 +377,13 @@ class StubIB:
             # primary_exchange, значит стаб обязан отдавать его как биржа — иначе честная
             # сверка mismatches валила бы все адаптерные стенды «площадка не подтверждена».
             c.primaryExchange = r.get('primary_exchange', '') or ''
+            if self.behaviour == 'etf_line_swap':
+                # ТРИДЦАТЬ ТРЕТИЙ КРУГ, №4: СОГЛАСОВАННАЯ подмена фонда — другая
+                # листинговая линия с её настоящими полями. Строка реестра и ответ биржи
+                # сходятся между собой; лжёт только ИМЯ, и уличить его может лишь
+                # независимое пинованное ожидание.
+                if r.get('sec_type') == 'STK':
+                    c.primaryExchange = 'AEB'
             if self.behaviour == 'wrong_contract':
                 # con_id указывает на ДРУГУЮ поставку: адаптер обязан отказать, а не подать.
                 c.lastTradeDateOrContractMonth = '20991231'

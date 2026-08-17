@@ -214,17 +214,48 @@ def rows_from_decision(dec, nav, orders, fills=None, delayed_out=None):
         per = 10 if root_of(instrument) == 'ES' else 1
 
         def emit(part, note_roll, pool):
-            """Часть заявки в пределах переносимого объёма — ролл, избыток — сделка."""
+            """Часть заявки в пределах переносимого объёма — ролл, избыток — сделка.
+
+            ГРАНИЦА ES/MES: ролловая доля МЕНЬШЕ ОДНОГО ES не округляется в ноль (тридцать
+            третий круг, №11). Прежде стояло `int(take // 10)`: при старой упаковке 1 ES и
+            цели 5 MES вся продажа ES уходила в обычные сделки, покупка 5 MES — в ролловые,
+            а _roll_block подставлял вместо недостающей закрывающей стороны половину
+            номинала открывающей, то есть удваивал результат MES-стороны. При разном
+            проскальзывании ES и MES обе ставки — ролловая и обычная — становились ложными,
+            и после двадцати роллов это стало бы основанием менять параметры §2.
+
+            Контракт неделим, поэтому доля относится ПРОПОРЦИОНАЛЬНО: если переносимая
+            часть покрывает хотя бы часть лота, весь лот идёт в ролловую строку, а комиссия
+            и объём делятся по фактической доле сетки. Пул уменьшается ровно на то, что
+            действительно перенесено.
+            """
             g = grid(instrument, part)
             take = min(g, pool.get(leg, 0))
-            q_roll = int(take // per) * (1 if part > 0 else -1)
-            pool[leg] = pool.get(leg, 0) - abs(q_roll) * per
+            if take <= 0:
+                out.append(dict(base, instrument=instrument, qty=part, note=refus,
+                                commission=comm_split(f, part, part)))
+                return
+            sign = 1 if part > 0 else -1
+            q_roll = int(take // per) * sign
+            if not q_roll and take > 0:
+                # ДОЛЯ МЕНЬШЕ ЛОТА РАСПРЕДЕЛЯЕТСЯ ПРОПОРЦИОНАЛЬНО (тридцать четвёртый круг,
+                # №11). В тридцать третьем я убрал округление в ноль, но отнёс к роллу ВЕСЬ
+                # контракт (q_roll = sign): при переносе пяти MES-эквивалентов из одного ES
+                # весь номинал ES уходил в ролловый класс, а обычное сокращение второй
+                # половины исчезало из класса 5 б.п. — §7 занижал ролловую ставку
+                # увеличенным односторонним номиналом. Комментарий обещал пропорцию,
+                # код её не делал. Контракт неделим, поэтому дробится КОЛИЧЕСТВО в строке:
+                # ролловая часть — take/per лота, остаток — обычная сделка. Обе строки
+                # несут один и тот же инструмент и цену, а комиссия делится тем же
+                # comm_split по объёму.
+                q_roll = sign * (take / per)
+            pool[leg] = max(0, pool.get(leg, 0) - min(take, abs(q_roll) * per))
             if q_roll:
                 out.append(dict(base, instrument=instrument, qty=q_roll,
                                 note='ролл' + refus,
                                 commission=comm_split(f, q_roll, part)))
             rest = part - q_roll
-            if rest:
+            if abs(rest) > 1e-12:
                 out.append(dict(base, instrument=instrument, qty=rest, note=refus,
                                 commission=comm_split(f, rest, part)))
 

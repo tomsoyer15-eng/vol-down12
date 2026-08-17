@@ -93,6 +93,74 @@ def series_mismatch(name, c, row=None):
     return bad
 
 
+# НЕЗАВИСИМОЕ ОЖИДАНИЕ ЛИЧНОСТИ ФОНДА (тридцать третий круг, №4).
+#
+# У фьючерса имя САМО несёт поставку, и series_mismatch разбирает его независимо от строки
+# реестра. У фонда независимого отображения нет: mismatches() и verify_isin() сравнивают
+# ответ биржи с той же строкой CSV, из которой взят con_id. Согласованная замена строки
+# CBU0 на другой USD STK — с его настоящими con_id, ISIN, local_symbol и primary_exchange —
+# проходит целиком: цена чужого фонда размерит ногу Б, заявка уйдёт в него же, обратное
+# отображение назовёт позицию CBU0, и сверка с брокером останется зелёной. Это вторая
+# фондовая нога вместо облигационной на величину порядка NLV.
+#
+# ТАБЛИЦА ПУСТА И ЗАПОЛНЯЕТСЯ ПО ФАКТУ, А НЕ ВЫДУМЫВАЕТСЯ (как SHORT_SESSIONS и праздники):
+# ISIN фондов — внешние данные, и придуманная константа была бы ХУЖЕ дыры, потому что
+# выглядела бы проверкой. Пока ожидание не пинуется, торговля фондом запрещена — маршрут Е
+# ещё не начат, и это ничего не останавливает, кроме перехода, который без независимой
+# личности инструмента начинать и нельзя.
+# Значения взяты не из воздуха: боевые ISIN обоих фондов зафиксированы в §12 норматива
+# (пятнадцатый круг, №6 — «фикстура несёт боевые ISIN CSPX/CBU0»), листинговые линии — там
+# же и в §1 (CBU0 торгуется на EBS под тикером CSBGU0). Если IBKR отдаст другую линию или
+# реестр окажется подменён — это отказ, а не «уточнение таблицы».
+ETF_EXPECT = {
+    'CSPX': {'isin': 'IE00B5BMR087', 'primary': 'LSEETF', 'currency': 'USD'},
+    'CBU0': {'isin': 'IE00B3VWN518', 'primary': 'EBS', 'currency': 'USD'},
+}
+
+
+def etf_expectation_bad(name, c, row):
+    """Сверка фонда с ПИНОВАННЫМ ожиданием, а не со строкой реестра (33-й круг, №4).
+
+    ОЖИДАНИЕ ПРИВЯЗАНО К ИМЕНИ, А НЕ К КЛАССУ ИЗ СТРОКИ (тридцать четвёртый круг, №2).
+    Прежде проверка немедленно выходила при sec_type != 'STK' — то есть строку CBU0 можно
+    было согласованно заменить на FUT/CFD вместе с настоящими con_id и полями: mismatches
+    подтвердит строку ею же, series_mismatch имени фонда не разбирает, verify_isin у FUT
+    ISIN не требует. step_e размерил бы «доли CBU0» по цене фьючерса, а адаптер отправил
+    бы десятки тысяч контрактов вместо долей облигационного ETF. Имя из ETF_EXPECT — это
+    заявка на то, ЧЕМ инструмент обязан быть, включая класс.
+    """
+    exp0 = ETF_EXPECT.get(str(name))
+    if exp0 is None and (row or {}).get('sec_type') != 'STK':
+        return []
+    if exp0 is not None:
+        _st = str((row or {}).get('sec_type') or '')
+        _stc = str(getattr(c, 'secType', '') or '')
+        if _st and _st != 'STK':
+            return [f'{name}: пинован как фонд (STK), а реестр объявляет класс {_st} — '
+                    f'согласованная подмена класса инструмента; торговля запрещена']
+        if _stc and _stc != 'STK':
+            return [f'{name}: пинован как фонд (STK), а биржа отвечает классом {_stc} — '
+                    f'торговля запрещена']
+    exp = exp0
+    if not exp:
+        return [f'{name}: независимого ожидания личности фонда нет (contracts.ETF_EXPECT '
+                f'не пинован) — строка реестра доказывала бы сама себя; торговля фондом '
+                f'запрещена до пиновки ISIN и площадки по факту']
+    bad = []
+    want_isin = str(exp.get('isin') or '')
+    row_isin = str((row or {}).get('isin') or '')
+    if want_isin and row_isin and row_isin != want_isin:
+        bad.append(f'{name}: ISIN реестра {row_isin} не совпадает с пинованным {want_isin}')
+    _prim = str(getattr(c, 'primaryExchange', '') or '')
+    if exp.get('primary') and _prim and _prim != exp['primary']:
+        bad.append(f'{name}: листинговая линия {_prim} не совпадает с пинованной '
+                   f'{exp["primary"]}')
+    _cur = str(getattr(c, 'currency', '') or '')
+    if exp.get('currency') and _cur and _cur != exp['currency']:
+        bad.append(f'{name}: валюта {_cur} не совпадает с пинованной {exp["currency"]}')
+    return bad
+
+
 def identity_bad(ib, name, c, row):
     """ПОЛНЫЙ разбор личности контракта — ОДНОЙ функцией (тридцать первый круг, №8).
 
@@ -105,7 +173,8 @@ def identity_bad(ib, name, c, row):
 
     Возвращает список расхождений; пустой — личность подтверждена.
     """
-    return (mismatches(c, row) + series_mismatch(name, c, row) + verify_isin(ib, c, row))
+    return (mismatches(c, row) + series_mismatch(name, c, row)
+            + etf_expectation_bad(name, c, row) + verify_isin(ib, c, row))
 
 
 def mismatches(c, row):
