@@ -278,9 +278,18 @@ def main():
         # ПРИВЯЗКА ЗАМЕРА (шестнадцатый круг, №4): дата, счёт и серии — без них старый
         # замер после квартальной смены реестра неотличим от живого.
         import datetime as _dt
+        # ЗАМЕР ПРИВЯЗЫВАЕТСЯ К ПОКОЛЕНИЮ РЕЕСТРА (тридцать второй круг, №8). Прежде в
+        # _meta были только дата, счёт и ИМЕНА серий. Но имя серии не меняется при
+        # исправлении con_id: first_connect публикует новый реестр, а при неполном whatIf
+        # СОХРАНЯЕТ прежний margins_live.json — и старый замер проходил все ворота как
+        # относящийся к новому контракту. Заниженная маржа разрешает переход, после
+        # которого фактический запас уже ниже О-3. Пишем con_id каждой серии: они и есть
+        # поколение реестра, и сверяются с ТЕКУЩИМ файлом при чтении.
+        _con_by_name = {r['instrument']: str(r['con_id']) for r in rows}
         margins['_meta'] = dict(
             date=_dt.datetime.now(_dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),
-            account=_acct, series=sorted(k for k in margins if k != '_meta'))
+            account=_acct, series=sorted(k for k in margins if k != '_meta'),
+            con_ids={k: _con_by_name.get(k, '') for k in margins if k != '_meta'})
         # атомарно и по тому же адресу, откуда читает переход (тринадцатый круг, №5)
         _tmp = _mp.with_suffix('.json.tmp')
         _tmp.write_text(json.dumps(margins, ensure_ascii=False, indent=1), encoding='utf-8')

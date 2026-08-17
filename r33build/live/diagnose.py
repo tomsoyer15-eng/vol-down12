@@ -61,6 +61,10 @@ SIGNS = [
 ]
 
 
+class _StopFacts(Exception):
+    """Маршрут неизвестен: факты по книге не показываются (32-й круг, №17)."""
+
+
 def facts():
     out = []
     try:
@@ -72,9 +76,20 @@ def facts():
     try:
         import daily
         import state as ST
-        st = Path.home() / '.addfut'
-        rt = st / 'route.txt'
-        route = rt.read_text().strip() if rt.exists() else 'F'
+        # МАРШРУТ — ЧЕРЕЗ ОБЩУЮ ФУНКЦИЮ, БЕЗ УМОЛЧАНИЯ (тридцать второй круг, №17).
+        # Здесь стояло `route = ... if rt.exists() else 'F'` — ровно то молчаливое
+        # умолчание, которое в бою уже отменено (state.active_route отказывает громко, а
+        # инцидент 16.08 показал, к чему оно приводит). После перехода Ф→Е потеря route.txt
+        # заставила бы диагноста приложить факты по СТАРОЙ book-F.json и назвать её
+        # действующей: оператор, доверившись разбору, открыл бы фьючерсы поверх CSPX/CBU0.
+        # Диагност не смеет угадывать сильнее, чем торговый вход.
+        try:
+            route = ST.active_route()
+        except Exception as _exr:
+            out.append(f'маршрут: НЕИЗВЕСТЕН ({_exr}) — route.txt утрачен или журнал МР '
+                       f'недоступен; книга НЕ показывается, чтобы не выдать неактивную '
+                       f'за действующую (О-5)')
+            raise _StopFacts
         cls = daily.BookE if route == 'E' else daily.Book
         b, sess, _ = ST.load(ST.book_path(route), cls)
         if b is None:
@@ -82,6 +97,8 @@ def facts():
         else:
             out.append(f'книга {route}: сессия {sess} за {b.last_session}, '
                        f'замкнута={"нет" if b.close_provisional else "да"}')
+    except _StopFacts:
+        pass                       # маршрут неизвестен — факт уже назван выше
     except Exception as ex:
         out.append(f'книга: НЕ ЧИТАЕТСЯ ({type(ex).__name__}: {ex}) — само по себе улика')
     try:

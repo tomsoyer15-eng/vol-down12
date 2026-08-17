@@ -285,6 +285,17 @@ class IBBroker:
                               'О-3-Е неизвестен')
         if maint is not None and maint != maint:
             raise BrokerError('MaintMarginReq = NaN — запас О-3-Е неизвестен')
+        # ТРЕБОВАНИЕ ОБЯЗАНО БЫТЬ КОНЕЧНЫМ И ПОЛОЖИТЕЛЬНЫМ (тридцать второй круг, №6).
+        # У EquityWithLoanValue конечность проверялась (26-й круг, №16), а у maint — только
+        # NaN: maint=inf давало cushion РОВНО 0, отрицательное — отрицательный cushion, и
+        # оба МОЛЧА запускали аварийное сокращение книги вместо отказа по недостоверным
+        # данным. С тридцать первого круга это уже не только тревога, но и продажа
+        # (внутридневная вахта), поэтому цена повреждённой сводки IBKR — ненужная
+        # ликвидация половины позиции.
+        if maint is not None and (maint in (float('inf'), float('-inf')) or maint < 0):
+            raise BrokerError(f'MaintMarginReq={maint!r} — не конечное положительное '
+                              f'число, запас О-3-Е непроверяем (сокращение по такому '
+                              f'числу было бы ликвидацией по ошибке сводки)')
         if not maint:
             return None       # требования нет; «нет позиций или неполный ответ» решает вызывающий
         return ewl / maint
@@ -499,10 +510,14 @@ class IBBroker:
             # Спрашиваем сам тикер: marketDataType 1 — реальное время, 2 — frozen,
             # 3 — delayed, 4 — delayed frozen. Настройка остаётся необходимым условием,
             # но достаточным — только подтверждение от биржи.
+            # ОТСУТСТВИЕ ФАКТА — НЕ ФАКТ (тридцать второй круг, №16). Тридцатый круг снял
+            # признак с настройки и повесил на тикер, но оставил `_mdt in (None, 1)`:
+            # None — это «биржа ещё ничего не подтвердила» (callback не пришёл), и при
+            # delayed-fallback без своевременного подтверждения пятнадцатиминутная
+            # котировка попадала в §7 как live и «доказывала» пересмотр 5 б.п. Подтверждение
+            # обязано быть ЯВНЫМ: только marketDataType == 1.
             _mdt = getattr(t, 'marketDataType', None)
-            _rt = bool(getattr(self, 'realtime_md', False)) and (_mdt in (None, 1))
-            if getattr(self, 'realtime_md', False) and _mdt not in (None, 1):
-                _rt = False
+            _rt = bool(getattr(self, 'realtime_md', False)) and (_mdt == 1)
             _mid = (t.bid + t.ask) / 2 if (t.bid and t.ask) else None
             for v, live in ((t.last, _rt), (_mid, _rt), (t.close, False)):
                 v = float(v) if v is not None else float('nan')

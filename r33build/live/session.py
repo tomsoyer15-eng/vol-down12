@@ -267,6 +267,15 @@ def do_o3e_cut(ib, route):
 
     if route != 'E':
         raise Refused(f'О-3-Е относится к маршруту Е, запрошен {route}')
+    # ВОРОТА PAPER/LIVE — И ЗДЕСЬ (тридцать второй круг, №3). do_trade зовёт paper_mode()
+    # и через него проверяет СОЧЕТАНИЕ порта и типа счёта плюс ADDFUT_LIVE_OK; этот вход
+    # такой проверки не имел вовсе. Живой Gateway, ошибочно поднятый на 4002, запрещал бы
+    # обычную торговлю — и при этом --o3e автоматически продал бы настоящие CSPX/CBU0 до
+    # L=1. Аварийность действия не отменяет того, чьи это деньги.
+    paper_mode()
+    _wb = FD.trading_window_ok(route)          # №4: тот же вход, те же ворота дня и окна
+    if _wb:
+        raise Refused(f'срез О-3-Е вне окна маршрута {route}: {_wb} — заявка висела бы GTC')
     _active = ST.active_route()
     if _active != route:
         raise Refused(f'запрошен маршрут {route}, а действующий — {_active}')
@@ -311,6 +320,20 @@ def do_o3e_cut(ib, route):
             J.verify(jp)
         except Exception as ex:
             raise Refused(f'журнал §7 повреждён: {ex} — заявки запрещены (О-5)')
+        # ПОТЕРЯ ЖУРНАЛА НЕ РОЖДАЕТ НОВЫЙ GENESIS (тридцать второй круг, №11; тот же класс,
+        # что двадцать второй круг, №16). verify() отсутствующего или header-only файла
+        # возвращает 0 БЕЗ ошибки, и первая же строка среза начала бы новую цепочку — вся
+        # прежняя история исполнений исчезла бы без видимого разрыва, а WORM заверил бы
+        # формально корректный журнал. Торговавшая книга обязана иметь непустой журнал,
+        # закрытый итоговой строкой: иначе неизвестно, что записалось, а что нет.
+        _jr = J.read(jp) if jp.exists() else []
+        if not _jr:
+            raise Refused(f'{jp}: журнал §7 пуст, а книга несёт сессию №{sess} от '
+                          f'{book.last_session} — журнал утрачен или подменён; срез начал '
+                          f'бы новую цепочку (О-5)')
+        if not str(_jr[-1].get('note', '')).startswith('итог сессии'):
+            raise Refused('журнал §7 не закрыт итоговой строкой — часть строк исполнения '
+                          'могла не записаться; срез запрещён до разбора (О-5)')
         m, src = FD.build_market(ib, FD.exchange_today(), book, route=route)
         refs = FD.reference_prices(ib, route=route)
         refs = {k: v for k, v in refs.items() if not k.startswith('ОРИЕНТИР-НЕТ:')}
@@ -329,18 +352,54 @@ def do_o3e_cut(ib, route):
         _cut = _rep(book, n_eq=_ne, n_bd=_nb)
         ST.save_intent(bp, route, sess, book, _cut, _orders, session_date=today)
         _placed = []
-        for _inst, _qty in _orders:
-            DL._window_gate(_deadline, what=f'О-3-Е (вахта) {_inst} {_qty:+g}')
+
+        def _cut_fail(_inst, _qty, _what):
+            """СБОЙ СРЕЗА ИДЁТ ЧЕРЕЗ ВОССТАНОВЛЕНИЕ (тридцать второй круг, №1).
+
+            Первая редакция просто поднимала Refused: ни restore_to, ни снятия живых
+            заявок. Если CSPX продан, а CBU0 отвергнут, книга у брокера одноногая —
+            дыра порядка половины NLV, — на диске лежит досрезная книга, и следующий
+            запуск не может ни принять состояние, ни доказуемо его вернуть. Возврат
+            всё равно недоказуем без входной сверки следующей сессии, поэтому исход
+            остаётся О-5; но попытка обязана быть сделана и названа."""
             try:
+                for _oid in (br.open_orders() or []):
+                    try:
+                        br.cancel_order(_oid)
+                    except Exception:
+                        pass
+            except Exception:
+                pass                  # аварийная уборка не смеет маскировать причину
+            try:
+                _ok, _have, _stuck = DL.restore_to(br, book, route)
+                _late = [x for x in _stuck if 'ЗА КРАЕМ' in str(x)]
+                _n = ('книга ПО ДОСТУПНЫМ ДАННЫМ возвращена к досрезной (подтверждение — '
+                      'входной сверкой следующей сессии)' if _ok else
+                      f'ВОССТАНОВИТЬ НЕ УДАЛОСЬ: у брокера {_have}, неснятых заявок '
+                      f'{len(_stuck)}')
+                if _late:
+                    _n += ' | ' + '; '.join(_late)
+            except Exception as _ex2:
+                _n = f'восстановление НЕ ВЫПОЛНЕНО ({_ex2})'
+            return Refused(f'О-3-Е (вахта): {_inst} {_qty:+g} {_what} — книга в '
+                           f'промежуточном состоянии, состояние НЕ сохранено; {_n}; '
+                           f'ручной разбор (О-5)')
+
+        for _inst, _qty in _orders:
+            # ВОРОТА ОКНА — ВНУТРИ try (№1): закрытие окна ПОСЛЕ первой исполненной ноги
+            # поднимало WindowClosed мимо разбора, и восстановление не запускалось вовсе.
+            try:
+                DL._window_gate(_deadline, what=f'О-3-Е (вахта) {_inst} {_qty:+g}')
                 _rec = br.place(_inst, _qty, refs.get(_inst))
             except BaseException as ex:
-                raise Refused(f'О-3-Е (вахта): {_inst} {_qty:+g} не подано ({ex}, исход '
-                              f'НЕИЗВЕСТЕН, повтор не выполняется) — ручной разбор (О-5)')
+                if not _placed:
+                    raise Refused(f'О-3-Е (вахта): {_inst} {_qty:+g} не подано ({ex}) — '
+                                  f'ни одной заявки не исполнено, книга не тронута')
+                raise _cut_fail(_inst, _qty, f'не подано ({ex}, исход НЕИЗВЕСТЕН, '
+                                             f'повтор не выполняется)')
             _placed.append(_rec)
             if not DL._filled(_rec, _qty):
-                raise Refused(f'О-3-Е (вахта): {_inst} {_qty:+g} исполнено '
-                              f'{_rec.get("filled")} — книга в промежуточном состоянии, '
-                              f'состояние НЕ сохранено, ручной разбор (О-5)')
+                raise _cut_fail(_inst, _qty, f'исполнено {_rec.get("filled")}')
         _pos2, _oo2 = DL._snapshot_consistent(br)
         _after = ST.reconcile(_cut, route, _pos2, open_orders=_oo2)
         if _after:
@@ -351,24 +410,56 @@ def do_o3e_cut(ib, route):
         # издержек. Строки ложатся ПОСЛЕ итога торговой сессии, значит её счётчик «строк N»
         # перестал сходиться — дата и без пометки выпала бы из выборки, но молчаливое
         # исключение оператору ничего не объясняет.
+        # ЦЕЛЬ СЧИТАНА ПО МОДЕЛЬНЫМ ЦЕНАМ — РЕЗУЛЬТАТ МЕРЯЕТСЯ ПО ЖИВОМУ (32-й круг, №5).
+        # o3e_reduce размеряет книгу по закрытиям предыдущей сессии (конвенция §1 и
+        # замороженного движка), а триггер и требование маржи — живые. При внутридневном
+        # движении цен «сокращено до L=1» может фактически означать 1,05-1,10x, и книга
+        # продолжит давить на маржу, пока все считают норматив выполненным. Перечитываем
+        # запас ПОСЛЕ исполнений и говорим правду в журнале и в тревоге.
+        try:
+            _pc2 = br.margin_cushion()
+        except Exception as _exp2:
+            _pc2 = None
+            _ach = f'проверить результат не удалось ({_exp2})'
+        else:
+            _ach = (f'запас после среза {float(_pc2):.2f}×'
+                    if _pc2 is not None else 'запас после среза НЕИЗВЕСТЕН')
+        _norm_ok = (_pc2 is not None and float(_pc2) >= DL.O3E_MIN)
         from types import SimpleNamespace as _SNS
         _reason = (f'О-3-Е ВНУТРИДНЕВНАЯ ВАХТА: запас {float(_pc):.2f}× ниже {DL.O3E_MIN} — '
-                   f'книга сокращена в ту же сессию {_n0e}/{_n0b} -> {_ne}/{_nb} (§8)')
+                   f'книга сокращена в ту же сессию {_n0e}/{_n0b} -> {_ne}/{_nb} (§8); '
+                   f'{_ach}'
+                   + ('' if _norm_ok else
+                      ' — НОРМАТИВ НЕ ДОСТИГНУТ ОДНИМ СРЕЗОМ: цель считана по модельным '
+                      'ценам предыдущего закрытия, а требование живое; нужен ручной '
+                      'разбор (О-5)'))
         _dec = _SNS(date=m.date, leverage=float(book.prev_close_lev or 0.0),
                     reasons=[_reason], refusals=[], roll_pairs=[])
-        for _row in J.rows_from_decision(_dec, _nlv, _orders,
-                                         {r['instrument']: r for r in _placed}):
+        _rows31 = J.rows_from_decision(_dec, _nlv, _orders,
+                                       {r['instrument']: r for r in _placed})
+        for _row in _rows31:
             J.append(jp, _row)
-        J.append(jp, dict(
-            date=today, leg='', instrument='ИТОГ', qty=0, px_order='-', px_fill='',
-            commission='', reason='', nav=_nlv, leverage='', roll_spread_near='',
-            roll_spread_far='',
-            note=f'О-3-Е сокращение после итога сессии {sess}: дата ИСКЛЮЧЕНА из выборки '
-                 f'издержек §7 ({_reason})'))
+        # СНАЧАЛА СОСТОЯНИЕ, ПОТОМ ИТОГ (тридцать второй круг, №12). Прежде ИТОГ ложился
+        # ДО ST.save: сбой записи книги (ENOSPC/ACL) оставлял журнал, объявляющий операцию
+        # завершённой, при досрезной книге на диске и сокращённом брокере — ручное
+        # восстановление шло бы по ложному состоянию. В run_session порядок именно такой
+        # (двадцать пятый круг, №12), и здесь он обязан совпадать.
         _closed = _rep(DL.close_out_e(_cut, m.px_eq_today, m.px_bd_today, _nlv),
                        last_session=today, close_provisional=True)
         ST.save(bp, _closed, route, sess, note=_reason)
         ST.clear_intent(bp)
+        # ИТОГОВАЯ СТРОКА НАЧИНАЕТСЯ С «итог сессии» (тридцать второй круг, №9). Следующая
+        # торговая сессия требует ровно этого префикса у ПОСЛЕДНЕЙ строки журнала
+        # (daily.run_session): прежний текст «О-3-Е сокращение после итога…» её
+        # детерминированно останавливал — после снятия тревоги контур не мог вернуть книгу
+        # к цели, а на ролловой дате старая серия ушла бы к поставке. Пометка исключения
+        # из выборки §7 остаётся: её ловит подстрока «исключ».
+        J.append(jp, dict(
+            date=today, leg='', instrument='ИТОГ', qty=0, px_order='-', px_fill='',
+            commission='', reason='', nav=_nlv, leverage='', roll_spread_near='',
+            roll_spread_far='',
+            note=f'итог сессии {sess} (О-3-Е вахта, строк {len(_rows31)}): дата ИСКЛЮЧЕНА '
+                 f'из выборки издержек §7 — {_reason}'))
     # ТРЕВОГА ОБЯЗАТЕЛЬНА И ПРИ УСПЕХЕ: сокращение состоялось, ПРИЧИНА не разобрана.
     _af = state_dir() / f'ALARM-o3e-{today}.txt'
     _msg = (f'{_reason}. Вход: {src}. Сокращение выполнено автоматикой по нормативу §8, '
@@ -426,6 +517,17 @@ def do_trade(ib, route, dry):
     if getattr(book, 'close_provisional', False) and book.last_session and not dry:
         raise Refused(f'сессия №{sess} не замкнута: плечо закрытия предварительное, '
                          f'триггер капа §1 недостоверен. Выполнить: session.py --close')
+
+    # ТОРГОВЫЙ ДЕНЬ И НАЧАЛО ОКНА ПРОВЕРЯЮТСЯ ЗДЕСЬ (тридцать второй круг, №4). Верхний
+    # край окна держал _window_gate, а выходной, праздник и запуск ДО 08:45 отсекала только
+    # оболочка автопилота — при том что session.py --live самостоятельный торговый вход.
+    # В субботу prev_session() вернёт пятницу, проверка пропущенного дня пройдёт, дедлайн
+    # будет субботним, и заявки уйдут GTC до понедельника; состояние запишется субботней
+    # датой и в понедельник заблокирует само себя. Наблюдение (--dry) не ограничиваем.
+    if not dry:
+        _wb = FD.trading_window_ok(route)
+        if _wb:
+            raise Refused(f'торговый вход вне окна маршрута {route}: {_wb}')
 
     # ДАТА СЕССИИ — БИРЖЕВАЯ. По часам машины запуск около полуночи UTC пометил бы
     # сделку соседней датой, и last_session либо заблокировал бы правильный запуск,

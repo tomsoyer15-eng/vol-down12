@@ -757,6 +757,47 @@ def trade_till(route='F', today=None):
 TRADE_MARGIN_MIN = 15
 
 
+TRADE_FROM = '0845'            # начало торгового окна обоих маршрутов (Чикаго)
+
+
+def trading_window_ok(route='F', today=None, now_hhmm=None):
+    """ТОРГОВЫЙ ДЕНЬ И НАЧАЛО ОКНА — В PYTHON, А НЕ ТОЛЬКО В ОБОЛОЧКЕ (32-й круг, №4).
+
+    Проверены были лишь ВЕРХНИЕ ворота (_window_gate по trade_deadline). Выходной,
+    праздник и запуск ДО 08:45 отсекал только autopilot.sh, а `session.py --live` —
+    самостоятельный торговый вход: в субботу prev_session() честно вернёт пятницу, проверка
+    пропущенного дня пройдёт, дедлайн будет субботним, и заявки уйдут GTC до понедельника,
+    а состояние запишется субботней датой и в понедельник заблокирует само себя.
+
+    Возвращает None, если торговать можно; иначе строку с причиной отказа. Непокрытый
+    календарём год — тоже отказ (а не «сегодня не торгуем»): его обязан увидеть человек.
+    """
+    import pandas as pd
+    import daily as _DL
+    d = pd.Timestamp(today if today is not None else exchange_today()).normalize()
+    if d.weekday() >= 5:
+        return f'{d:%Y-%m-%d} — выходной ({["пн","вт","ср","чт","пт","сб","вс"][d.weekday()]})'
+    try:
+        hol = set(eu_holidays(d.year) if route == 'E' else _DL.holidays_for(d.year))
+    except Exception as ex:
+        return f'календарь маршрута {route} не покрывает {d.year} год ({ex})'
+    if d in hol:
+        return f'{d:%Y-%m-%d} — праздник маршрута {route}'
+    # «СЕЙЧАС» БЕРЁТСЯ ИЗ ТОГО ЖЕ ИСТОЧНИКА, ЧТО У ВОРОТ ЗАЯВКИ: pd.Timestamp.now в
+    # биржевой зоне (daily._window_gate, feed.closing_values). Через datetime.now ворота
+    # оказались бы единственным местом контура, которое смотрит на настоящие часы машины
+    # мимо общей точки — и стенды, задающие сессию, проверяли бы не свой день, а сегодня.
+    hm = now_hhmm
+    if hm is None:
+        hm = pd.Timestamp.now(tz=EXCHANGE_TZ).strftime('%H%M')
+    if str(hm) < TRADE_FROM:
+        return (f'сейчас {hm} по бирже, окно открывается в {TRADE_FROM}: заявка до открытия '
+                f'висела бы GTC')
+    if str(hm) >= trade_till(route, d):
+        return f'сейчас {hm} по бирже, окно маршрута {route} закрыто в {trade_till(route, d)}'
+    return None
+
+
 def trade_deadline(route='F', today=None):
     """Момент конца торгового окна на СЕГОДНЯ в биржевой зоне (DST-безопасно)."""
     import pandas as pd

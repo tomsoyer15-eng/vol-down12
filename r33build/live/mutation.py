@@ -631,7 +631,17 @@ def _intent_mutations():
             raise RuntimeError('промежуточное состояние — О-5')
         return orig, patched
 
-    return [('принятое намерение не завершает сессию', not_finishing),
+    def shortcut_by_date():
+        """ТРИДЦАТЬ ВТОРОЙ КРУГ, №13: ярлык «состояние уже дописано» снова срабатывает по
+        одной ДАТЕ, без сверки позиций. Обрыв посреди внутридневного среза О-3-Е выдаётся
+        за завершённую сессию: брокер сокращён, активная книга старая, разрыва не видит
+        никто. Патчится в группе НАМЕРЕНИЯ — именно её стенд исполняет этот путь (урок №3
+        тридцатого круга: раннер обязан гонять те стенды, где защита наблюдаема)."""
+        orig = DL.same_positions
+        return orig, (lambda a, b: True), DL, 'same_positions'
+
+    return [('ярлык намерения по одной дате', shortcut_by_date),
+            ('принятое намерение не завершает сессию', not_finishing),
             ('намерение не разбирается', no_intent),
             ('намеченная книга принимается всегда', adopt_always),
             ('снимок доказывает отсутствие заявок', snapshot_proves),
@@ -814,6 +824,16 @@ def _run_mutations():
                 return bool(getattr(book_after, 'n_eq', 0) or getattr(book_after, 'n_bd', 0))
             return cushion < DLm.O3E_MIN
         return orig, patched, SS, 'post_o3e_alarm'
+
+    def o3e_pre_cut_silent():
+        """ТРИДЦАТЬ ВТОРОЙ КРУГ, №2: предторговый срез step_e снова не выставляет признак
+        среза — тревоги не будет, причина не разберётся, полоса вернёт книгу к 2x."""
+        orig = DLm.step_e
+        def patched(*a, **k):
+            d = orig(*a, **k)
+            d.o3e_cut = None
+            return d
+        return orig, patched, DLm, 'step_e'
 
     def o3e_journal_off():
         """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №11: исполнения аварийного среза снова не попадают в §7 —
@@ -1023,6 +1043,7 @@ def _run_mutations():
             ('пост-трейд None глотается', post_o3e_swallow_none),
             ('пост-трейд проверка О-3-Е удалена', post_o3e_removed),
             ('состоявшийся срез не поднимает тревогу', o3e_cut_silent),
+            ('предторговый срез не оставляет следа', o3e_pre_cut_silent),
             ('исполнения среза не идут в журнал §7', o3e_journal_off),
             ('наблюдение пишет строки §7', dry_writes_journal),
             ('каталог тревог живёт своей жизнью', statedir_own_home),
@@ -1886,12 +1907,20 @@ def run_intent_mutations():
     _ = []
     print(f"\n{'мутация намерения':<40}{'поймана':>9}  какими утверждениями")
     for label, make in _intent_mutations():
-        orig, patched = make()
-        DL._resume_intent = patched
+        # ДВА ВИДА КОРТЕЖА (как в остальных раннерах): часть мутаций называет свой модуль и
+        # атрибут явно. Прежде раннер БЕЗУСЛОВНО патчил DL._resume_intent, и мутация другой
+        # защиты уходила в пустоту — «НЕ ПОЙМАНА» без объяснения (урок №3 тридцатого круга).
+        _got = make()
+        if len(_got) == 4:
+            orig, patched, _holder, _attr = _got
+        else:
+            orig, patched = _got
+            _holder, _attr = DL, '_resume_intent'
+        setattr(_holder, _attr, patched)
         try:
             _, bad = I.run_intent()
         finally:
-            DL._resume_intent = orig
+            setattr(_holder, _attr, orig)
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:60]}')
         if not bad:
             miss.append(label)

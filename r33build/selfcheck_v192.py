@@ -556,8 +556,14 @@ open(_MFIX, 'w').write(_json1.dumps({
     'ES': {'init': 34910.0, 'maint': 25059.0},
     'MES': {'init': 3491.0, 'maint': 2506.0},
     'ZN': {'init': 2157.0, 'maint': 1876.0},
+    # ПРИВЯЗКА К ПОКОЛЕНИЮ РЕЕСТРА (тридцать второй круг, №8): con_id каждой серии из того
+    # же instruments.csv, на который смотрит ADDFUT_REGISTRY ниже. Без поля замер теперь
+    # отвергается — имя серии переживает исправление con_id, а маржа нет.
     '_meta': {'date': _dt1.datetime.now(_dt1.timezone.utc).strftime('%Y-%m-%d'),
-              'account': 'DUTEST01', 'series': ['ES', 'MES', 'ZN']}}))
+              'account': 'DUTEST01', 'series': ['ES', 'MES', 'ZN'],
+              'con_ids': {r['instrument']: r['con_id']
+                          for r in csv.DictReader(open('instruments.csv', encoding='utf-8'))
+                          if r['instrument'] in ('ES', 'MES', 'ZN')}}}))
 _os1.environ['ADDFUT_MARGINS'] = _MFIX
 _os1.environ['ADDFUT_REGISTRY'] = _os1.path.abspath('instruments.csv')
 _os1.environ['ADDFUT_ACCOUNT'] = 'DUTEST01'
@@ -1497,14 +1503,31 @@ if not _pair_here:
         # конечность и положительность init/maint. Дублировать эти правила здесь значило бы
         # завести второй норматив, который разойдётся с первым.
         if not _missm:
-            _keep_mrg = _os1.environ.get('ADDFUT_MARGINS')
+            # ПРОВЕРЯЕТСЯ МАШИННАЯ ПАРА ЦЕЛИКОМ, А НЕ ГИБРИД (тридцать второй круг, №18).
+            # Выше selfcheck выставляет ADDFUT_REGISTRY на АРХИВНЫЙ instruments.csv и
+            # ADDFUT_ACCOUNT='DUTEST01'; подменяя только ADDFUT_MARGINS, я сверял живой
+            # замер с ФИКТИВНЫМ реестром и ФИКТИВНЫМ счётом — успешный путь был невозможен
+            # по построению, и после 20.08 корректный живой замер всё равно валил бы выпуск,
+            # а строка «ворота проверили машинную пару» не соответствовала исполненному
+            # коду. Подменяем все три величины на машинные и возвращаем обратно.
+            _keep3 = {k: _os1.environ.get(k)
+                      for k in ('ADDFUT_MARGINS', 'ADDFUT_REGISTRY', 'ADDFUT_ACCOUNT')}
+            _pin_m = _os1.path.join(_os1.path.expanduser('~'), '.addfut', 'account.txt')
             _os1.environ['ADDFUT_MARGINS'] = _mj_m
+            _os1.environ['ADDFUT_REGISTRY'] = _rg_m
+            try:
+                with open(_pin_m, encoding='utf-8') as _fp:
+                    _os1.environ['ADDFUT_ACCOUNT'] = _fp.read().strip()
+            except OSError as _exp:
+                raise RuntimeError(f'машинный пин счёта не читается ({_exp}) — пара '
+                                   f'непроверяема')
             try:
                 T._live_margins()
             finally:
-                _os1.environ.pop('ADDFUT_MARGINS', None)
-                if _keep_mrg is not None:
-                    _os1.environ['ADDFUT_MARGINS'] = _keep_mrg
+                for _k3, _v3 in _keep3.items():
+                    _os1.environ.pop(_k3, None)
+                    if _v3 is not None:
+                        _os1.environ[_k3] = _v3
     except Exception as _exm:
         _missm = [f'машинная пара недоступна либо замер непригоден: {_exm}']
     if not _missm:

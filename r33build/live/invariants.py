@@ -1094,12 +1094,74 @@ def _t5(r):
             and r['sess'] == 8 and r['saved'].n_e == r['after'].n_e)
 
 
+def _intent_cut(kind):
+    """ОБРЫВ ПОСРЕДИ ВНУТРИДНЕВНОГО СРЕЗА О-3-Е (тридцать второй круг, №13).
+
+    Намерение среза пишется, когда книга УЖЕ несёт сегодняшнюю дату (день отторгован).
+    Ярлык «состояние уже дописано прошлым процессом» срабатывал по одной этой дате: он
+    архивировал намерение, не сравнив книгу ни с целью, ни с брокером. Брокер при этом
+    сокращён, активная книга на диске — досрезная, и разрыва не видит никто.
+
+    Здесь заявки среза ПРОШЛИ, а состояние записаться не успело. Правильный исход — тот
+    же, что у обычной сессии: намеченная (сокращённая) книга принимается. Ярлык по дате
+    вернул бы досрезную книгу и снял намерение — ровно ложное «всё в порядке».
+    """
+    import os
+    import tempfile
+    import state as ST
+    from fake_broker import FakeBroker
+
+    out = dict(kind=kind, raised=False, error='', book=None, intent_left=None)
+    tmp = tempfile.mkdtemp(prefix='addfut-cut-')
+    keep = (os.environ.get('ADDFUT_BOOK_PATH'), os.environ.get('ADDFUT_LOCK_DIR'))
+    try:
+        os.environ['ADDFUT_BOOK_PATH'] = str(Path(tmp) / 'book-E.json')
+        os.environ['ADDFUT_LOCK_DIR'] = tmp
+        (Path(tmp) / 'route.txt').write_text('E', encoding='utf-8')
+        bp = Path(tmp) / 'book-E.json'
+        day = '2026-08-12'
+        before = DL.BookE(n_eq=1195, n_bd=6538, prev_st_eq=True, prev_st_bd=True,
+                          last_session=day, close_provisional=True, prev_close_lev=1.99)
+        after = DL.replace(before, n_eq=598, n_bd=3267)
+        ST.save(bp, before, 'E', 3)
+        ST.save_intent(bp, 'E', 3, before, after,
+                       [('CSPX', -597), ('CBU0', -3271)], session_date=day)
+        br = FakeBroker(prices={'CSPX': 834.66, 'CBU0': 152.94},
+                        positions={'CSPX': 598.0, 'CBU0': 3267.0})
+        br.nlv = 1_000_000.0
+        br.todays_executions = lambda: [9001, 9002]   # заявки среза ИСПОЛНЯЛИСЬ
+        book2, done = DL._resume_intent(ST, bp, DL.BookE, 'E', before, 3, br, False)
+        out['book'] = book2
+        out['done'] = done
+        out['intent_left'] = ST.load_intent(bp) is not None
+    except Exception as ex:
+        out['raised'] = True; out['error'] = f'{type(ex).__name__}: {ex}'
+    finally:
+        for k, v in zip(('ADDFUT_BOOK_PATH', 'ADDFUT_LOCK_DIR'), keep):
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+    return out
+
+
+@iinv('обрыв посреди внутридневного среза не выдаётся за завершённую сессию',
+      needs=lambda r: r['kind'] == 'обрыв посреди внутридневного среза')
+def _t31(r):
+    """ТРИДЦАТЬ ВТОРОЙ КРУГ, №13. Ярлык по дате принимал ДОсрезную книгу и снимал
+    намерение: брокер сокращён, книга старая, тревоги нет. Правильный исход — принять
+    намеченную (сокращённую) книгу, как в любом обрыве между сделкой и записью."""
+    b = r['book']
+    return (not r['raised'] and b is not None
+            and b.n_eq == 598 and b.n_bd == 3267)
+
+
 def run_intent():
     cov, bad = {}, {}
     cases = [('не начиналось', _intent_case), ('прошло целиком', _intent_case),
              ('промежуточное', _intent_case),
              ('ролл исполнен целиком', _intent_full), ('ролл не начинался', _intent_full),
-             ('исполнение в пути', _intent_full), ('состояние уже дописано', _intent_full)]
+             ('исполнение в пути', _intent_full), ('состояние уже дописано', _intent_full),
+             ('обрыв посреди внутридневного среза', _intent_cut)]
     for kind, maker in cases:
         r = maker(kind)
         for name, fn, needs in INTENT:
@@ -1685,7 +1747,23 @@ def _session_run(case):
 
         out = dict(case=case, route=route, raised=False, error='', dec=None,
                    placed=len(ib._trades), saved=None, provisional=None, lev=None)
-        pd.Timestamp.now = staticmethod(lambda tz=None: _now if tz else real_now())
+        # ЧАСЫ, ИДУЩИЕ ВНУТРИ СЕССИИ (тридцать второй круг, №4, пара). Случай «окно ушло
+        # за время сессии» проверяет ВОРОТА ПЕРЕД ЗАЯВКОЙ, а не вход: теперь у входа стоит
+        # своя проверка дня и окна, и статичные 16:00 перехватывали бы случай раньше —
+        # старая защита стала бы недостижимой, а стенд доказывал бы новую. Часы отдают
+        # время ВНУТРИ окна на первых обращениях (вход, подготовка) и уходят за край
+        # дальше: ровно то, что происходит в бою, когда сессия затягивается.
+        _clock = {'n': 0}
+
+        def _now_fn(tz=None):
+            if not tz:
+                return real_now()
+            if case != 'окно ушло за время сессии':
+                return _now
+            _clock['n'] += 1
+            return (pd.Timestamp(f'{today} 10:00', tz=FD.EXCHANGE_TZ)
+                    if _clock['n'] <= 2 else _now)
+        pd.Timestamp.now = staticmethod(_now_fn)
         if case.startswith('замыкание'):
             out['dec'] = SS.do_close(ib, route)
         elif case == 'маршрут Е при тонком запасе':
@@ -2031,8 +2109,14 @@ def _r20(r):
     if r['raised']:
         return False
     d = r['dec']
+    # И ТРЕВОГА ТОЖЕ (тридцать второй круг, №2). Прежний стенд смотрел только количества:
+    # предторговый срез РЕАЛЬНО резал книгу, но признак среза не выставлялся, тревога не
+    # ставилась, причина не разбиралась — и следующая сессия полосой возвращала книгу к 2x.
+    # Зелёное утверждение не наблюдало собственную защиту.
     return (d is not None and any('О-3-Е' in x for x in d.reasons)
-            and d.book_after.n_eq < 1195 and d.book_after.n_bd < 6538)
+            and d.book_after.n_eq < 1195 and d.book_after.n_bd < 6538
+            and getattr(d, 'o3e_cut', None) is not None
+            and r.get('alarm_o3e') is True)
 
 
 @rinv('О-3-Е: капитал, плечо и заём считаются от ФИНАЛЬНОЙ книги',
@@ -3093,7 +3177,8 @@ def _tr_run(case):
                 # ВОСЕМНАДЦАТЫЙ КРУГ, №13 (пара): NaN-требование превращало маржу корня в
                 # мусор; sorted/сравнения его не ловили — только явная проверка конечности.
                 mp.write_text(_json.dumps({'_meta': {'date': _today, 'account': 'DUTEST01',
-                                                     'series': ['ESU26', 'ZNU26']},
+                                                     'series': ['ESU26', 'ZNU26'],
+                                                     'con_ids': {'ESU26': '1', 'ZNU26': '2'}},
                                            'ESU26': {'init': float('nan')},
                                            'ZNU26': {'init': 2500.0}}), encoding='utf-8')
             elif case == 'замер устарел':
@@ -3102,14 +3187,16 @@ def _tr_run(case):
                 import datetime as _dtx
                 _old = (_dtx.date.today() - _dtx.timedelta(days=60)).isoformat()
                 mp.write_text(_json.dumps({'_meta': {'date': _old,
-                                                     'series': ['ESU26', 'ZNU26']},
+                                                     'series': ['ESU26', 'ZNU26'],
+                                                     'con_ids': {'ESU26': '1', 'ZNU26': '2'}},
                                            'ESU26': {'init': 40000.0},
                                            'ZNU26': {'init': 2500.0}}), encoding='utf-8')
             elif case == 'замер: init прежде maint':
                 # ВОСЕМНАДЦАТЫЙ КРУГ, №13 (пара): возможность ОТКРЫТЬ книгу определяет
                 # НАЧАЛЬНОЕ требование; выбор maint занижал маржу и завышал запас.
                 mp.write_text(_json.dumps({'_meta': {'date': _today, 'account': 'DUTEST01',
-                                                     'series': ['ESU26', 'ZNU26']},
+                                                     'series': ['ESU26', 'ZNU26'],
+                                                     'con_ids': {'ESU26': '1', 'ZNU26': '2'}},
                                            'ESU26': {'init': 50000.0, 'maint': 2500.0},
                                            'ZNU26': {'init': 3000.0, 'maint': 1000.0}}),
                               encoding='utf-8')
@@ -3117,14 +3204,15 @@ def _tr_run(case):
                 mp.write_text(_json.dumps({'ESU26': {'maint': 40000.0},
                                            'ZNU26': {'maint': 2500.0}}), encoding='utf-8')
             elif case == 'замер прежней серии':
-                mp.write_text(_json.dumps({'_meta': {'date': _today, 'account': 'DUTEST01', 'series': ['ESZ25']},
+                mp.write_text(_json.dumps({'_meta': {'date': _today, 'account': 'DUTEST01', 'series': ['ESZ25'], 'con_ids': {'ESZ25': '9'}},
                                            'ESZ25': {'maint': 30000.0}}), encoding='utf-8')
             elif case == 'замер не покрывает корень':
-                mp.write_text(_json.dumps({'_meta': {'date': _today, 'account': 'DUTEST01', 'series': ['ZNU26']},
+                mp.write_text(_json.dumps({'_meta': {'date': _today, 'account': 'DUTEST01', 'series': ['ZNU26'], 'con_ids': {'ZNU26': '2'}},
                                            'ZNU26': {'maint': 2500.0}}), encoding='utf-8')
             elif case == 'живой замер покрывает':
                 mp.write_text(_json.dumps({'_meta': {'date': _today, 'account': 'DUTEST01',
-                                                     'series': ['ESU26', 'ZNU26']},
+                                                     'series': ['ESU26', 'ZNU26'],
+                                                     'con_ids': {'ESU26': '1', 'ZNU26': '2'}},
                                            'ESU26': {'maint': 40000.0},
                                            'ZNU26': {'maint': 2500.0}}), encoding='utf-8')
             keepm = _os.environ.get('ADDFUT_MARGINS')
@@ -3254,7 +3342,8 @@ def _tr_run(case):
             import feed as _FDm2
             _today2 = _FDm2.exchange_today().strftime('%Y-%m-%d')   # биржевая дата
             mp2.write_text(_json.dumps({'_meta': {'date': _today2, 'account': 'DUTEST01',
-                                                  'series': ['ESU26', 'MESU26']},
+                                                  'series': ['ESU26', 'MESU26'],
+                                                  'con_ids': {'ESU26': '1', 'MESU26': '2'}},
                                         'ESU26': {'init': 40000.0},
                                         'MESU26': {'init': 4500.0}}), encoding='utf-8')
             keepm = _os.environ.get('ADDFUT_MARGINS')
