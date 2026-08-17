@@ -751,9 +751,11 @@
   "label": "рецензия тридцать пятого круга",
   "model": "gpt-5.6-sol",
   "response_id": "resp_0dbbfd0ebe35ce6a006a82b37d837481a2917271bd79d1dee0",
-  "status": "queued",
+  "status": "completed",
   "chars": 1240955,
   "fingerprint": "d61f74f50df1ca282050918c6a2107a4c8c703b353556245cb332b2b72b51e52",
-  "request_id": "req_421bbdbb9804433ea07ea8de6e9d6ea1"
+  "request_id": "req_421bbdbb9804433ea07ea8de6e9d6ea1",
+  "finished": "2026-08-17T07:26:09+00:00",
+  "seconds": 1042.4
  }
 ]

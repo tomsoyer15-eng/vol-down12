@@ -17,7 +17,10 @@ mkdir -p ~/state-mirror && cp -u ~/.addfut-backups/addfut-*.tgz ~/state-mirror/ 
 # обязана появиться в любом случае, иначе «копия есть» и «копию не пытались снять»
 # выглядят одинаково — тот же класс, что молчаливое умолчание route.txt (§7).
 RCLONE="$HOME/bin/rclone"
-DRIVE_REMOTE="${ADDFUT_DRIVE_REMOTE:-vol-down12-drive:}"
+# ПОДПАПКА ЯВНО (17.08, при подключении Drive): корень Диска — личный, там лежит всё
+# остальное; выгрузка обязана идти в утверждённую заказчиком папку vol-down12-backups,
+# а не рассыпаться каталогами по корню.
+DRIVE_REMOTE="${ADDFUT_DRIVE_REMOTE:-vol-down12-drive:vol-down12-backups/}"
 if [ ! -x "$RCLONE" ]; then
   echo "$(date '+%F %T') drive ПРОПУЩЕН: нет $RCLONE" >> ~/.addfut/autopilot.log
 elif ! "$RCLONE" listremotes 2>/dev/null | grep -qx "${DRIVE_REMOTE%%:*}:"; then
