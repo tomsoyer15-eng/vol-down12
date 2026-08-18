@@ -5,3 +5,5 @@ nohup.out
 *.tmp
 .release.lock
 spreads.csv
+trend2/kesh/
+trend2/vyvod/
