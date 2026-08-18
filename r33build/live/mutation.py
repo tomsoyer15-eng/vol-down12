@@ -694,6 +694,18 @@ def _adapter_mutations():
 
         return orig, patched
 
+    def gross_band_mid():
+        """СОРОК ЧЕТВЁРТЫЙ КРУГ: единица ноги Б снова берётся серединой полосы вместо
+        модельной по d_fix (дефект 37-го круга, №3) — плечо занижается примерно на треть,
+        и книга больше капа 2,00 проходит ворота. Прежде у gross() не было НИ ОДНОЙ
+        мутации: защита капа мутационным контролем не наблюдалась вовсе."""
+        orig = B.IBBroker.gross
+
+        def patched(self, d_fix=None):
+            return orig(self, 8.0)      # d_fix книги игнорируется: величина от него не зависит
+
+        return orig, patched
+
     return [('дробная доля усекается до целого', 'place', truncating_place),
             ('сводка счёта из кэша подписки', '_summary_barrier', summary_from_cache),
             ('цена и комиссия из статуса', '_rec', rec_from_status),
@@ -729,7 +741,8 @@ def _adapter_mutations():
              preview_wrong_form),
             ('заявка предпросмотра не привязана к счёту', 'preview', preview_unpinned),
             ('дробное количество фьючерса не округляется', 'preview', preview_frac_fut),
-            ('аварийный признак разрешает всё', 'preview', preview_emergency_bypass)]
+            ('аварийный признак разрешает всё', 'preview', preview_emergency_bypass),
+            ('единица ноги Б — середина полосы, а не d_fix', 'gross', gross_band_mid)]
 
 
 def _intent_mutations():

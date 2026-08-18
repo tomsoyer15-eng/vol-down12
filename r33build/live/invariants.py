@@ -1143,6 +1143,41 @@ def _a13(beh):
             and br.preview([('CSPX', 1.0)], emergency=True) is False)
 
 
+@ainv('плечо ноги Б считается по d_fix книги, а не серединой полосы',
+      needs=lambda b: b == 'normal')
+def _a14(beh):
+    """СОРОК ЧЕТВЁРТЫЙ КРУГ, механическая выборка: у gross() НЕТ НИ ОДНОЙ МУТАЦИИ во всём
+    мутаторе, и набор адаптера его не вызывает вовсе. А это ворота капа плеча 2,00 — самое
+    дорогое число стратегии: подмена модельной единицы ноги Б серединой полосы занижает
+    плечо примерно на треть (дефект 37-го круга, №3) и пропускает книгу больше капа.
+
+    Дискриминатор взят тот же, что в самопроверке адаптера, и он не требует пересчёта всей
+    формулы: модельная единица ноги Б ПРОПОРЦИОНАЛЬНА d_fix, а середина полосы от него не
+    зависит вовсе. Значит удвоение d_fix обязано удвоить плечо; у подменённой реализации
+    отношение равно 1. Плюс отказ без d_fix при непустой ноге Б: молчаливая подстановка
+    середины — это и есть занижение.
+    """
+    import datetime as _dtg
+    import daily as _DLg
+    import feed as _FDg
+    br, ib, rows = _adapter(beh, positions={900003: 10.0})
+    ib.quote_px = 100.0
+    _tz = _FDg.exchange_today()
+    _pz = _FDg.prev_session(_tz, holidays=_DLg.holidays_for(_tz.year)).date()
+    ib.set_bars({990001: [(str(_pz - _dtg.timedelta(days=1)), 46.9), (str(_pz), 46.84)]})
+    try:
+        g6, g12 = float(br.gross(6.0)), float(br.gross(12.0))
+    except Exception:
+        return False
+    if not g6 or abs(g12 / g6 - 2.0) > 1e-9:
+        return False
+    try:
+        br.gross(None)
+    except Exception:
+        return True
+    return False        # без d_fix при непустой ноге Б обязан быть отказ
+
+
 ADAPTER_CASES = ('normal', 'partial', 'reject', 'disconnect', 'cancelled_but_filled',
                  'stale_positions', 'foreign_fill', 'wrong_contract', 'late_fills',
                  'late_cancelled', 'other_account', 'fill_after_end',
