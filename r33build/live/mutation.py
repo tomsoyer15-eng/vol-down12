@@ -1355,6 +1355,15 @@ def _run_mutations():
         import worm_anchor as WA
         return WA.reject_archive, (lambda dst: ''), WA, 'reject_archive'
 
+    def rollgap_total_off():
+        """СОРОК ЧЕТВЁРТЫЙ КРУГ, №5: доказуемо отложенный ролл снова сохраняет книгу с новой
+        датой и новым номером сессии, НЕ записав итог. Автопилот по дате книги ставит
+        traded-* и разрешает замыкание, а якорь WORM требует итог именно этой сессии —
+        постоянный ALARM-backup, closed-* не ставится, следующий ролл блокируется."""
+        import daily as _DLg
+        orig = _DLg.write_rollgap_total
+        return orig, (lambda *a, **k: None), _DLg, 'write_rollgap_total'
+
     return [('пин торгового счёта не требуется', pin_not_required),
             ('ворота торгового окна отключены', window_gate_off),
             ('сокращение О-3-Е не режет книгу', o3e_cut_off),
@@ -1378,6 +1387,7 @@ def _run_mutations():
             ('признак задержанного ориентира среза теряется', o3e_delayed_lost),
             ('наблюдение пишет строки §7', dry_writes_journal),
             ('каталог тревог живёт своей жизнью', statedir_own_home),
+            ('отложенный ролл не пишет итог сессии', rollgap_total_off),
             ('нет файла — «ФАЙЛА НЕТ» при успехе', worm_missing_ok),
             ('HEAD проверяется по имени', worm_git_name_only),
             ('маршрут игнорируется', force_route_f)]
