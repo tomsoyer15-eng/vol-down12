@@ -825,6 +825,39 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
     if _lv not in _sp.path:
         _sp.path.insert(0, _lv)
     import state as _STp, daily as _DLp, journal as _Jp
+
+    # СЕРИЯ ЦЕЛИ СВЕРЯЕТСЯ С КАЛЕНДАРЁМ РОЛЛА (СОРОК ЧЕТВЁРТЫЙ КРУГ, №3, P0).
+    # Проверялось лишь, что имя несёт серию, но не то, что серия НЕ УХОДЯЩАЯ. В день ролла
+    # реестр законно содержит обе (26.08 — U26 и Z26), и переход Е->Ф мог купить U26. Дальше
+    # hand_over_book ставит last_session=сегодня, ежедневный leg_target_roll() в этот день
+    # уже не исполняется — и правка 42-го круга «первый вход в день ролла открывает СВЕЖУЮ
+    # серию» обходится переходом. Книга остаётся в уходящей серии, ближайший ролл пропущен,
+    # серия идёт к поставке. Правило и источник истины — те же, что у ежедневного контура.
+    _due = []
+    try:
+        import feed as _FDr
+        _today_r = _FDr.exchange_today()
+        _hol_r = _DLp.holidays_for(_today_r.year)
+        for _dn in (_dst_names or ()):
+            _root_r = fut_root(_dn)
+            if _root_r not in ('ES', 'MES', 'ZN'):
+                continue                       # фонды календарём ролла не связаны
+            _ser_r = fut_series(_dn)
+            if not _ser_r:
+                continue                       # отсутствие серии ловит отдельный барьер
+            _dl = _DLp.roll_deadline(_ser_r, _hol_r)
+            if _today_r >= _dl:
+                _due.append(f'{_dn} (срок ролла {_dl:%d.%m.%Y})')
+    except Exception as _exr:
+        raise RuntimeError(f'календарь ролла недоступен ({_exr}) — серия цели непроверяема, '
+                           f'переход запрещён (О-5)')
+    if _due:
+        raise RuntimeError(
+            f'цель перехода в УХОДЯЩЕЙ серии: {"; ".join(_due)} — на день ролла и позже '
+            f'открывать её нельзя, иначе книга родится в серии, которую сегодня же надо '
+            f'роллить, а ежедневная проверка в этот день уже не сработает. Задать ноги '
+            f'следующей серией')
+
     _cls_src = _DLp.BookE if from_route == 'E' else _DLp.Book
     _cls_dst = _DLp.BookE if to_route == 'E' else _DLp.Book
     _src, _, _ = _STp.load(_STp.book_path(from_route), _cls_src)

@@ -1178,7 +1178,111 @@ def _a14(beh):
     return False        # без d_fix при непустой ноге Б обязан быть отказ
 
 
-ADAPTER_CASES = ('normal', 'partial', 'reject', 'disconnect', 'cancelled_but_filled',
+@ainv('модельная единица ноги А берётся у САМОГО SPY, а не у ES/10',
+      needs=lambda b: b == 'normal')
+def _a15(beh):
+    """СОРОК ЧЕТВЁРТЫЙ КРУГ, №1 (P0). Норматив: единица ноги А = ES_MULT x SPY.
+    feed.build_market так и считает, держа ES/10 ТОЛЬКО сверкой базиса, а unit_ref строил
+    полосу из ES — и gross() брал её середину как ЦЕНУ. Значит ворота капа на закрытии
+    считали ногу А фьючерсом, а решение дня — индексом; базис сдвигает их, а между
+    CLOSE_CAP=2,00 и INTRA_CAP=2,02 запаса на 2% нет вовсе.
+
+    ПРОВЕРКА НЕ КРУГОВАЯ (замечание «ложные доказательства», №4): в прежнем стенде _a31u
+    «независимый SPY» выводился из того же ES делением на 10, то есть правило 500xSPY не
+    проверялось вовсе. Здесь SPY задан в фикстуре ОТДЕЛЬНЫМ рядом (780,0) и намеренно НЕ
+    равен ES/10 (775,0): реализация по ES даёт 387 500, по нормативу — 390 000.
+    """
+    import os as _osq
+    import datetime as _dtq
+    import daily as _DLq
+    import feed as _FDq
+    import sim_v13 as _Sq
+    br, ib, rows = _adapter(beh, positions={900001: 1.0})
+    _keep = _osq.environ.get('ADDFUT_REGISTRY')
+    _osq.environ['ADDFUT_REGISTRY'] = ib._fixture_reg
+    try:
+        _tz = _FDq.exchange_today()
+        _pz = _FDq.prev_session(_tz, holidays=_DLq.holidays_for(_tz.year)).date()
+        _y = str(_pz - _dtq.timedelta(days=1))
+        ib.set_bars({900001: [(_y, 7740.0), (str(_pz), 7750.0)],
+                     900010: [(_y, 778.0), (str(_pz), 780.0)]})
+        band = br.unit_ref('ESU26', 'FUT', at_close=True)
+    except Exception:
+        return False
+    finally:
+        if _keep is None:
+            _osq.environ.pop('ADDFUT_REGISTRY', None)
+        else:
+            _osq.environ['ADDFUT_REGISTRY'] = _keep
+    if not band:
+        return False
+    mid = (float(band[0]) + float(band[1])) / 2.0
+    return abs(mid - _Sq.ES_MULT * 780.0) < 1.0
+
+
+def _margins_fixture():
+    """Изолированный замер маржи для стендов (правило 5). _live_margins требует ПОЛНОГО
+    покрытия FUT-серий реестра, привязки к счёту и con_ids — фикстура несёт всё это."""
+    import json as _js
+    import tempfile as _tf
+    import os as _os
+    import datetime as _dt
+    _ser = {'ESU26': 35000.0, 'MESU26': 3500.0, 'ZNU26': 2200.0,
+            'ESZ26': 35200.0, 'MESZ26': 3520.0, 'ZNZ26': 2210.0}
+    _cid = {'ESU26': '900001', 'MESU26': '900002', 'ZNU26': '900003',
+            'ESZ26': '900006', 'MESZ26': '900007', 'ZNZ26': '900008'}
+    raw = {'_meta': {'date': str(_dt.date.today()), 'account': 'DU000001',
+                     'series': sorted(_ser), 'con_ids': _cid}}
+    for k, v in _ser.items():
+        raw[k] = {'init': v, 'maint': v * 0.72}
+    d = _tf.mkdtemp(prefix='addfut-mrg-')
+    fp = _os.path.join(d, 'margins_live.json')
+    with open(fp, 'w', encoding='utf-8') as f:
+        _js.dump(raw, f)
+    return fp
+
+
+def _with_measure(br, ib, fn):
+    """Выполнить fn при ИЗОЛИРОВАННОМ замере, реестре и пине (правило 5)."""
+    import os as _os
+    keep = {k: _os.environ.get(k) for k in
+            ('ADDFUT_MARGINS', 'ADDFUT_REGISTRY', 'ADDFUT_ACCOUNT')}
+    _os.environ['ADDFUT_MARGINS'] = _margins_fixture()
+    _os.environ['ADDFUT_REGISTRY'] = ib._fixture_reg
+    _os.environ['ADDFUT_ACCOUNT'] = 'DU000001'
+    try:
+        return fn()
+    finally:
+        for k, v in keep.items():
+            if v is None:
+                _os.environ.pop(k, None)
+            else:
+                _os.environ[k] = v
+
+
+@ainv('разгрузка маржи подтверждается ИЗМЕРЕННОЙ маржой цели, а не приращениями',
+      needs=lambda b: b == 'margin_call')
+def _a16(beh):
+    """СОРОК ЧЕТВЁРТЫЙ КРУГ, №2 (P0). Ветка объявляла доказательством разгрузки то, что все
+    приращения whatIf неположительны. Это ложно: каждое приращение считается против ещё не
+    проданной исходной книги, и отрицательным оно бывает от неттинга с активами, которые
+    переход затем продаст. Проверяем ОБЕ стороны при запасе ниже порога (margin_call):
+    дешёвая по замеру цель — разрешена (дверь аварийного выхода открыта), дорогая —
+    отвергнута, хотя приращения по-прежнему отрицательны.
+    """
+    br, ib, rows = _adapter(beh, positions={900004: 100.0})
+    ib.quote_px = 100.0
+    ib.whatif = 'освобождает'
+
+    def _run():
+        cheap = br.preview([('ZNU26', 1)])
+        dear = br.preview([('ESU26', 100)])
+        return cheap is True and dear is not True
+
+    return _with_measure(br, ib, _run)
+
+
+ADAPTER_CASES = ('normal', 'margin_call', 'partial', 'reject', 'disconnect', 'cancelled_but_filled',
                  'stale_positions', 'foreign_fill', 'wrong_contract', 'late_fills',
                  'late_cancelled', 'other_account', 'fill_after_end',
                  'stale_twice', 'foreign_orders', 'orders_req_fails', 'nan_cushion',

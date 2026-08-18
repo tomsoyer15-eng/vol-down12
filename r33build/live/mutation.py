@@ -706,6 +706,40 @@ def _adapter_mutations():
 
         return orig, patched
 
+    def unit_a_from_es():
+        """СОРОК ЧЕТВЁРТЫЙ КРУГ, №1 (P0): единица ноги А снова строится из цены ES вместо
+        самого SPY. Базис (ставка минус дивиденды) сдвигает оценку, gross берёт середину
+        полосы как цену, и при отрицательном базисе книга выше CLOSE_CAP=2,00 проходит
+        ворота капа."""
+        import feed as _FDm
+        import sim_v13 as _Sm
+        orig = B.IBBroker.unit_ref
+
+        def patched(self, instrument, cls, at_close=False):
+            name = str(instrument)
+            root = ''.join(c for c in name if not c.isdigit()).rstrip('UZHM') or name
+            if at_close and root in ('ES', 'MES'):
+                import daily as _DLm
+                _t = _FDm.exchange_today()
+                _p = _FDm.prev_session(_t, holidays=_DLm.holidays_for(_t.year))
+                px, _d, _, _ = _FDm.closes(self.ib, _FDm.contract_of(self.ib, name), _t,
+                                           expected_prev=_p)
+                mult = _Sm.ES_MULT / 10.0 if root == 'MES' else _Sm.ES_MULT
+                u = mult * _FDm.es_to_unit(float(px))
+                return (u * (1.0 - self.UNIT_BAND_EQ), u * (1.0 + self.UNIT_BAND_EQ))
+            return orig(self, instrument, cls, at_close=at_close)
+
+        return orig, patched
+
+    def release_by_increments():
+        """СОРОК ЧЕТВЁРТЫЙ КРУГ, №2 (P0): возврат к прежнему — «все приращения
+        неположительны» снова объявляется доказательством разгрузки. Приращения считаются
+        против ещё не проданной исходной книги, и неттинг с продаваемыми активами делает их
+        отрицательными там, где целевая книга на деле дороже. При запасе ниже 1,0 это
+        обходит последнюю живую проверку."""
+        orig = B.IBBroker._release_by_measure
+        return orig, (lambda self, orders: True)
+
     return [('дробная доля усекается до целого', 'place', truncating_place),
             ('сводка счёта из кэша подписки', '_summary_barrier', summary_from_cache),
             ('цена и комиссия из статуса', '_rec', rec_from_status),
@@ -742,7 +776,10 @@ def _adapter_mutations():
             ('заявка предпросмотра не привязана к счёту', 'preview', preview_unpinned),
             ('дробное количество фьючерса не округляется', 'preview', preview_frac_fut),
             ('аварийный признак разрешает всё', 'preview', preview_emergency_bypass),
-            ('единица ноги Б — середина полосы, а не d_fix', 'gross', gross_band_mid)]
+            ('единица ноги Б — середина полосы, а не d_fix', 'gross', gross_band_mid),
+            ('единица ноги А считается по ES/10, а не по SPY', 'unit_ref', unit_a_from_es),
+            ('разгрузка доказывается одними приращениями whatIf', '_release_by_measure',
+             release_by_increments)]
 
 
 def _intent_mutations():
