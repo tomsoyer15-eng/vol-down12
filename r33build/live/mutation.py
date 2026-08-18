@@ -611,6 +611,89 @@ def _adapter_mutations():
 
         return orig, patched
 
+    def preview_always_ok():
+        """СОРОК ЧЕТВЁРТЫЙ КРУГ: предпросмотр слепо разрешает. Прежде эта мутация не
+        ловилась ничем — единственное утверждение о preview требовало только «можно»."""
+        orig = B.IBBroker.preview
+        return orig, (lambda self, orders=None, emergency=False: True)
+
+    def preview_wrong_form():
+        """СОРОК ЧЕТВЁРТЫЙ КРУГ: маржа доказывается для DAY-заявки, а в рынок уходит
+        GTC+outsideRth. Прежде подмена формы не роняла ничего."""
+        orig = B.IBBroker.preview
+
+        def patched(self, orders=None, emergency=False):
+            _ib = self.ib
+            _w = _ib.whatIfOrder
+
+            def swap(contract, order):
+                order.tif = 'DAY'
+                order.outsideRth = False
+                return _w(contract, order)
+
+            _ib.whatIfOrder = swap
+            try:
+                return orig(self, orders=orders, emergency=emergency)
+            finally:
+                _ib.whatIfOrder = _w
+
+        return orig, patched
+
+    def preview_unpinned():
+        """СОРОК ЧЕТВЁРТЫЙ КРУГ: привязка к счёту снята — маржа доказывается для
+        произвольного счёта под тем же логином (дефект 37-го круга, №4)."""
+        orig = B.IBBroker.preview
+
+        def patched(self, orders=None, emergency=False):
+            _ib = self.ib; _w = _ib.whatIfOrder
+
+            def f(contract, order):
+                order.account = ''
+                return _w(contract, order)
+
+            _ib.whatIfOrder = f
+            try:
+                return orig(self, orders=orders, emergency=emergency)
+            finally:
+                _ib.whatIfOrder = _w
+
+        return orig, patched
+
+    def preview_frac_fut():
+        """СОРОК ЧЕТВЁРТЫЙ КРУГ: округление снято — дробная what-if заявка на фьючерс
+        уходит на шлюз, ответ пуст, законный переход уходит в ABORT (38-й круг, №5)."""
+        orig = B.IBBroker.preview
+
+        def patched(self, orders=None, emergency=False):
+            _ib = self.ib; _w = _ib.whatIfOrder
+
+            def f(contract, order):
+                q = float(getattr(order, 'totalQuantity', 0) or 0)
+                if q and abs(q - round(q)) < 1e-9:
+                    order.totalQuantity = q + 0.295
+                return _w(contract, order)
+
+            _ib.whatIfOrder = f
+            try:
+                return orig(self, orders=orders, emergency=emergency)
+            finally:
+                _ib.whatIfOrder = _w
+
+        return orig, patched
+
+    def preview_emergency_bypass():
+        """СОРОК ЧЕТВЁРТЫЙ КРУГ: аварийный признак становится обходом норматива О-3-Е —
+        слово вызывающего заменяет доказательство. Прежде не ловилось ничем: ветка
+        emergency в наборе адаптера не исполнялась ни разу."""
+        orig = B.IBBroker.preview
+
+        def patched(self, orders=None, emergency=False):
+            if emergency:
+                return True
+            return orig(self, orders=orders, emergency=emergency)
+
+        return orig, patched
+
     return [('дробная доля усекается до целого', 'place', truncating_place),
             ('сводка счёта из кэша подписки', '_summary_barrier', summary_from_cache),
             ('цена и комиссия из статуса', '_rec', rec_from_status),
@@ -640,7 +723,13 @@ def _adapter_mutations():
             ('личность фонда без независимого ожидания', 'etf_expectation_bad',
              etf_expect_off),
             ('Cancelled считается неисполнением', 'place', cancel_is_failure),
-            ('TIF заявки предпросмотра не задаётся', 'preview', preview_tif_unset)]
+            ('TIF заявки предпросмотра не задаётся', 'preview', preview_tif_unset),
+            ('предпросмотр разрешает всё, ничего не спрашивая', 'preview', preview_always_ok),
+            ('предпросмотр спрашивает про DAY, а не про форму place()', 'preview',
+             preview_wrong_form),
+            ('заявка предпросмотра не привязана к счёту', 'preview', preview_unpinned),
+            ('дробное количество фьючерса не округляется', 'preview', preview_frac_fut),
+            ('аварийный признак разрешает всё', 'preview', preview_emergency_bypass)]
 
 
 def _intent_mutations():
@@ -824,7 +913,13 @@ def _feed_mutations():
                 import pandas as pd
                 import os as _o
                 from pathlib import Path as _P
-                pp = _P(path) if path else (_P(_o.path.expanduser('~/.addfut')) / 'signals_live.csv')
+                # ТОТ ЖЕ КЛАСС: запасным путём стоял БОЕВОЙ ~/.addfut/signals_live.csv,
+                # то есть исход мутации зависел от живого состояния машины. Берём путь
+                # стенда; нет его — поднимаем исходный отказ, а не читаем чужое.
+                _envp = _o.environ.get('ADDFUT_SIGNALS')
+                pp = _P(path) if path else (_P(_envp) if _envp else None)
+                if pp is None:
+                    raise
                 df = pd.read_csv(pp, parse_dates=[0]).set_index('Unnamed: 0' if False else None)
                 df = pd.read_csv(pp, parse_dates=[0]); df = df.set_index(df.columns[0]).sort_index()
                 last = df.iloc[-1]
@@ -1133,9 +1228,17 @@ def _run_mutations():
         №17): без ADDFUT_DIR — жёсткий ~/.addfut вместо каталога замка."""
         import os as _os
         from pathlib import Path as _P
+        # МОДЕЛИРУЕМ ДЕФЕКТ, НЕ ТРОГАЯ МАШИННОЕ СОСТОЯНИЕ (сорок четвёртый круг, угол «от
+        # семьи»). Смысл мутации — «каталог состояния живёт своей жизнью, а не следует за
+        # каталогом замка», и для этого достаточно ЛЮБОГО постороннего каталога. Прежде
+        # запасным путём стоял expanduser('~/.addfut'), а блок изоляции стенда ADDFUT_DIR
+        # именно УДАЛЯЕТ (не подменяет) — значит под мутацией стенды писали журнал, книгу и
+        # тревоги в ЖИВОЕ состояние счёта. Правило 5 нарушалось механизмом, а не в теории.
+        import tempfile as _tf
+        _alien = _tf.mkdtemp(prefix='addfut-mut-statedir-')
         orig = SS.state_dir
         return (orig,
-                (lambda: _P(_os.environ.get('ADDFUT_DIR', _os.path.expanduser('~/.addfut')))),
+                (lambda: _P(_os.environ.get('ADDFUT_DIR', _alien))),
                 SS, 'state_dir')
 
     def worm_missing_ok():

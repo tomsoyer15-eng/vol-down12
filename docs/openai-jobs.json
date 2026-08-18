@@ -913,5 +913,17 @@
   "request_id": "req_94dc241883b54777aee4b4592280451e",
   "finished": "2026-08-18T07:24:50+00:00",
   "seconds": 1434.2
+ },
+ {
+  "created": "2026-08-18T11:59:41+00:00",
+  "label": "рецензия сорок четвёртого круга",
+  "model": "gpt-5.6-sol",
+  "response_id": "resp_0393305e8ff34a70006a84492c36ac87d2aa950d7e6a773438",
+  "status": "failed",
+  "chars": 1431687,
+  "fingerprint": "da02a083f4c75c97f94979440c6ee9d56673d593e42513b876265fc16891d1ec",
+  "request_id": "req_63d8c9a88f544bb9b3391a1faa6b9498",
+  "finished": "2026-08-18T11:59:46+00:00",
+  "seconds": 5.3
  }
 ]
