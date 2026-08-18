@@ -37,11 +37,28 @@ def signal_dnevnoj(sig_m, kal, sdvig=1):
     return src.reindex(per).set_axis(kal)
 
 
-def kolebaniya(ceny_adj, ceny, okno=K.OKNO_VOL, min_dnej=K.MIN_DNEJ_VOL):
-    """Годовые колебания в долях номинала (ответы 5.3, 1.2)."""
-    r = ceny_adj.diff() / ceny.shift()
-    s = r.rolling(okno, min_periods=min_dnej).std() * np.sqrt(252.0)
-    return r, s
+def kolebaniya(ryady, kal, okno=K.OKNO_VOL, min_dnej=K.MIN_DNEJ_VOL):
+    """Годовые колебания в долях номинала (ответы 5.3, 1.2).
+
+    Считается по СОБСТВЕННЫМ торговым дням рынка, а не по общему календарю
+    портфеля: реиндексация всех 64 рынков на объединённый календарь с ffill
+    (нужная для дневного П/У и сигнала) на дне без торгов конкретного рынка
+    даёт нулевую дневную доходность вместо «дня нет» — это разбавляет
+    дисперсию лишними нулями и занижает σ. Обнаружено 18.08.2026 построчной
+    сверкой с заказчиком: у ES 244 таких дня (3.2% истории) — все американские
+    биржевые праздники, когда CME закрыт, а другой из 64 рынков торгует;
+    занижение σ ровно объясняло разницу 19.08% против верных 19.40% годовых.
+    Итоговый ряд переносится (ffill) на общий календарь — решения принимаются
+    по нему на дату месячного пересчёта, а не по родному календарю рынка.
+    """
+    r_panel = pd.DataFrame(index=kal, columns=list(ryady.keys()), dtype=float)
+    sig = pd.DataFrame(index=kal, columns=list(ryady.keys()), dtype=float)
+    for s_, v in ryady.items():
+        r = v['cena_adj'].diff() / v['cena'].shift()
+        god = r.rolling(okno, min_periods=min_dnej).std() * np.sqrt(252.0)
+        r_panel[s_] = r.reindex(kal)                 # NaN на нерабочих для рынка днях — не нули
+        sig[s_] = god.reindex(kal).ffill()
+    return r_panel, sig
 
 
 def pol_kolebanij(sig_god, procentil=None, min_dnej=None):
@@ -108,7 +125,7 @@ def sobrat(dan=None, nastr=None):
     ceny_adj = _panel(r, kal, 'cena_adj')
     mz = mesyachnye_zakrytiya(r, n['ryad_signala'])            # ответ 4.1 — по unadj
     sig_m = signal_mesyachnyj(mz)
-    rd, sig_god = kolebaniya(ceny_adj, ceny)
+    rd, sig_god = kolebaniya(r, kal)
     p = dict(ceny=ceny, ceny_adj=ceny_adj, mes_zakr=mz, sig_mes=sig_m,
              r_dnevnye=rd, sigma=sig_god, pol=pol_kolebanij(sig_god),
              rho=svyaz_nakopitelno(rd, nastr),
