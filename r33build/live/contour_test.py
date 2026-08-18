@@ -17,7 +17,16 @@ import os as _os_iso
 import tempfile as _tf_iso
 # ИЗОЛЯЦИЯ ОТ МАШИННОГО КАТАЛОГА: самостоятельный запуск писал lock-файл в настоящий
 # ~/.addfut — тот же класс утечки, что затёр живую книгу из selfcheck.
-_os_iso.environ.setdefault('ADDFUT_LOCK_DIR', _tf_iso.mkdtemp(prefix='addfut-ct-'))
+# БЕЗУСЛОВНО, А НЕ setdefault (сорок второй круг, №10). В 41-м круге я сделал изоляцию
+# безусловной в invariants.py и объявил вопрос закрытым — а здесь остался setdefault, то есть
+# унаследованное боевое значение НЕ заменялось. Поскольку state.lock_dir() отдаёт окружению
+# приоритет даже перед явно переданным tmp, сценарии run_session и hold_book_lock брали
+# НАСТОЯЩИЙ ~/.addfut/addfut-book.lock: стенд мог задержать живую сессию до края окна или
+# конкурировать с роллом. Чистое окружение release.py доказывает только выпускной запуск.
+# Это ровно тот класс «исправлена одна точка вызова из семьи», который круг и ищет.
+_os_iso.environ['ADDFUT_LOCK_DIR'] = _tf_iso.mkdtemp(prefix='addfut-ct-')
+for _v_iso in ('ADDFUT_BOOK_PATH', 'ADDFUT_DIR', 'ADDFUT_SIGNALS'):
+    _os_iso.environ.pop(_v_iso, None)
 import daily as DL, journal as J
 from fake_broker import FakeBroker, BrokerError
 

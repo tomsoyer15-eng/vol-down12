@@ -136,6 +136,16 @@ class _Bar(NamedTuple):
     barCount: int
 
 
+class _WhatIf:
+    """Ответ whatIfOrder. Пустая строка — именно то, что отдаёт бумажный шлюз, когда
+    предпросмотр недоступен: адаптер обязан читать это как «отложить», а не как ноль."""
+
+    def __init__(self, init_margin):
+        self.initMarginChange = '' if init_margin is None else f'{float(init_margin):.2f}'
+        self.maintMarginChange = self.initMarginChange
+        self.equityWithLoanChange = ''
+
+
 class _Pos:
     def __init__(self, contract, position, account='DU000001'):
         self.contract = contract; self.position = position; self.account = account
@@ -288,6 +298,9 @@ class StubIB:
             maint = 0.0
         out.append(_Val('EquityWithLoanValue', f'{ewl:.2f}'))
         out.append(_Val('MaintMarginReq', f'{maint:.2f}'))
+        # ДЕЙСТВУЮЩЕЕ НАЧАЛЬНОЕ ТРЕБОВАНИЕ (сороковой круг, №1): без него оценка _cur_req в
+        # preview() не наблюдалась НИ ОДНИМ стендом — сверка «худшая из трёх» проверяла две.
+        out.append(_Val('FullInitMarginReq', f'{maint * 1.4:.2f}'))
         return out
 
     def fills(self): return list(self._fills)
@@ -320,7 +333,12 @@ class StubIB:
             secIdList = [_Tag()] if _Tag.value else []
         return [_Det()]
 
-    AUX = {'SPY': 900010, 'IEF': 900011}     # инструменты сигналов и цены ноги А
+    # ДОХОДНОСТЬ ДОЛЖНА РАЗРЕШАТЬСЯ И БЕЗ ПОДМЕНЫ ib_insync.Index (тридцать восьмой круг,
+    # №7). Прогонные стенды патчат Index своим классом, а SAME_API — нет, и любая проверка,
+    # где gross() трогает ногу Б, молча падала в FeedError «TNX: история пуста» и
+    # пропускалась целиком. Проверка, которую можно бесшумно пропустить, — не проверка.
+    AUX = {'SPY': 900010, 'IEF': 900011, 'TNX': 990001}   # сигналы, цена ноги А, доходность
+    AUX_TYPE = {'TNX': 'IND'}                # TNX — индекс, а не акция
 
     def reqMktData(self, contract, tick_list='', snapshot=True, regulatory=False):
         """Снимок котировки (двадцать второй круг, №20): px_order берётся из момента
@@ -361,7 +379,9 @@ class StubIB:
                 # Запрос по символу (Stock('SPY'...)): стендам нужен тот же путь, что бою.
                 c.conId = self.AUX[c.symbol]
                 self.rows.setdefault(c.conId, dict(
-                    instrument=c.symbol, sec_type='STK', exchange='SMART', currency='USD',
+                    instrument=c.symbol, sec_type=self.AUX_TYPE.get(c.symbol, 'STK'),
+                    exchange=('CBOE' if self.AUX_TYPE.get(c.symbol) == 'IND' else 'SMART'),
+                    currency='USD',
                     con_id=str(c.conId), local_symbol=c.symbol, expiry='', multiplier=''))
             r = self.rows.get(c.conId)
             if r is None:
@@ -415,6 +435,45 @@ class StubIB:
             v = float(c)
             out.append(_Bar(pd.Timestamp(d).date(), v, v, v, v, 0.0, v, 1))
         return out
+
+    # --- предпросмотр маржи ---
+    def whatIfOrder(self, contract, order):
+        """ПРЕДПРОСМОТР ЦЕЛЕВОЙ ЗАЯВКИ (тридцать седьмой круг, №7 и его проверка).
+
+        Стаба этого метода не было, и сверка интерфейса адаптера честно уронила батарею:
+        новый путь preview(orders) был бы недостижим ни одним стендом — ровно тот класс,
+        из-за которого переходный интерфейс вообще появился на разборе (§12, 36-й круг, №6).
+
+        Поведение задаётся полем whatif:
+          'нет'    — пустой ответ (бумажный whatIf днём молчит, §12) -> «отложить»;
+          'тесно'  — маржа заведомо не оставляет запаса О-3-Е;
+          иначе    — начальная маржа 10% от номинала, запас достаточный.
+        """
+        _mode = getattr(self, 'whatif', '')
+        if _mode == 'нет':
+            return _WhatIf(None)
+        # БИРЖЕВАЯ ГРАНИЦА ВОСПРОИЗВОДИТСЯ (тридцать восьмой круг, №5): стаб принимал
+        # дробное количество фьючерса и потому не показывал, что законный переход уходит в
+        # ABORT из-за нецелой what-if заявки. Дробить можно только фонды.
+        _q0 = abs(float(getattr(order, 'totalQuantity', 0) or 0))
+        if getattr(contract, 'secType', '') == 'FUT' and abs(_q0 - round(_q0)) > 1e-9:
+            return _WhatIf(None)
+        # ОТРИЦАТЕЛЬНЫЕ ПРИРАЩЕНИЯ (сорок второй круг, №4). Стаб умел только положительную
+        # маржу, «тесно» и пустой ответ — поэтому аварийный выход Е→Ф, где целевые заявки
+        # маржу ОСВОБОЖДАЮТ, не достигался ни SAME_API, ни мутациями: ветка, ради которой
+        # существует весь путь спасения, не исполнялась никем.
+        if _mode == 'освобождает':
+            _q0n = abs(float(getattr(order, 'totalQuantity', 0) or 0))
+            _pxn = float(getattr(self, 'quote_px', 100.0) or 100.0)
+            return _WhatIf(-_q0n * _pxn * 0.10)
+        if _mode == 'тесно':
+            # запас NLV/маржа = 1,20 — ниже порога О-3-Е 1,40, то есть отказ по существу,
+            # а не по отсутствию ответа: два разных исхода не должны совпадать.
+            return _WhatIf(float(self._nlv) / 1.20)
+        _q = abs(float(getattr(order, 'totalQuantity', 0) or 0))
+        _px = float(getattr(self, 'quote_px', 100.0) or 100.0)
+        _mult = float(getattr(contract, 'multiplier', '') or 1)
+        return _WhatIf(_q * _px * _mult * 0.10)
 
     # --- заявки ---
     def placeOrder(self, contract, order):

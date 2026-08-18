@@ -151,13 +151,31 @@ def etf_expectation_bad(name, c, row):
     row_isin = str((row or {}).get('isin') or '')
     if want_isin and row_isin and row_isin != want_isin:
         bad.append(f'{name}: ISIN реестра {row_isin} не совпадает с пинованным {want_isin}')
-    _prim = str(getattr(c, 'primaryExchange', '') or '')
-    if exp.get('primary') and _prim and _prim != exp['primary']:
-        bad.append(f'{name}: листинговая линия {_prim} не совпадает с пинованной '
-                   f'{exp["primary"]}')
-    _cur = str(getattr(c, 'currency', '') or '')
-    if exp.get('currency') and _cur and _cur != exp['currency']:
-        bad.append(f'{name}: валюта {_cur} не совпадает с пинованной {exp["currency"]}')
+    # ПИН ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ, А НЕ ОТСУТСТВИЯ ПРОТИВОРЕЧИЯ (сорок первый круг, №5).
+    # Прежде каждая ветка требовала НЕПУСТОГО и противоречащего значения: пустой ответ
+    # проходил как согласие. При строке реестра без primary_exchange и квалифицированном
+    # контракте без primaryExchange другая листинговая линия ТОГО ЖЕ фонда проходила
+    # identity_bad целиком — ISIN линию не различает, localSymbol может совпасть, а SMART
+    # затем маршрутизирует на площадку с другими часами: GTC уходит в чужую сессию.
+    # Это тот же класс fail-open, что «нет доказательства = разрешение» в route.txt (§7):
+    # молчание источника обязано читаться как НЕизвестность, а не как подтверждение.
+    _prim = str(getattr(c, 'primaryExchange', '') or '') or str((row or {}).get('primary_exchange') or '')
+    if exp.get('primary'):
+        if not _prim:
+            bad.append(f'{name}: листинговая линия НЕ ПОДТВЕРЖДЕНА (ни биржа, ни реестр её '
+                       f'не назвали) — пин {exp["primary"]} недоказуем, торговля запрещена')
+        elif _prim != exp['primary']:
+            bad.append(f'{name}: листинговая линия {_prim} не совпадает с пинованной '
+                       f'{exp["primary"]}')
+    _cur = str(getattr(c, 'currency', '') or '') or str((row or {}).get('currency') or '')
+    if exp.get('currency'):
+        if not _cur:
+            bad.append(f'{name}: валюта НЕ ПОДТВЕРЖДЕНА — пин {exp["currency"]} недоказуем')
+        elif _cur != exp['currency']:
+            bad.append(f'{name}: валюта {_cur} не совпадает с пинованной {exp["currency"]}')
+    if want_isin and not row_isin:
+        bad.append(f'{name}: ISIN в реестре ПУСТ — пин {want_isin} недоказуем, а ISIN и есть '
+                   f'единственное независимое имя фонда')
     return bad
 
 

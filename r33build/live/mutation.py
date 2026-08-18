@@ -524,9 +524,17 @@ def _adapter_mutations():
         """ТРИДЦАТЬ ТРЕТИЙ КРУГ, №4: личность фонда снова доказывается строкой реестра —
         независимое пинованное ожидание не спрашивается, и согласованная подмена
         листинговой линии проходит на границе заявки."""
+        # МУТАЦИЯ ВОСПРОИЗВОДИТ ПРЕЖНИЙ ДЕФЕКТ, А НЕ СНОСИТ ЗАЩИТУ ЦЕЛИКОМ (тридцать пятый
+        # круг, №11): регрессия, которой надо бояться, — ранний выход по классу из строки
+        # реестра. Полное удаление ловилось другими случаями и эту строку не доказывало.
         import contracts as CTe
         orig = CTe.etf_expectation_bad
-        return orig, (lambda name, c, row: []), CTe
+
+        def patched(name, c, row):
+            if (row or {}).get('sec_type') != 'STK':
+                return []                       # прежний ранний выход
+            return orig(name, c, row)
+        return orig, patched, CTe
 
     def wild_maint_ok():
         """ТРИДЦАТЬ ТРЕТИЙ КРУГ, №13: проверяется снова только NaN — inf даёт cushion 0,
@@ -867,15 +875,17 @@ def _run_mutations():
     import daily as DLm
 
     def o3e_cut_silent():
-        """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №2: признак состоявшегося среза снова игнорируется —
-        тревога зависит только от повторного замера, а он после удачного среза ВЫШЕ порога.
-        Аварийное сокращение проходит молча, причина не разбирается."""
-        orig = SS.post_o3e_alarm
-        def patched(cushion, book_after, cut=None):
-            if cushion is None:
-                return bool(getattr(book_after, 'n_eq', 0) or getattr(book_after, 'n_bd', 0))
-            return cushion < DLm.O3E_MIN
-        return orig, patched, SS, 'post_o3e_alarm'
+        """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №2 + ТРИДЦАТЬ ПЯТЫЙ, №3: тревога перестаёт быть
+        долговечной ДО состояния — колбэк не передаётся, и файл создаёт только внешний путь
+        уже ПОСЛЕ сохранения книги и записи итога §7. Прежняя редакция мутации патчила
+        session.post_o3e_alarm и потому не менялa НИЧЕГО наблюдаемого: внешний код всё
+        равно создавал файл к концу прогона, и мутация честно осталась НЕ ПОЙМАНОЙ."""
+        orig = DLm.run_session
+
+        def patched(*a, **k):
+            k.pop('o3e_alarm_fn', None)          # колбэк не доходит до сессии
+            return orig(*a, **k)
+        return orig, patched, DLm, 'run_session'
 
     def o3e_pre_cut_silent():
         """ТРИДЦАТЬ ВТОРОЙ КРУГ, №2: предторговый срез step_e снова не выставляет признак
@@ -886,6 +896,42 @@ def _run_mutations():
             d.o3e_cut = None
             return d
         return orig, patched, DLm, 'step_e'
+
+    def pair_margin_off():
+        """ТРИДЦАТЬ ШЕСТОЙ КРУГ, №12: запас времени перед ПЕРВОЙ ногой среза снят — первая
+        продажа может исполниться у самого края окна, а вторая уже упрётся в WindowClosed
+        (непарная дельта порядка половины NLV). Мутация бьёт в сами ворота."""
+        orig = DLm._window_gate
+        return orig, (lambda deadline, what='', margin_min=False:
+                      orig(deadline, what=what, margin_min=False)), DLm, '_window_gate'
+
+    def decision_stale_after_cut():
+        """ТРИДЦАТЬ ШЕСТОЙ КРУГ, №12: Decision после среза снова описывает ДОсрезную книгу —
+        §7 получает старое плечо, заём считается по уже проданной позиции, а операторский
+        лог скрывает крупнейшие исполнения дня.
+
+        МУТИРУЕТСЯ ВЕСЬ ОБЪЯВЛЕННЫЙ НАБОР (тридцать седьмой круг, №18). Прежде подменялась
+        одна лишь exposure, а утверждение сверяло её ТОЖДЕСТВОМ и потому не наблюдало
+        ничего; про daily_costs и cushion парной мутации не было вовсе, хотя именно они
+        объявлены исправленными."""
+        orig = DLm.run_session
+
+        def patched(*a, **k):
+            dec, orders, diff = orig(*a, **k)
+            _cut = getattr(dec, 'o3e_cut', None)
+            if _cut:
+                _c0, n0e, n0b, _ne, _nb = _cut
+                _pe = getattr(a[1], 'px_eq_prev', 0.0) if len(a) > 1 else 0.0
+                _pb = getattr(a[1], 'px_bd_prev', 0.0) if len(a) > 1 else 0.0
+                dec.exposure = {'А': n0e * _pe, 'Б': n0b * _pb}   # книга ДО среза
+                _P0 = n0e * _pe + n0b * _pb
+                _cap = float(getattr(dec, 'capital_after_costs', 0.0) or 0.0)
+                if getattr(dec, 'daily_costs', None):
+                    dec.daily_costs = DLm.costs_e(_P0, _cap, n0e, _pe)   # расходы ДО среза
+                if _c0 is not None:
+                    dec.cushion = float(_c0)                             # запас ДО среза
+            return dec, orders, diff
+        return orig, patched, DLm, 'run_session'
 
     def o3e_delayed_lost():
         """ТРИДЦАТЬ ЧЕТВЁРТЫЙ КРУГ, №13: строки среза пишутся, но признак ЗАДЕРЖАННОГО
@@ -993,16 +1039,46 @@ def _run_mutations():
 
     def post_o3e_swallow_none():
         """Пост-трейд None глотается (как было до девятнадцатого круга, №10): тревога
-        только при известно-низком запасе, неизвестный принимается молча."""
+        только при известно-низком запасе, неизвестный принимается молча.
+
+        МУТАЦИЯ ПЕРЕНАЦЕЛЕНА (тридцать седьмой круг, разбор непойманных). Она била в
+        SS.post_o3e_alarm — ВНЕШНЮЮ функцию, а сама защита с 33-35 кругов переехала ВНУТРЬ
+        сессии (o3e_alarm_fn пишет файл ДО сохранения состояния, а внешняя ветка при уже
+        написанном файле выходит рано). Подмена внешнего условия перестала что-либо менять,
+        и полный прогон честно показал «НЕ ПОЙМАНА»: защита была наблюдаема не там, где
+        живёт. Бьём в обе точки сразу — иначе мутация снова окажется пустой."""
         import daily as DLm
-        orig = SS.post_o3e_alarm
-        return orig, (lambda pc, ba, cut=None: pc is not None and pc < DLm.O3E_MIN), SS, 'post_o3e_alarm'
+        orig = SS._alarm_o3e
+        _ext = SS.post_o3e_alarm
+
+        def _patched(day, reason, src, done=True):
+            if 'НЕИЗВЕСТЕН' in str(reason) or 'неизвест' in str(reason).lower():
+                return                                   # неизвестный запас глотается
+            return orig(day, reason, src, done)
+
+        SS.post_o3e_alarm = (lambda pc, ba, cut=None:
+                             pc is not None and pc < DLm.O3E_MIN)
+
+        def _restore(_o=orig, _e=_ext):
+            SS.post_o3e_alarm = _e
+            return _o
+        return _restore(), _patched, SS, '_alarm_o3e'
 
     def post_o3e_removed():
         """Пост-трейд проверка О-3-Е удалена целиком (как было до восемнадцатого круга,
-        №1): запас после исполнений не смотрит никто."""
-        orig = SS.post_o3e_alarm
-        return orig, (lambda pc, ba, cut=None: False), SS, 'post_o3e_alarm'
+        №1): запас после исполнений не смотрит никто. Перенацелена вместе с предыдущей:
+        внешняя функция больше не единственная точка решения."""
+        orig = SS._alarm_o3e
+        _ext = SS.post_o3e_alarm
+        SS.post_o3e_alarm = (lambda pc, ba, cut=None: False)
+
+        def _noop(day, reason, src, done=True):
+            return
+
+        def _restore(_o=orig, _e=_ext):
+            SS.post_o3e_alarm = _e
+            return _o
+        return _restore(), _noop, SS, '_alarm_o3e'
 
     def dry_writes_journal():
         """Наблюдение пишет строки §7 без итоговой (как было до девятнадцатого круга,
@@ -1113,6 +1189,8 @@ def _run_mutations():
             ('состоявшийся срез не поднимает тревогу', o3e_cut_silent),
             ('предторговый срез не оставляет следа', o3e_pre_cut_silent),
             ('исполнения среза не идут в журнал §7', o3e_journal_off),
+            ('запас времени на пару ног не требуется', pair_margin_off),
+            ('Decision после среза описывает досрезную книгу', decision_stale_after_cut),
             ('признак задержанного ориентира среза теряется', o3e_delayed_lost),
             ('наблюдение пишет строки §7', dry_writes_journal),
             ('каталог тревог живёт своей жизнью', statedir_own_home),
@@ -1355,6 +1433,28 @@ def _transition_mutations():
             return orig()
         return orig, patched, _Tg, '_live_margins'
 
+    def attempt_trace_off():
+        """ТРИДЦАТЬ ШЕСТОЙ КРУГ, №12: отметка о ПОПЫТКЕ подачи не пишется, и потерянное
+        подтверждение снова выглядит доказанным чистым ABORT (дефект 35-го круга, №1).
+        Мутация бьёт в саму запись, а не в соседние признаки."""
+        import transition as _Ta
+        orig = _Ta._run_lots
+
+        def patched(broker, plan, st, state_path, *a, **k):
+            class _NoAttempt(dict):
+                def __setitem__(self, key, value):
+                    if key == 'attempted':
+                        return
+                    dict.__setitem__(self, key, value)
+            _st2 = _NoAttempt(st)
+            try:
+                return orig(broker, plan, _st2, state_path, *a, **k)
+            finally:
+                for _k, _v in _st2.items():
+                    if _k != 'attempted':
+                        st[_k] = _v
+        return orig, patched, _Ta, '_run_lots'
+
     def mr_digest_off():
         """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №13: содержимое нормативного журнала МР снова не
         заверяется — пин сторожит только личность файла, и валидная правка «на месте»
@@ -1382,6 +1482,7 @@ def _transition_mutations():
             ('тревога перехода не пишется', alarm_silent),
             ('завершённые лоты исполняются повторно', replay_done),
             ('содержимое журнала МР не заверяется', mr_digest_off),
+            ('след попытки подачи не пишется', attempt_trace_off),
             ('карта поколения сверяется только по своим ключам', gen_map_subset)]
 
 
@@ -1786,10 +1887,20 @@ def _j7_mutations():
             rows = orig(dec, nav, orders, fills, delayed_out=delayed_out)
             out = []
             for r in rows:
+                # МУТАЦИЯ ОБЯЗАНА МУТИРОВАТЬ (тридцать пятый круг, №10): условие
+                # abs(int(float(qty))) == 1 ложно для дробной строки qty=-0.5 (int даёт 0),
+                # то есть прежняя «парная мутация» не меняла выход ВООБЩЕ и доказывала
+                # только саму себя. Воспроизводим ИМЕННО прежний дефект: дробная ролловая
+                # доля округляется вниз до целых лотов, остаток уходит в обычные сделки.
+                _q = float(r['qty'])
                 if (str(r.get('note', '')).startswith('ролл')
-                        and abs(int(float(r['qty']))) == 1
-                        and str(r['instrument']).startswith('ES')):
-                    r = dict(r, note='')          # доля меньше ES снова теряет пометку
+                        and str(r['instrument']).startswith('ES')
+                        and abs(_q) != int(abs(_q))):
+                    _whole = int(abs(_q)) * (1 if _q > 0 else -1)
+                    if _whole:
+                        out.append(dict(r, qty=_whole))
+                    out.append(dict(r, qty=_q - _whole, note=''))
+                    continue
                 out.append(r)
             return out
         return orig, patched, 'rows_from_decision'
@@ -2073,8 +2184,12 @@ def run_pack_mutations():
     def excess_counts_roll():
         """ДВАДЦАТЬ ДЕВЯТЫЙ КРУГ, №6: избыток перекладки снова меряется ВМЕСТЕ со сменой
         серии — на каждом ролле ложная тревога о недосписанных деньгах и ложный срез капа."""
+        # СИГНАТУРА СОВПАДАЕТ С ВЫЗОВОМ (сороковой круг, №2). Мутации принимали ТРИ
+        # аргумента, а step() зовёт repack_excess с четвёртым (roll_a): подмена падала
+        # TypeError, и мутация «ловилась» поломкой вызова, а не проверкой смысла капа.
+        # Мутация, ловимая падением, ничего не доказывает о защите.
         orig = DLm.repack_excess
-        def patched(before, after, unit_is_mes):
+        def patched(before, after, unit_is_mes, roll_a=False):
             phys = DLm.orders_from_books(before, after)          # БЕЗ приведения к общей серии
             g_all = DLm.repack_grid(phys, unit_is_mes) if phys else 0
             net_g = abs(after.n_e - before.n_e) * (1 if unit_is_mes else 10)
@@ -2085,7 +2200,7 @@ def run_pack_mutations():
         """ДВАДЦАТЬ ДЕВЯТЫЙ КРУГ, №6: избыток объявлен нулевым — ворота капа снова считают
         по завышенному капиталу, и книга проходит 2,00 с уже известными издержками."""
         orig = DLm.repack_excess
-        return orig, (lambda before, after, unit_is_mes: (0, 0, 0)), 'repack_excess'
+        return orig, (lambda before, after, unit_is_mes, roll_a=False: (0, 0, 0)), 'repack_excess'
 
     def cut_cost_by_count():
         """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №4: издержки среза снова считаются по ЧИСЛУ срезанных

@@ -464,10 +464,16 @@ def _seed_books_from(netpos):
 # --- Исполнитель v6.1: журнал пишет сам, хук устранён ---
 class _B:
     def __init__(s, preview=True, timeout=False, frac=False, netpos=None, cancelnone=False, oo=None,
-                 nlv=1e6):
+                 nlv=1e6, seed=True):
         s.p = preview; s.t = timeout; s.f = frac; s.np = netpos or {}; s.nlv = nlv
         s.cn = cancelnone; s.oo = oo or []; s.n = 0; s.calls = []; s.u = 0.0; s.maxu = 0.0
-        _seed_books_from(s.np)      # книги обоих маршрутов согласованы со стабом (№4)
+        # seed=False — ЧЕСТНЫЙ RESUME (тридцать восьмой круг, №1). Пересев книг из позиций
+        # САМОГО брокера делает в фикстуре то, чего в бою не бывает: книга на диске начинает
+        # совпадать с промежуточным счётом. Именно это скрывало, что предполёт безусловно
+        # сверял книгу с брокером и потому отвергал resume частично исполненного перехода
+        # ДО кода восстановления. Для сценария продолжения книга обязана остаться ИСХОДНОЙ.
+        if seed:
+            _seed_books_from(s.np)  # книги обоих маршрутов согласованы со стабом (№4)
         # ЛИЧНОСТЬ СЧЁТА (тридцатый круг, №6): брокер обязан её сообщать, иначе
         # позиции могут относиться к чужому счёту. Стенды пинуют DUTEST01.
         s.account = __import__('os').environ.get('ADDFUT_ACCOUNT') or 'DUTEST01'
@@ -489,7 +495,7 @@ class _B:
     # unit_ref ОБЯЗАТЕЛЕН (двадцать девятый круг, №3): цены плана сверяются с рынком.
     def unit_ref(s, i, cls):
         p = s._px(i); return (p * 0.5, p * 2.0)
-    def preview(s): return s.p
+    def preview(s, orders=None, emergency=False): return s.p
     def sell_units(s, i, u):
         s.n += 1; f = (u - 0.5 if s.f and u > 0 else u)
         s.calls.append(('sell', i, u)); s.np[i] = s.np.get(i, 0) - int(f)
@@ -503,7 +509,7 @@ class _B:
     def open_orders(s): return list(s.oo)
     def net_positions(s): return dict(s.np)
     def minutes_since(s, k): return 99 if s.t else 0
-    def gross(s): return 1.99
+    def gross(s, d_fix=None): return 1.99
 SP = _JP('sc_tr.json'); JX = _JP('sc_jx.csv'); SX = _JP('sc_sx.csv')
 def _cl():
     for f in (SP, JX, SX):
@@ -654,6 +660,27 @@ b2 = _B(netpos={'MES': 4, 'CSPX': 0}, cancelnone=True, oo=['oX']); inc = False
 try: T.execute(b2, SP, 1e6, L4, signal_id='s1', resume=True, **KW)
 except T.Incident: inc = True
 chk('Исполнитель: cancel_order=None на resume = инцидент до новых заявок', inc and len(b2.calls) == 0)
+# ТРИДЦАТЬ СЕДЬМОЙ КРУГ, №13: отказ кэша состояния ПОСЛЕ долговечной записи TRANSITION_OPEN
+# уходил обычным исключением, и исполнитель считал это ЧИСТЫМ отказом открытия: снимал обе
+# метки handover-inflight, не писал ни ALARM, ни ABORT. Журнал держал OPEN, а единственный
+# файловый барьер ежедневного контура был удалён — автопилот торговал бы поверх открытого
+# перехода. Событие в журнале обязано быть закрыто нормативно, а метки не сняты молча.
+_cl(); _sig('E', grant=98565.0)
+_wsc_orig = M.write_state_cache
+def _wsc_fail(*a, **k):
+    raise RuntimeError('кэш состояния недоступен')
+M.write_state_cache = _wsc_fail
+_b13 = _B(netpos={'ZN': 1, 'CBU0': 0}); _inc13 = ''
+try:
+    T.execute(_b13, SP, 1e6, L1, signal_id='s1', **KW)
+except BaseException as _ex13:
+    _inc13 = str(_ex13)
+finally:
+    M.write_state_cache = _wsc_orig
+_st13 = M.derive_state(JX, date(2026, 8, 11))
+chk('Исполнитель: отказ кэша ПОСЛЕ OPEN закрывает переход нормативно, а не молча (37-й, №13)',
+    ('кэш' in _inc13) and not _st13[5] and len(_b13.calls) == 0)
+
 # --- Девятнадцатый круг: №11, №12, №14; долг пар восемнадцатого: №3 ---
 _cl(); _sig('E', grant=98565.0)
 _bLive = _B(netpos={'ZN': 1, 'CBU0': 0}, oo=['осиротевшая']); inc = False
@@ -668,7 +695,7 @@ M.append_event(JX, '2026-08-10', 'TRANSITION_OPEN', 'E|s1|' + _tid6)
 _sp(asof='2026-08-10', tid=_tid6, postponed=0, done=[], executed_usd=1.0, order_ids=[],
                snapshot={'ZN': 1, 'CBU0': 0}, log=[], opened=True)
 class _BPrevRaise(_B):
-    def preview(s): raise RuntimeError('margin preview оборван связью')
+    def preview(s, orders=None, emergency=False): raise RuntimeError('margin preview оборван связью')
 inc = False
 try: T.execute(_BPrevRaise(netpos={'ZN': 1, 'CBU0': 0}, oo=['oY']), SP, 1e6, L1,
                signal_id='s1', resume=True, **KW)
@@ -695,10 +722,41 @@ L5 = {'BOND': dict(src=[('ZN', 2, 98560.0)], dst=('CBU0', 5.0, 'ETF'))}
 _plan = T.plan_lots(L5, 1e6)
 _sp(asof='2026-08-10', tid=T.transition_id('s1', 'F', 'E', 1e6, _plan), postponed=0, done=[], executed_usd=1.0,
                order_ids=[], snapshot={'ZN': 2, 'CBU0': 0}, log=[], opened=True)
-b3 = _B(netpos={'ZN': 1, 'CBU0': 0}, preview=False)
+# RESUME БЕЗ ФАЙЛА ПРОГРЕССА — О-5, А НЕ СТАРТ С НУЛЯ (тридцать девятый круг, №1).
+# Прежде отсутствие state_path молча давало СВЕЖЕЕ состояние со snapshot уже промежуточных
+# позиций: продолжение видело нулевой прогресс и исполняло план ЗАНОВО, вплоть до short
+# источника, а финальная сверка считала дельту от того же ложного snapshot.
+_cl(); _sig('E', grant=98565.0)
+_seed_books_from({'ZN': 2, 'CBU0': 0})
+try: os.unlink(SP)
+except FileNotFoundError: pass
+_inc_np = ''
+try:
+    T.execute(_B(netpos={'ZN': 1, 'CBU0': 0}, seed=False), SP, 1e6, L5,
+              signal_id='s1', resume=True, **KW)
+except T.Incident as _ex: _inc_np = str(_ex)
+chk('Исполнитель: resume без файла прогресса = О-5, план НЕ исполняется заново (39-й, №1)',
+    'файла прогресса нет' in _inc_np)
+# СОСТОЯНИЕ ВОССТАНАВЛИВАЕТСЯ: следующие стенды resume опираются на него, а этот его удалил.
+# Без восстановления они молча начали бы проверять НЕ СВОЙ отказ — ровно тот класс, который
+# круг и ищет (стенд проверяет не то, что заявляет).
+_sp(asof='2026-08-10', tid=T.transition_id('s1', 'F', 'E', 1e6, _plan), postponed=0, done=[],
+    executed_usd=1.0, order_ids=[], snapshot={'ZN': 2, 'CBU0': 0}, log=[], opened=True)
+
+# КНИГА ОСТАЁТСЯ ИСХОДНОЙ, СЧЁТ — ПРОМЕЖУТОЧНЫЙ (тридцать восьмой круг, №1). План требует
+# продать 2 ZN, один лот уже исполнен: у брокера ZN=1, а книга Ф по-прежнему несёт 2. Это
+# ШТАТНОЕ состояние прерванного перехода, и именно в нём resume обязан работать. Прежде
+# фикстура пересевала книгу из позиций САМОГО брокера, книга становилась ZN=1, и
+# безусловная сверка предполёта проходила тривиально — дефект «resume недостижим» не был
+# наблюдаем ничем. seed=False убирает эту подпорку.
+_seed_books_from({'ZN': 2, 'CBU0': 0})
+b3 = _B(netpos={'ZN': 1, 'CBU0': 0}, preview=False, seed=False)
 r3 = T.execute(b3, SP, 1e6, L5, signal_id='s1', resume=True, **KW)
 chk('Исполнитель: margin preview РАНЬШЕ восстановительных ордеров', r3['status'] == 'POSTPONED' and len(b3.calls) == 0)
-r3b = T.execute(_B(netpos={'ZN': 1, 'CBU0': 0}), SP, 1e6, L5, signal_id='s1', resume=True, **KW)
+chk('Исполнитель: resume частично исполненного перехода ДОСТИЖИМ (38-й, №1)',
+    r3.get('status') == 'POSTPONED')
+_seed_books_from({'ZN': 2, 'CBU0': 0})
+r3b = T.execute(_B(netpos={'ZN': 1, 'CBU0': 0}, seed=False), SP, 1e6, L5, signal_id='s1', resume=True, **KW)
 chk('Исполнитель: восстановление после preview завершается', r3b['status'] == 'COMPLETE')
 # ПАРА К ИСПРАВЛЕННЫМ ФИКСТУРАМ (тридцать первый круг, №16): выше resume прошёл на
 # ДЕЙСТВИТЕЛЬНОМ состоянии — теперь то же состояние с подделанным прогрессом обязано
@@ -725,16 +783,55 @@ chk('Исполнитель: состояние перехода БЕЗ digest �
 # (иначе смерть в зазоре оставляет TRANSITION_OPEN без барьера, который читает дневной
 # контур), но ЧИСТЫЙ отказ обязан убирать их за собой — ни одной заявки не подано.
 _cl(); _sig('E', grant=98565.0)
+# ЧУЖОЙ ОТКРЫТЫЙ ПЕРЕХОД — НЕ «ЧИСТЫЙ ОТКАЗ» (тридцать девятый круг, №7). Этот стенд
+# подсовывал в журнал TRANSITION_OPEN с ЧУЖИМ tid и требовал, чтобы метки НЕ остались, —
+# то есть закреплял как норму снятие ЧУЖИХ барьеров при живом открытом переходе. Старый
+# OPEN не доказывает отсутствие прошлых заявок: это О-5. Проверяем два разных случая.
+_cl(); _sig('E', grant=98565.0)
 M.append_event(JX, '2026-08-10', 'TRANSITION_OPEN', 'E|s1|ЧУЖОЙ-tid')
 import state as _STho
 _hodir = _STho.lock_dir()
-_hobefore = sorted(x.name for x in _hodir.glob('handover-inflight-*.txt'))
+_hoalien = _hodir / 'handover-inflight-E.txt'
+_hoalien.write_text('чужая метка незавершённого перехода\n', encoding='utf-8')
 _bho = _B(netpos={'ZN': 1, 'CBU0': 0}); inc = False
 try: T.execute(_bho, SP, 1e6, L1, signal_id='s1', **KW)
-except T.Incident as _ex: inc = 'отклонил открытие' in str(_ex)
+except T.Incident as _ex: inc = 'открыт ДРУГОЙ переход' in str(_ex)
+chk('Исполнитель: ЧУЖОЙ открытый переход = О-5 до первой заявки, чужие метки целы (39-й, №7)',
+    inc and len(_bho.calls) == 0 and _hoalien.exists())
+try: _hoalien.unlink()
+except FileNotFoundError: pass
+
+# А вот СВОЙ отказ открытия (журнал не даёт разрешения, чужого OPEN нет) обязан убирать
+# метки за собой — иначе оставленный барьер запер бы торговлю и замыкание навсегда.
+# ЗОНД ОБЯЗАН ДОХОДИТЬ ДО ПРОВЕРЯЕМОЙ ВЕТКИ (сороковой круг, №6). Здесь стоял _sig('F'):
+# та фикстура сперва ЗАВЕРШАЕТ переход в Е, из-за чего действующий маршрут журнала
+# становится E, и execute(from_route='F') падал раньше — «from_route=F не совпадает с
+# маршрутом журнала E». Ни _mark_handover, ни hook('open'), ни _drop_handover не
+# исполнялись: утверждение проверяло, что уже отсутствующие метки остались отсутствующими.
+# Ровно недостижимый зелёный зонд — тот самый класс, который я ищу у себя вторым проходом.
+# Берём маршрут E и сигнал в E, но БЕЗ одобрения заказчика: hook('open') откажет по
+# существу, дойдя до самой ветки.
+# ДОХОДИМ ДО САМОЙ ВЕТКИ, А НЕ ДО СОСЕДНЕЙ (сороковой круг, №6, вторая попытка).
+# approve=False останавливает исполнение ещё на проверке OWNER_APPROVE — выше меток; зонд
+# достижимости показал `_drop_handover вызван 0 раз`, то есть стенд снова подтверждал, что
+# НЕсозданные метки остались несозданными. Проверяемая ветка — «журнал ОТВЕРГ открытие уже
+# после того, как метки поставлены», поэтому отказ моделируется там, где он и происходит:
+# в confirm_transition(kind='open'). Подмена названа вслух и снимается сразу.
+_cl(); _sig('E', grant=98565.0)
+_hobefore = sorted(x.name for x in _hodir.glob('handover-inflight-*.txt'))
+_bho2 = _B(netpos={'ZN': 1, 'CBU0': 0}); inc2 = False
+_ct_orig = M.confirm_transition
+def _ct_deny_open(journal, state_path, asof, target, kind='complete', tid='', sid=''):
+    if kind == 'open':
+        return False
+    return _ct_orig(journal, state_path, asof, target, kind=kind, tid=tid, sid=sid)
+M.confirm_transition = _ct_deny_open
+try: T.execute(_bho2, SP, 1e6, L1, signal_id='s1', **KW)
+except T.Incident as _ex: inc2 = 'отклонил открытие' in str(_ex)
+finally: M.confirm_transition = _ct_orig
 _hoafter = sorted(x.name for x in _hodir.glob('handover-inflight-*.txt'))
-chk('Исполнитель: чистый отказ OPEN не оставляет меток незавершённой передачи',
-    inc and len(_bho.calls) == 0 and _hoafter == _hobefore)
+chk('Исполнитель: СВОЙ чистый отказ открытия не оставляет меток незавершённой передачи',
+    inc2 and len(_bho2.calls) == 0 and _hoafter == _hobefore)
 # ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №13: пин журнала МР защищал ПУТЬ и ЛИЧНОСТЬ файла, но не
 # СОДЕРЖИМОЕ. open(path,'w') сохраняет inode, и синтаксически правильная дописанная строка
 # OWNER_APPROVE разрешала полный переход маршрута — одной валидной правкой CSV. Обширные

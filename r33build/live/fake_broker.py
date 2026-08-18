@@ -91,3 +91,50 @@ class FakeBroker:
 
     def net_liquidation(self):
         return self.nlv
+
+    # --- переходный интерфейс (тридцать седьмой круг, №16) ---
+    # Макет его НЕ НЁС ВОВСЕ, поэтому SAME_API мог сверять переход только присутствием
+    # метода и числом аргументов у живого адаптера — то есть не видел ни одного из дефектов
+    # №2-7 этого круга (класс 'STK' против 'ETF', середина полосы вместо цены, усечение
+    # дробей, часы пары, предпросмотр без плана). Сверка поведения требует ВТОРОЙ
+    # реализации: без неё сравнивать не с чем.
+
+    def sell_units(self, instrument, units):
+        rec = self.place(instrument, -abs(float(units)),
+                         self.prices.get(instrument))
+        return rec.get('order_id'), -float(rec.get('filled') or 0.0)
+
+    def buy_units(self, instrument, units):
+        rec = self.place(instrument, abs(float(units)), self.prices.get(instrument))
+        return rec.get('order_id'), float(rec.get('filled') or 0.0)
+
+    def mark_pair(self, key):
+        self._since = getattr(self, '_since', {})
+        self._since.setdefault(str(key), 0.0)
+        return True
+
+    def minutes_since(self, key):
+        _m = getattr(self, '_since', None)
+        if _m is None or str(key) not in _m:
+            raise BrokerError(f'часы пары {key} не пущены (mark_pair)')
+        return float(self.pair_minutes) if hasattr(self, 'pair_minutes') else 0.0
+
+    def unit_ref(self, instrument, cls, at_close=False):
+        px = self.prices.get(instrument)
+        if px is None:
+            return None
+        return (float(px) * 0.97, float(px) * 1.03)
+
+    def gross(self, d_fix=None):
+        exp = 0.0
+        for i, q in self._pos.items():
+            if not q:
+                continue
+            b = self.unit_ref(i, '')
+            if not b:
+                raise BrokerError(f'{i}: долларовая единица неизвестна')
+            exp += abs(float(q)) * (b[0] + b[1]) / 2.0
+        return exp / self.nlv
+
+    def preview(self, orders=None, emergency=False):
+        return bool(getattr(self, 'preview_ok', True))
