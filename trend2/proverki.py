@@ -55,6 +55,8 @@ god = pd.DataFrame(dict(vse=ekv['izderzhki'], bez=e_b['izderzhki'],
                         kapital=ekv['kapital'])).groupby(kal.year).agg(
     dict(vse='sum', bez='sum', kapital='mean'))
 god['rolly'] = god['vse'] - god['bez']
-god['rolly_pct'] = (god['rolly'] / god['kapital'] * 100).round(3)
+god['rolly_pct_scheta'] = (god['rolly'] / god['kapital'] * 100)
 print('E. издержки по годам (первые и последние три):')
-print(pd.concat([god.head(3), god.tail(3)]).round(0).to_string())
+print(pd.concat([god.head(3), god.tail(3)]).to_string(
+    formatters={'vse': '{:,.0f}'.format, 'bez': '{:,.0f}'.format, 'rolly': '{:,.0f}'.format,
+                'kapital': '{:,.0f}'.format, 'rolly_pct_scheta': '{:.3f}%'.format}))

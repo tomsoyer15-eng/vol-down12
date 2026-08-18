@@ -52,22 +52,14 @@ def ryady():
         meta[sym] = dict(pv=sp.loc[sym, 'point_value'], val=sp.loc[sym, 'currency'],
                          birzha=sp.loc[sym, 'exchange_name'], shag=sp.loc[sym, 'tick_size'],
                          marzha=sp.loc[sym, 'margin'], istochnik='norgate_csv')
-    # ES и ZN — из данных проекта (в выгрузках 2/3/4 их нет)
-    o = _es_zn()
-    pv_ez = {'ES': 50.0, 'ZN': 1000.0}
-    for sym in ('ES', 'ZN'):
-        c = o['continuous'][sym]
-        df = pd.DataFrame({'cena': c['raw']['Close'], 'cena_adj': c['adj']['Close'],
-                           'post_mes': np.nan, 'oborot': c['raw']['Volume']})
-        out[sym] = df.dropna(subset=['cena', 'cena_adj'])
-        meta[sym] = dict(pv=pv_ez[sym], val='USD', birzha='CME' if sym == 'ES' else 'CBOT',
-                         shag=0.25 if sym == 'ES' else 1 / 64, marzha=np.nan,
-                         istochnik='pkl_proekta')
+    # ES и ZN: в выгрузке №1 они есть как обычные склейки с колонкой поставочного
+    # месяца. Ряды из pkl проекта не используются — они лежат на объединённом
+    # календаре с протяжкой (у ES 10 560 строк против 7 279 настоящих торговых дней).
     return out, pd.DataFrame(meta).T
 
 
 def poslednie_torgi():
-    """Последняя дата торгов по каждому контракту — там, где есть поконтрактные файлы."""
+    """Последняя дата торгов по контрактам ES, ZN и GC — для проверки правила §21."""
     o = _es_zn()
     res = {}
     for sym, d in o['contracts'].items():

@@ -21,7 +21,9 @@ def prosadka(x):
 
 def denezhnyj_schet(stavka, index, baza=360):
     """Капитал, пролежавший всё окно в трёхмесячных векселях."""
-    s = stavka.reindex(index).ffill()
+    # ставка берётся на предыдущий день — так же, как её начисляет движок,
+    # иначе зонд достижимости D в proverki.py разойдётся на своём же сдвиге
+    s = stavka.reindex(index).ffill().shift().fillna(0.0)
     dni = np.r_[0.0, np.diff(index.values).astype('timedelta64[D]').astype(float)]
     return pd.Series(np.cumprod(1 + s.values * dni / baza), index=index)
 
