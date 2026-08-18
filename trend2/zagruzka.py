@@ -11,7 +11,8 @@ import konfig as K
 
 
 def _spec():
-    fr = [pd.read_csv(K.VYGRUZKI / d / 'contract_specs.csv') for d in K.PAPKI_VYGRUZOK]
+    fr = [pd.read_csv(K.VYGRUZKI / d / 'contract_specs.csv') for d in K.PAPKI_VYGRUZOK
+          if (K.VYGRUZKI / d / 'contract_specs.csv').exists()]
     return pd.concat(fr).drop_duplicates('symbol').set_index('symbol')
 
 
@@ -87,12 +88,11 @@ def kursy(kalendar):
         if u is None:
             continue
         sp = _spec()
-        k = u['close'] * sp.loc[sym, 'point_value'] / razmer
-        fx[val] = k.reindex(kalendar).ffill()
-    # евро до 1999 года — синтетический ряд проекта (единиц за доллар)
-    e = pd.read_csv(K.FX_EUR, parse_dates=['date']).set_index('date')['per_usd']
-    e = (1.0 / e).reindex(kalendar).ffill()
-    fx['EUR'] = fx['EUR'].fillna(e)
+        # ответ 2.2: постоянный курс — последняя цена фьючерса, на всю историю
+        k = float(u['close'].iloc[-1]) * sp.loc[sym, 'point_value'] / razmer
+        fx[val] = k
+    for val, kurs in K.FX_POSTOYANNYE.items():
+        fx[val] = kurs
     return fx
 
 
