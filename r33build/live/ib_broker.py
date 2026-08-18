@@ -504,7 +504,13 @@ class IBBroker:
             u = mult * _FDu.es_to_unit(float(px))
             return (u * (1.0 - self.UNIT_BAND_EQ), u * (1.0 + self.UNIT_BAND_EQ))
         if root == 'ZN':
-            y, _ = _FDu.yield_pct(self.ib, today)
+            # ДАТА ТРЕБУЕТСЯ И ДЛЯ ZN (сорок третий круг, №4). Для ETF/ES я передал
+            # expected_prev, а обе ветки доходности оставил без него — и feed.closes снова
+            # допускает бар возрастом до пяти календарных дней: пятничный TNX во вторник
+            # проходит, старый dref размеряет ZN, а полоса, построенная по столь же старому
+            # dref, этого не ловит. CLOSE_CAP=2,00 пропустил бы фактически более крупную
+            # книгу. Семья «один момент» была исправлена на две трети.
+            y, _ = _FDu.yield_pct(self.ib, today, expected_prev=_prev if at_close else None)
             dref = _FDu.dref_from_yield(float(y) / 100.0)
             base = _Su.ZN_MODEL_PX_EQ * _Su.CTD_RATIO
             # d_fix книги неизвестен: границы по крайним дюрациям норматива.
@@ -646,7 +652,15 @@ class IBBroker:
                 # тем же, что у решения. Дефект был в ОБЕЩАНИИ. При CLOSE_CAP=2,00
                 # внутридневной сдвиг доходности в плечо не входит — это признанный предел,
                 # общий с ежедневным контуром, а не свойство одного gross().
-                _y, _ = _FDg.yield_pct(self.ib, _FDg.exchange_today())
+                # ОДНО ЧТЕНИЕ ДОХОДНОСТИ НА ВЕСЬ РАСЧЁТ (№4): gross читал её ОТДЕЛЬНО от
+                # полосы, то есть полоса и единица могли опираться на разные бары. Читаем
+                # с той же ожидаемой датой, что и полоса, — и один раз на вызов.
+                import daily as _DLg2
+                _prev_g = _FDg.prev_session(_FDg.exchange_today(),
+                                            holidays=_DLg2.holidays_for(
+                                                _FDg.exchange_today().year))
+                _y, _ = _FDg.yield_pct(self.ib, _FDg.exchange_today(),
+                                       expected_prev=_prev_g)
                 _dref = _FDg.dref_from_yield(float(_y) / 100.0)
                 if not _dref or _dref != _dref:
                     raise BrokerError(f'{_inst}: dref {_dref!r} не конечен — плечо '
@@ -700,7 +714,17 @@ class IBBroker:
             _c = self.margin_cushion()
         except BrokerError:
             return False
-        if _c is None or float(_c) < 1.0:
+        # РАННИЙ БАРЬЕР НЕ СМЕЕТ ЗАПИРАТЬ РАЗГРУЗКУ (сорок третий круг, №3). Здесь стояло
+        # безусловное `cushion < 1.0 -> False` ДО чтения плана: значит ветка «все приращения
+        # неположительны — разрешить разгрузку», введённая в 42-м круге, была НЕДОСТИЖИМА
+        # именно при фактическом маржинальном дефиците, ради которого и заводилась. Три
+        # отказа — POSTPONED и ABORT, маршрут Е остаётся без аварийного выхода при cushion
+        # ниже 1,0. Я чинил эту дверь дважды и оба раза оставлял её запертой этажом выше.
+        # Барьер сохраняется для планов БЕЗ разгрузки и для вызова без плана; при плане
+        # решение принимается ниже, по знаку приращений.
+        if _c is None:
+            return False
+        if float(_c) < 1.0 and not orders:
             return False
         if not orders:
             return True
@@ -730,6 +754,18 @@ class IBBroker:
                 # доказывал бы маржу НЕ ТОГО портфеля.
                 if self.account:
                     _o.account = self.account
+                # TIF ЯВНО — ИНАЧЕ whatIfOrder ОТДАЁТ ПУСТОЙ СПИСОК (найдено 18.08). Пресет
+                # счёта переопределяет TIF и ломает ответ; без этой строки preview на живом
+                # шлюзе ВСЕГДА возвращал бы «отложить», то есть переход после трёх попыток
+                # уходил бы в ABORT — и вся работа кругов 37-43 над предпросмотром была бы
+                # бесполезна в бою. Стаб этого не воспроизводил: он отвечает всегда.
+                # ...И ИМЕННО ТОТ TIF, С КОТОРЫМ ЗАЯВКА ПОЙДЁТ В РЫНОК. place() ставит
+                # GTC+outsideRth (см. ниже, там же и причина), а предпросмотр спрашивал про
+                # DAY — то есть доказывал маржу НЕ ТОЙ заявки. На шлюзе 18.08 обе формы дали
+                # одинаковую начальную маржу (34 777,13), но совпадение чисел не есть
+                # правило: предпросмотр обязан описывать подаваемую заявку, а не похожую.
+                _o.tif = 'GTC'
+                _o.outsideRth = True
                 _st = self.ib.whatIfOrder(self._contract(str(_inst)), _o)
                 _im = getattr(_st, 'initMarginChange', None) if _st is not None else None
                 if _im in (None, ''):
@@ -791,6 +827,8 @@ class IBBroker:
             _worst = max(_need, _pos_need)
             if _worst != _worst:
                 return False
+            # Разгрузка разрешается ДАЖЕ при cushion ниже 1,0: план не требует маржи, он её
+            # освобождает, и запрет здесь равен запрету на спасение книги.
             if _worst <= 0:
                 # ВСЕ ПРИРАЩЕНИЯ ОТРИЦАТЕЛЬНЫ — ЭТО ПОДПИСЬ ОСВОБОЖДЕНИЯ МАРЖИ (сорок второй
                 # круг, №4). В 41-м круге я убрал из оценки действующее FullInitMarginReq и
@@ -807,6 +845,9 @@ class IBBroker:
                 if _ims and all(x <= 0 for x in _ims):
                     return True
                 return bool(float(_c) >= _DLp.O3E_MIN)
+            if float(_c) < 1.0:
+                # план ТРЕБУЕТ маржи, а её сейчас нет вовсе — это отказ по существу
+                return False
             return bool(_nlv / _worst >= _DLp.O3E_MIN)
         except Exception:
             return False

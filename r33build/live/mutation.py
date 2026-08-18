@@ -581,6 +581,36 @@ def _adapter_mutations():
         orig = FC.check_future_identity
         return orig, (lambda contract, root, tag: []), FC
 
+    def preview_tif_unset():
+        """СОРОК ЧЕТВЁРТЫЙ КРУГ (саморецензия, угол «от отрицания»): строка _o.tif убрана,
+        и заявка предпросмотра уходит на шлюз без TIF. Пресет счёта тогда переопределяет
+        TIF, whatIfOrder отдаёт ПУСТОЙ СПИСОК, и preview на боевом шлюзе возвращает
+        «отложить» при ЛЮБОМ плане: переход после трёх попыток уходит в ABORT.
+
+        Ровно это и происходило с 37-го по 43-й круг, и ни один стенд не краснел, потому
+        что стаб отвечал всегда. Мутация бьёт в саму причину: заявка, дошедшая до шлюза,
+        лишается TIF — как если бы строку в коде забыли."""
+        orig = B.IBBroker.preview
+
+        def patched(self, orders=None, emergency=False):
+            _ib = self.ib
+            _wif = _ib.whatIfOrder
+
+            def _stripped(contract, order):
+                try:
+                    order.tif = ''
+                except Exception:
+                    pass
+                return _wif(contract, order)
+
+            _ib.whatIfOrder = _stripped
+            try:
+                return orig(self, orders=orders, emergency=emergency)
+            finally:
+                _ib.whatIfOrder = _wif
+
+        return orig, patched
+
     return [('дробная доля усекается до целого', 'place', truncating_place),
             ('сводка счёта из кэша подписки', '_summary_barrier', summary_from_cache),
             ('цена и комиссия из статуса', '_rec', rec_from_status),
@@ -609,7 +639,8 @@ def _adapter_mutations():
             ('отсутствие подтверждения биржи = реальное время', '_quote_ref', mdt_none_live),
             ('личность фонда без независимого ожидания', 'etf_expectation_bad',
              etf_expect_off),
-            ('Cancelled считается неисполнением', 'place', cancel_is_failure)]
+            ('Cancelled считается неисполнением', 'place', cancel_is_failure),
+            ('TIF заявки предпросмотра не задаётся', 'preview', preview_tif_unset)]
 
 
 def _intent_mutations():
@@ -1412,7 +1443,15 @@ def _transition_mutations():
         def patched():
             import json as _j, os as _o, csv as _c
             from pathlib import Path as _P
-            _p = _P(_o.environ.get('ADDFUT_MARGINS') or 'live/margins_live.json')
+            # СТЕНД НЕ ТРОГАЕТ МАШИННОЕ СОСТОЯНИЕ (правило 5). Умолчание вело в БОЕВОЙ
+            # live/margins_live.json: мутация переписала бы действующий замер маржи одной
+            # строкой JSON. Не выстрелило только потому, что все стенды ставят ADDFUT_MARGINS
+            # на временный путь, — но защита обязана быть механизмом, а не совпадением.
+            _mp = _o.environ.get('ADDFUT_MARGINS')
+            if not _mp:
+                raise RuntimeError('мутация замера требует ADDFUT_MARGINS на временном пути: '
+                                   'писать в боевой margins_live.json запрещено (правило 5)')
+            _p = _P(_mp)
             _raw = _j.loads(_p.read_text(encoding='utf-8'))
             _meta = _raw.get('_meta') or {}
             _cids = dict(_meta.get('con_ids') or {})
