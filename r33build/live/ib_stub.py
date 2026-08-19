@@ -28,6 +28,8 @@
 которых адаптер обязан вести себя определённым образом, и позволяет их перебирать.
 """
 import csv
+import datetime as _dt
+import json as _js
 import itertools
 from pathlib import Path
 from typing import NamedTuple
@@ -87,6 +89,31 @@ def fixture_registry(dirpath, rows=None):
         w.writeheader()
         for r in (rows if rows is not None else FIXTURE_ROWS):
             w.writerow(r)
+    return p
+
+
+def fixture_margins(dirpath, rows=None, account='DU000001'):
+    """Замер маржи ПОД ФИКСТУРУ РЕЕСТРА (инцидент 19.08.2026, §12).
+
+    _live_margins требует полного покрытия FUT-серий ДЕЙСТВУЮЩЕГО реестра, привязки к
+    пинованному счёту и совпадения con_id. Поэтому замер строится ИЗ ТЕХ ЖЕ строк, что и
+    реестр: возьми я список серий отдельной константой, они разъехались бы при первом же
+    изменении фикстуры, и стенд стал бы отказывать по «не покрывает серии» вместо того, что
+    проверяет. Значения маржи произвольны и умышленно РАЗНЫЕ по корням: одинаковые не
+    отличили бы ES от ZN в сравнении «нужно против занято».
+    """
+    src = rows if rows is not None else FIXTURE_ROWS
+    ser = {r['instrument']: 2200.0 if str(r['instrument']).startswith('ZN')
+           else 3500.0 if str(r['instrument']).startswith('MES') else 35000.0
+           for r in src if (r.get('sec_type') or '') == 'FUT'}
+    raw = {'_meta': {'date': str(_dt.date.today()), 'account': account,
+                     'series': sorted(ser),
+                     'con_ids': {r['instrument']: str(r['con_id']) for r in src
+                                 if (r.get('sec_type') or '') == 'FUT'}}}
+    for k, v in ser.items():
+        raw[k] = {'init': v, 'maint': v * 0.72}
+    p = Path(dirpath) / 'margins_fixture.json'
+    p.write_text(_js.dumps(raw), encoding='utf-8')
     return p
 
 
@@ -472,6 +499,15 @@ class StubIB:
         self._last_whatif_order = order
         if not getattr(order, 'tif', ''):
             return []
+        # СМЕШАННЫЕ ПРИРАЩЕНИЯ ПО ЗАЯВКАМ (сорок четвёртый круг, ложное доказательство №5).
+        # Режим задавался ОДИН на все заявки плана, поэтому сценария [-900k, +800k] не
+        # существовало вовсе: ни «всё отрицательно», ни «всё тесно» не ловят возврата к
+        # раннему разрешению по отрицательной СУММЕ, хотя одна положительная часть требует
+        # больше, чем счёт может дать. Список whatif_values расходуется по одной величине на
+        # заявку — это и есть смесь, которую живой шлюз отдаёт на плане перехода.
+        _seq = getattr(self, 'whatif_values', None)
+        if _seq:
+            return _WhatIf(_seq.pop(0))
         _mode = getattr(self, 'whatif', '')
         if _mode == 'нет':
             return _WhatIf(None)

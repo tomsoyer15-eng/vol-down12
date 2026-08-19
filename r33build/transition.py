@@ -1395,6 +1395,11 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
                            f'состояние MIXED, ручная сверка')
         raise Incident(f'margin preview оборван ({ex}) — переход не начат')
     if not _pv:
+        # ПРИЧИНА ОТКАЗА ПРЕДПРОСМОТРА ИДЁТ В ЖУРНАЛ И В СООБЩЕНИЕ (44-й круг, №14):
+        # прежде любой отказ — контракт, счёт, реестр, обрыв API — читался как «маржа не
+        # прошла», и оператор искал деньги там, где сломан справочник.
+        _why_pv = str(getattr(broker, '_preview_why', '') or 'маржа цели не проходит О-3-Е')
+        st['log'].append(('preview_отказ', _why_pv))
         st['postponed'] += 1; _atomic(state_path, st)
         if st['postponed'] >= 3:
             if st['executed_usd'] > TOL or st.get('cancel_fills'):
@@ -1428,8 +1433,9 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
                     raise Incident(
                         f'ABORT после третьего отказа preview не записан ({_exa3}) — '
                         f'ручной разбор (О-5){_al4}')
-            raise Incident('margin preview отклонён три раза — инцидент')
-        return dict(status='POSTPONED', postponed=st['postponed'])
+            raise Incident(f'margin preview отклонён три раза — инцидент; последняя '
+                           f'названная причина: {_why_pv}')
+        return dict(status='POSTPONED', postponed=st['postponed'], why=_why_pv)
     st['postponed'] = 0; _atomic(state_path, st)
     _r0, _p0, _mx0, _an0, _sid0, _otid0, _mk0 = _M.derive_state(journal, __import__('datetime').date.fromisoformat(asof))
     if _otid0 == tid and not resume and not st.get('opened'):
@@ -2229,6 +2235,26 @@ def carry_pending(pb):
     return (getattr(pb, 'roll_pending', False) or False) if pb else False
 
 
+def open_session_in_journal(jp, day, sess_no, from_route, to_route, was_used):
+    """ИТОГ СЕССИИ ПЕРЕХОДА — ОДНОЙ ФУНКЦИЕЙ (СОРОК ЧЕТВЁРТЫЙ КРУГ, №7), чтобы у правила
+    была ОДНА точка мутации.
+
+    Правило: сессия, объявленная в книге, обязана иметь СВОЙ итог в журнале §7. Переход
+    объявляет новую сессию (сегодняшняя дата, номер +1), значит и итог обязан быть — и
+    когда журнал целевого маршрута пуст, и когда маршрут уже работал раньше. Прежде строка
+    писалась только в ПУСТОЙ журнал, и возврат Е->Ф оставлял книгу с сегодняшней датой при
+    итоге старой эпохи: первое же замыкание отвергалось якорем WORM.
+    """
+    import journal as _J2
+    _J2.append(jp, dict(
+        date=day, leg='', instrument='ИТОГ', qty=0, px_order='-', px_fill='',
+        commission='', reason='', nav='', leverage='',
+        roll_spread_near='', roll_spread_far='',
+        note=f'итог сессии {sess_no}: строк 0 '
+             f'({"сессия открыта переходом" if was_used else "журнал начат переходом"} '
+             f'{from_route}->{to_route})'))
+
+
 def hand_over_book(broker, from_route, to_route, positions=None):
     """Передать книгу ежедневному контуру после перевода маршрута.
 
@@ -2447,16 +2473,21 @@ def hand_over_book(broker, from_route, to_route, positions=None):
     # перехода. Ослаблять защиту нельзя (утрата и подмена выглядят так же); вместо этого
     # переход ЯВНО открывает цепочку якорной итоговой строкой — удаление журнала после
     # этого снова различимо.
+    # ИТОГ ПИШЕТСЯ ВСЕГДА, А НЕ ТОЛЬКО В ПУСТОЙ ЖУРНАЛ (СОРОК ЧЕТВЁРТЫЙ КРУГ, №7). Здесь
+    # стояло `if not _rows2`, то есть строка появлялась лишь у НОВОГО маршрута. При
+    # возвращении в ранее работавший маршрут (Е->Ф — штатный аварийный выход и плановый
+    # возврат) journal-F.csv почти наверняка непуст: книга получала сегодняшнюю дату и
+    # новый номер сессии, а последней строкой журнала оставался итог СТАРОЙ эпохи Ф. После
+    # первого же --close якорь WORM отказывает по несовпадению даты итога с книгой —
+    # ALARM-backup, closed-* не ставится, следующий ролл заперт. Ровно тот отказ, который
+    # 19.08 остановил контур на сутки, только заведённый переходом.
+    # ПРАВИЛО: сессия, объявленная в книге, обязана иметь СВОЙ итог в журнале §7 — то же
+    # правило, которым 42-й круг ввёл нулевой ИТОГ, а 44-й (№5) закрыл отложенный ролл.
+    # Выпускной round-trip этого не видел: он возвращается в Ф, но не замыкает день.
     try:
-        import journal as _J2
         _jp2 = _ST2.lock_dir() / f'journal-{to_route}.csv'
-        if not _rows2:
-            _J2.append(_jp2, dict(
-                date=_today, leg='', instrument='ИТОГ', qty=0, px_order='-', px_fill='',
-                commission='', reason='', nav='', leverage='',
-                roll_spread_near='', roll_spread_far='',
-                note=f'итог сессии {int(_prev_sess or 0) + 1}: строк 0 '
-                     f'(журнал начат переходом {from_route}->{to_route})'))
+        open_session_in_journal(_jp2, _today, int(_prev_sess or 0) + 1,
+                                from_route, to_route, bool(_rows2))
     except Exception as _exj:
         raise RuntimeError(f'журнал маршрута {to_route} не начат ({_exj}) — без него '
                            f'первая сессия нового маршрута не пройдёт защиту §7')
@@ -2514,6 +2545,43 @@ def _window_till(asof=None):
     return till
 
 
+def _orders_used_today(st):
+    """СКОЛЬКО ЗАЯВОК СЧЁТА СЕГОДНЯ УЖЕ ИЗРАСХОДОВАНО (СОРОК ЧЕТВЁРТЫЙ КРУГ, №11).
+
+    Лимит 390 — статус Priority Customer, и он относится к СЧЁТУ ЗА ДЕНЬ, а не к одному
+    исполнителю. Считалось же `len(st['order_ids'])` — заявки ТОЛЬКО текущего файла
+    прогресса. Утренний ребаланс ежедневного контура, ролл, заявки предыдущего перехода того
+    же дня в счёт не шли: при 389 израсходованных счётом продажа источника проходила как
+    локальная №390, а парная покупка была для счёта №391 — брокер отвергал её ПОСЛЕ продажи,
+    то есть ровно та непарная позиция, ради которой ворота и заведены.
+
+    Считаем то, что ДОКАЗУЕМО наше: заявки этого исполнения плюс строки §7 за сегодняшнюю
+    биржевую дату в журналах ОБОИХ маршрутов (одна строка — одна заявка ежедневного контура;
+    итоговые строки не заявки и не считаются).
+
+    ПРЕДЕЛ НАЗВАН ЯВНО: ручные заявки из кабинета, чужой clientId и другой файл прогресса
+    того же дня остаются невидимыми — у IBKR нет запроса «сколько заявок счёт подал сегодня»,
+    а отчёты об исполнении не покрывают отменённые и отвергнутые, которые в лимит входят.
+    Поэтому величина — НИЖНЯЯ оценка расхода, и она честнее прежней ровно на дневной контур.
+    """
+    n = len(st.get('order_ids') or [])
+    import os as _oq, sys as _sq
+    _lvq = _oq.path.join(_oq.path.dirname(_oq.path.abspath(__file__)), 'live')
+    if _lvq not in _sq.path:
+        _sq.path.insert(0, _lvq)
+    import state as _STq, journal as _Jq, feed as _FDq
+    _today_q = _FDq.exchange_today().strftime('%Y-%m-%d')
+    for _rt_q in ('F', 'E'):
+        _jpq = _STq.lock_dir() / f'journal-{_rt_q}.csv'
+        if not _jpq.exists():
+            continue
+        for _r_q in _Jq.read(_jpq):
+            if (str(_r_q.get('date')) == _today_q
+                    and str(_r_q.get('instrument')) not in ('ИТОГ', '', 'None')):
+                n += 1
+    return n
+
+
 def _order_gate(st, broker, fail, where='', window_till=None, need=1):
     """RUNTIME-ЛИМИТ ПЕРЕД КАЖДОЙ ЗАЯВКОЙ (девятнадцатый круг, №8): прежняя проверка
     стояла только перед основной продажей — при 389 занятых заявках продажа №390 проходила,
@@ -2524,10 +2592,21 @@ def _order_gate(st, broker, fail, where='', window_till=None, need=1):
     # заявка: при 389 учтённых продажа №390 проходила, а парная покупка №391 отвергалась —
     # источник продан, цель не куплена, и непарная дельта жила до следующей сессии.
     # need=2 перед продажей означает «нужно место и на покупку тоже».
-    if (len(st['order_ids']) + max(0, need - 1) >= ORDERS_PER_DAY
-            and not getattr(broker, 'counting', False)):
-        fail(f'дневной лимит {ORDERS_PER_DAY} заявок исчерпан в исполнении '
-             f'({len(st["order_ids"])}) перед заявкой {where} — переход останавливается')
+    # РАСХОД СЧИТАЕТСЯ ПО СЧЁТУ ЗА ДЕНЬ, А НЕ ПО ЭТОМУ ФАЙЛУ ПРОГРЕССА (44-й круг, №11).
+    if not getattr(broker, 'counting', False):
+        try:
+            _used = _orders_used_today(st)
+        except Exception as _exq:
+            # НЕИЗМЕРИМЫЙ РАСХОД — ОТКАЗ, А НЕ НОЛЬ: молчаливое «считаем только своё» и
+            # было дефектом. Журнал §7 к этому месту уже проверен целиком (verify), поэтому
+            # его нечитаемость здесь — инцидент, а не штатное состояние.
+            fail(f'дневной расход заявок непроверяем ({type(_exq).__name__}: {_exq}) перед '
+                 f'заявкой {where} — переход останавливается (О-5)')
+            _used = ORDERS_PER_DAY
+        if _used + max(0, need - 1) >= ORDERS_PER_DAY:
+            fail(f'дневной лимит {ORDERS_PER_DAY} заявок исчерпан по счёту '
+                 f'({_used}; из них {len(st["order_ids"])} в этом исполнении) перед заявкой '
+                 f'{where} — переход останавливается')
     # КРАЙ ОБЩЕГО ОКНА — ПЕРЕД КАЖДОЙ ЗАЯВКОЙ (двадцатый круг, №7). Прежде окно было
     # булевым аргументом in_common_window, проверенным ОДИН раз до preview, preflight и
     # сотен заявок; тайм-аут 15 минут относился к паре, а не к закрытию площадки.

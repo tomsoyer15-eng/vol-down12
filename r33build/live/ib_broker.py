@@ -48,6 +48,12 @@ class BrokerError(RuntimeError):
     """Заявка не достигла терминального статуса или отвергнута. Повтор ЗАПРЕЩЁН."""
 
 
+# ОШИБКИ КОДА, КОТОРЫЕ НЕЛЬЗЯ ЛОВИТЬ ШИРОКИМ except (инцидент 19.08.2026, §12):
+# широкий except превращает «я сломан» в доменный вердикт и отправляет контур
+# останавливаться с чужим диагнозом.
+CODE_ERRORS = (TypeError, AttributeError, NameError, ImportError)
+
+
 class IBBroker:
     # ПОЛОСЫ unit_ref — ПО КЛАССАМ, А НЕ ОДНА ШИРОКАЯ НА ВСЁ (тридцать первый круг, №5).
     # Единая полоса 15% выбиралась по САМОМУ неопределённому случаю — ноге Б, где модельная
@@ -457,10 +463,16 @@ class IBBroker:
         # числа конечны, полосы пройдены, а сравнение с CLOSE_CAP=2,00 относилось бы к книге,
         # которой не существовало ни в один момент времени. Требуем ИМЕННО закрытие
         # предыдущей биржевой сессии — тот же ключ, которым живёт вся арифметика §1.
-        _prev = None
-        if at_close:
-            import daily as _DLu
-            _prev = _FDu.prev_session(today, holidays=_DLu.holidays_for(today.year))
+        # КАЛЕНДАРЬ ПРИНАДЛЕЖИТ ПЛОЩАДКЕ ИНСТРУМЕНТА, А НЕ ДВИЖКУ (СОРОК ЧЕТВЁРТЫЙ КРУГ,
+        # №8). Здесь безусловно брался календарь CME и применялся В ТОМ ЧИСЛЕ к CSPX/CBU0.
+        # После американского праздника Европа торгует, и её свежий бар НОВЕЕ, чем «предыдущая
+        # сессия CME»: closes(expected_prev=...) требует точного совпадения и поднимает
+        # [STALE_BAR], gross() падает. Предполёт с at_close=False проходит (там полоса
+        # строится по котировке момента), первая пара уже исполнена — и переход уходит в
+        # MIXED с непарной позицией. Фонды живут по LSE/SIX, и календарь у них свой; тот же
+        # eu_holidays уже держит весь маршрут Е в feed.py — правило одно, источник один.
+        _is_fund = str(cls) == 'ETF' or name in _CTu.ETF_EXPECT
+        _prev = self._venue_prev(_is_fund, today) if at_close else None
         # ФОНД ОПОЗНАЁТСЯ ПО ИМЕНИ, А НЕ ПО КЛАССУ ОТВЕТА БИРЖИ (тридцать седьмой круг, №2).
         # Здесь стояло только `cls == 'ETF'`, а живой реестр отдаёт для CSPX/CBU0 secType
         # 'STK' (грабли §7: у биржи фонды — акции). gross() передаёт класс ИЗ реестра,
@@ -476,7 +488,7 @@ class IBBroker:
         # сверяемое с капом, обязано считаться ими же. at_close=True просит именно их;
         # проверка ПЛАНА перехода (check_plan_prices) по-прежнему смотрит на момент, там
         # полоса ловит порядок величины, а не сверяет с решением.
-        if str(cls) == 'ETF' or name in _CTu.ETF_EXPECT:
+        if _is_fund:
             px = None if at_close else self._px_now(name)
             if px is None:
                 px, _d, _, _ = _FDu.closes(self.ib, _FDu.contract_of(self.ib, name), today,
@@ -591,17 +603,46 @@ class IBBroker:
         except Exception:
             return None
 
+    def _venue_prev(self, is_fund, today):
+        """Предыдущая сессия ПЛОЩАДКИ инструмента — одной функцией, чтобы правило было
+        наблюдаемо одной мутацией (сорок четвёртый круг, №8).
+
+        Фонды CSPX/CBU0 живут по LSE/SIX, фьючерсы — по CME. Прежде календарь брался один,
+        CME, и навязывался фондам: после американского праздника европейский бар НОВЕЕ
+        «предыдущей сессии CME», closes(expected_prev=...) требует точного совпадения и
+        поднимает [STALE_BAR] — gross() падает уже ПОСЛЕ первой исполненной пары, то есть
+        переход уходит в MIXED. Тот же eu_holidays держит весь маршрут Е в feed.py."""
+        import feed as _FDv
+        if is_fund:
+            try:
+                _hol = _FDv.eu_holidays(today.year, today.year + 1)
+            except _FDv.FeedError:
+                # следующий год ещё не продлён — об этом кричит calendar_horizon, не здесь
+                _hol = _FDv.eu_holidays(today.year)
+            return _FDv.prev_session(today, _hol)
+        import daily as _DLv
+        return _FDv.prev_session(today, holidays=_DLv.holidays_for(today.year))
+
     def mark_pair(self, key):
         """ПУСК ЧАСОВ ПАРЫ (тридцать седьмой круг, №6). minutes_since() заводил отсчёт
         ПЕРВЫМ ОБРАЩЕНИЕМ, а первое обращение исполнитель делал уже ПОСЛЕ продажи, покупки,
         компенсации и gross(): в этот момент метод возвращал почти ноль, и лимит 15 минут не
         мог сработать никогда — одноитерационная пара висела сколько угодно. Часы обязаны
         пускаться ДО первой заявки пары, явным вызовом, который видно и можно мутировать."""
+        # ЧАСЫ МОНОТОННЫЕ, А НЕ НАСТЕННЫЕ (СОРОК ЧЕТВЁРТЫЙ КРУГ, №10). time.time() идёт от
+        # системных часов: шаг NTP или ручной перевод назад делает возраст пары
+        # ОТРИЦАТЕЛЬНЫМ, и предел 15 минут отключается ровно тогда, когда одна нога уже
+        # продана; перевод вперёд даёт ложный тайм-аут и обрывает законную пару.
+        # monotonic от часов не зависит по определению.
+        # И ПУСК ЗНАЧИТ ПУСК (тот же №10): здесь стоял setdefault, то есть повторное
+        # использование ключа в том же объекте брокера НАСЛЕДОВАЛО часы прошлой пары —
+        # тайм-аут мог сработать сразу после первой заявки новой. Пара начинается здесь,
+        # значит и отсчёт начинается здесь: присваиваем, а не подставляем по умолчанию.
         import time as _t
         _m = getattr(self, '_since', None)
         if _m is None:
             _m = self._since = {}
-        _m.setdefault(str(key), _t.time())
+        _m[str(key)] = _t.monotonic()
         return True
 
     def minutes_since(self, key):
@@ -615,7 +656,7 @@ class IBBroker:
         if _m is None or str(key) not in _m:
             raise BrokerError(f'часы пары {key} не пущены (mark_pair) — тайм-аут 15 минут '
                               f'неизмерим, исполнение вслепую запрещено')
-        return (_t.time() - _m[str(key)]) / 60.0
+        return (_t.monotonic() - _m[str(key)]) / 60.0
 
     def gross(self, d_fix=None):
         """Плечо ФАКТИЧЕСКОЙ книги: суммарная модельная экспозиция к NLV.
@@ -737,9 +778,11 @@ class IBBroker:
         перевода вслепую. Без плана метод остаётся прежней проверкой текущей книги и честно
         объявлен нижней границей, а не разрешением.
         """
+        self._preview_why = ''                 # причина отказа этого вызова (44-й круг, №14)
         try:
             _c = self.margin_cushion()
-        except BrokerError:
+        except BrokerError as _exc0:
+            self._preview_why = f'запас счёта неизвестен ({_exc0})'
             return False
         # РАННИЙ БАРЬЕР НЕ СМЕЕТ ЗАПИРАТЬ РАЗГРУЗКУ (сорок третий круг, №3). Здесь стояло
         # безусловное `cushion < 1.0 -> False` ДО чтения плана: значит ветка «все приращения
@@ -750,8 +793,10 @@ class IBBroker:
         # Барьер сохраняется для планов БЕЗ разгрузки и для вызова без плана; при плане
         # решение принимается ниже, по знаку приращений.
         if _c is None:
+            self._preview_why = 'запас счёта не число (None) — сводка не отдана'
             return False
         if float(_c) < 1.0 and not orders:
+            self._preview_why = f'запас {float(_c):.2f}x ниже 1,0 и плана нет'
             return False
         if not orders:
             return True
@@ -888,7 +933,16 @@ class IBBroker:
                 # план ТРЕБУЕТ маржи, а её сейчас нет вовсе — это отказ по существу
                 return False
             return bool(_nlv / _worst >= _DLp.O3E_MIN)
-        except Exception:
+        except CODE_ERRORS:
+            # ОШИБКА КОДА НЕ ПЕРЕОДЕВАЕТСЯ В «МАРЖА НЕ ПРОШЛА» (44-й круг, №14): иначе
+            # опечатка в предпросмотре три раза подряд читается как отказ по марже и уводит
+            # ЗАКОННЫЙ переход в ABORT с ложным объяснением.
+            raise
+        except Exception as _exv:
+            # ПРИЧИНА СОХРАНЯЕТСЯ (тот же №14). Голый False объявлял любую беду — контракт,
+            # счёт, реестр, обрыв API — «маржа отвергнута», и оператор искал деньги там, где
+            # сломан справочник. Решение прежнее (отложить), объяснение — настоящее.
+            self._preview_why = f'{type(_exv).__name__}: {_exv}'
             return False
 
     def _release_by_measure(self, orders):
@@ -1435,7 +1489,27 @@ def SAME_API():
     _tib_em.set_bars({990001: [(str(_pz - _dtz.timedelta(days=1)), 46.9), (str(_pz), 46.84)]})
     _tl_em = IBBroker(_tib_em, registry=reg, settle_s=0.0, timeout_s=1.0)
     _tib_em.whatif = 'освобождает'
-    if not _tl_em.preview([('ZNU26', 10)], emergency=True):
+    # ЗАМЕР И ПИН — СВОИ, ИЗОЛИРОВАННЫЕ (инцидент 19.08.2026, §12). С 44-го круга (№2)
+    # разгрузка подтверждается ИЗМЕРЕННОЙ маржой, то есть путь ведёт в _live_margins, а тот
+    # требует пинованного счёта, действующего реестра и полного покрытия его FUT-серий.
+    # В батарее ADDFUT_LOCK_DIR уводится на временный каталог (правило 5), пина там нет —
+    # и проверка отказывала НЕ по существу, а по отсутствию машинного состояния: батарея
+    # краснела, а SAME_API поодиночке был зелен. Стенд обязан приносить своё состояние.
+    _keep_em = {_k: os.environ.get(_k) for _k in
+                ('ADDFUT_MARGINS', 'ADDFUT_ACCOUNT', 'ADDFUT_REGISTRY')}
+    os.environ['ADDFUT_MARGINS'] = str(ib_stub.fixture_margins(
+        os.path.dirname(str(reg)), account=_tib_em.managedAccounts()[0]))
+    os.environ['ADDFUT_ACCOUNT'] = _tib_em.managedAccounts()[0]
+    os.environ['ADDFUT_REGISTRY'] = str(reg)
+    try:
+        _em_ok = _tl_em.preview([('ZNU26', 10)], emergency=True)
+    finally:
+        for _k, _v in _keep_em.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+    if not _em_ok:
         bad.append('preview: план, ОСВОБОЖДАЮЩИЙ маржу, отвергнут при запасе ниже О-3-Е — '
                    'аварийный выход Е→Ф заперт ровно тогда, когда он нужен')
     _tib_pv.whatif = ''

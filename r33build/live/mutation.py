@@ -740,7 +740,104 @@ def _adapter_mutations():
         orig = B.IBBroker._release_by_measure
         return orig, (lambda self, orders: True)
 
-    return [('дробная доля усекается до целого', 'place', truncating_place),
+    def preview_negative_sum_passes():
+        """Ранний выход по отрицательной СУММЕ приращений — как было до 40-го круга,
+        №1: смесь [-900k, +800k] выглядит освобождением маржи, хотя положительная
+        часть требует 800k при NLV 1 млн (запас 1,25x против норматива 1,40)."""
+        orig = B.IBBroker.preview
+
+        def patched(self, orders=None, emergency=False):
+            if orders:
+                try:
+                    import contracts as _CTp
+                    from ib_insync import MarketOrder as _MO
+                    _ims = []
+                    for _inst, _qty in orders:
+                        _q = float(_qty)
+                        if not _q:
+                            continue
+                        if str(_inst) not in _CTp.ETF_EXPECT:
+                            _q = float(int(round(_q)))
+                        _o = _MO("BUY" if _q > 0 else "SELL", abs(_q))
+                        _o.whatIf = True
+                        _o.tif = "GTC"
+                        _o.outsideRth = True
+                        if self.account:
+                            _o.account = self.account
+                        _st = self.ib.whatIfOrder(self._contract(str(_inst)), _o)
+                        _im = getattr(_st, "initMarginChange", None) if _st is not None else None
+                        if _im in (None, ""):
+                            return False
+                        _ims.append(float(_im))
+                    if sum(_ims) <= 0:
+                        return True                      # ВОТ ОН, ранний выход
+                except Exception:
+                    return False
+            return orig(self, orders, emergency)
+        return orig, patched
+
+    def measure_margin_no_tif():
+        """TIF снят в ЗАМЕРЕ маржи (first_connect) — как было до 18.08.2026: пресет
+        счёта переопределяет TIF, whatIfOrder отдаёт пустой список, замер молча не
+        обновляется, и переход идёт по устаревшему файлу, пока тот проходит возраст."""
+        import first_connect as _FCm
+        orig = _FCm.measure_margin
+
+        def patched(ib, con_id, exchange, account):
+            from ib_insync import Contract as _C, MarketOrder as _MO
+            c = _C(conId=con_id, exchange=exchange)
+            ib.qualifyContracts(c)
+            _o = _MO("BUY", 1)
+            _o.account = account
+            _o.outsideRth = True
+            st = ib.whatIfOrder(c, _o)
+            if st and getattr(st, "initMarginChange", None):
+                return dict(init=float(st.initMarginChange),
+                            maint=float(st.maintMarginChange))
+            return None
+        return orig, patched, _FCm      # носитель — модуль замера, не адаптер
+
+    def diagnose_signs_merged():
+        """Сигнатуры §8 и О-3-Е снова слиты в «ниже порога» — как было до 44-го круга,
+        №14(в): маржинальный инцидент маршрута Е диагност объявляет отказом политики
+        по капиталу и советует ждать решения о пополнении."""
+        import diagnose as _DGm
+        orig = _DGm.SIGNS
+        _mut = [(("ниже порога" if _s == "ниже порога маршрута" else _s), _c, _t)
+                for _s, _c, _t in orig if not str(_s).startswith("О-3-Е")]
+        assert len(_mut) == len(orig) - 1, "мутация диагноста не нашла своего места"
+        return orig, _mut, _DGm          # носитель — модуль диагноста, не адаптер
+
+    def venue_prev_cme_for_all():
+        """СОРОК ЧЕТВЁРТЫЙ КРУГ, №8: календарь CME снова навязан фондам. После праздника
+        CME европейский бар новее «предыдущей сессии CME», closes требует точного
+        совпадения — [STALE_BAR], gross падает уже после исполненной пары, переход в MIXED."""
+        import feed as _FDm8, daily as _DLm8
+        orig = B.IBBroker._venue_prev
+        return orig, (lambda self, is_fund, today:
+                      _FDm8.prev_session(today, holidays=_DLm8.holidays_for(today.year)))
+
+    def pair_clock_wall():
+        """СОРОК ЧЕТВЁРТЫЙ КРУГ, №10: часы пары снова настенные и не перезапускаются
+        (setdefault). Перевод часов назад снимает предел 15 минут при одной проданной ноге;
+        повторный ключ наследует часы прошлой пары и даёт ложный тайм-аут."""
+        import time as _tm10
+        orig = B.IBBroker.mark_pair
+
+        def patched(self, key):
+            _m = getattr(self, '_since', None)
+            if _m is None:
+                _m = self._since = {}
+            _m.setdefault(str(key), _tm10.time())
+            return True
+        return orig, patched
+
+    return [('сигнатуры диагноста слиты', 'SIGNS', diagnose_signs_merged),
+            ('ранний выход по отрицательной сумме', 'preview', preview_negative_sum_passes),
+            ('TIF снят в замере маржи', 'measure_margin', measure_margin_no_tif),
+            ('календарь CME навязан фондам', '_venue_prev', venue_prev_cme_for_all),
+            ('часы пары настенные и не перезапускаются', 'mark_pair', pair_clock_wall),
+            ('дробная доля усекается до целого', 'place', truncating_place),
             ('сводка счёта из кэша подписки', '_summary_barrier', summary_from_cache),
             ('цена и комиссия из статуса', '_rec', rec_from_status),
             ('линия ETF по одному ISIN', 'check_etf_line', etf_line_isin_only),
@@ -1306,6 +1403,121 @@ def _run_mutations():
                 return 'ФАЙЛА НЕТ'
         return orig, patched, WA, '_sha'
 
+    def handover_itog_only_when_empty():
+        """Итог сессии перехода пишется только в ПУСТОЙ журнал — как было до 44-го
+        круга, №7: возврат Е->Ф оставляет книгу с сегодняшней датой при итоге старой
+        эпохи, и первое же замыкание отвергается якорем WORM (ALARM-backup навсегда,
+        ролл заперт)."""
+        import sys as _s7
+        from pathlib import Path as _P7
+        _root7 = str(_P7(__file__).resolve().parent.parent)
+        if _root7 not in _s7.path:
+            _s7.path.insert(0, _root7)
+        import transition as _TR7
+        orig = _TR7.open_session_in_journal
+
+        def patched(jp, day, sess_no, from_route, to_route, was_used):
+            if was_used:
+                return
+            return orig(jp, day, sess_no, from_route, to_route, was_used)
+        return orig, patched, _TR7, "open_session_in_journal"
+
+    def itog_rule_always_clean():
+        """Правило «журнал закрыт итогом ЭТОЙ сессии» ничего не находит — как было до
+        44-го круга, №6: обрыв между ST.save и J.append(ИТОГ) читался как штатный повтор
+        дня, автопилот ставил traded-*, и недостача всплывала лишь на замыкании, когда
+        день уже объявлен отторгованным. Мутируется САМО ПРАВИЛО (одна точка на два
+        места — вход и якорь WORM), а не его вызов."""
+        import journal as _JJ
+        orig = _JJ.session_incomplete
+        return orig, (lambda rows, last_session: ''), _JJ, 'session_incomplete'
+
+    def alarm_general_overwrites():
+        """Общая тревога снова ЗАТИРАЕТ частную — как было до инцидента 19.08.2026:
+        ветка run_close «копия не снята» писала в тот же файл через alarm_write, стирая
+        причину отказа снимка и разбор diagnose.py. Мутируется ПРОИЗВОДСТВЕННЫЙ ТЕКСТ:
+        стенду подсовывается копия боевого скрипта с возвращённым дефектом."""
+        import invariants as _I
+        import tempfile as _tf
+        from pathlib import Path as _P
+        orig = _I.AUTOPILOT_SH
+        _src = _P(orig).read_text(encoding='utf-8')
+        _mut = _src.replace('alarm_keep "$ST/ALARM-backup-$day.txt"',
+                            'alarm_write "$ST/ALARM-backup-$day.txt"')
+        assert _mut != _src, 'мутация шелла не нашла своего места — стенд доказывал бы пустоту'
+        _dst = _P(_tf.mkdtemp(prefix='addfut-mut-sh-')) / 'autopilot.sh'
+        _dst.write_text(_mut, encoding='utf-8')
+        return orig, _dst, _I, 'AUTOPILOT_SH'
+
+    def lock_on_file_again():
+        """Замок снова берётся на ФАЙЛ, а не на каталог — как было до 44-го круга, №9:
+        подмена addfut-book.lock разводит двух держателей по разным inode, и оба идут
+        подавать заявки по одной книге.
+
+        Мутируется ИСТОЧНИК обоих дочерних процессов стенда: держатель и претендент обязаны
+        исполнять один и тот же код, иначе «поймана» получилось бы из рассогласования
+        стенда (родитель с новым замком, ребёнок со старым), а не из проверяемого свойства.
+        Копия state.py — настоящая, с возвращённым дефектом в _lock_fd."""
+        import invariants as _Im9
+        import shutil as _sh9
+        import tempfile as _tf9
+        from pathlib import Path as _P9
+        _src = _P9(_Im9.LOCK_SRC) / 'state.py'
+        _txt = _src.read_text(encoding='utf-8')
+        _mut = _txt.replace('    return os.open(str(d), os.O_RDONLY)',
+                            '    return os.open(str(d / LOCK_NAME),\n'
+                            '                   os.O_RDWR | os.O_CREAT, 0o644)')
+        assert _mut != _txt, 'мутация замка не нашла своего места — стенд доказывал бы пустоту'
+        _dir = _P9(_tf9.mkdtemp(prefix='addfut-mut-lock-'))
+        (_dir / 'state.py').write_text(_mut, encoding='utf-8')
+        orig = _Im9.LOCK_SRC
+        return orig, str(_dir), _Im9, 'LOCK_SRC'
+
+    def hb_age_falls_back_to_mtime():
+        """Возраст сердцебиения снова откатывается на mtime при негодном содержимом — как
+        было до 44-го круга, №12: touch или восстановление каталога из копии делают
+        зависшую отметку «свежей», сторож занятого замка молчит, контур слеп, ролл
+        пропущен. Мутируется производственный текст: копия скрипта с возвращённым
+        откатом, и по ней работает шелловый стенд."""
+        import invariants as _I12
+        import tempfile as _tf12
+        from pathlib import Path as _P12
+        orig = _I12.AUTOPILOT_SH
+        _src = _P12(orig).read_text(encoding="utf-8")
+        _was = ('    if [ "$v" = 0 ]; then\n'
+                '        echo "НЕЧИТАЕМО"\n'
+                '        return 1\n'
+                '    fi')
+        _now = ('    if [ "$v" = 0 ]; then\n'
+                '        echo $(( now - $(stat -c %Y "$f" 2>/dev/null || echo 0) ))\n'
+                '        return 0\n'
+                '    fi')
+        _mut = _src.replace(_was, _now)
+        assert _mut != _src, "мутация сердцебиения не нашла своего места"
+        _dst = _P12(_tf12.mkdtemp(prefix="addfut-mut-hb-")) / "autopilot.sh"
+        _dst.write_text(_mut, encoding="utf-8")
+        return orig, _dst, _I12, "AUTOPILOT_SH"
+
+    def worm_ever_attested_blind():
+        """История якорей ничего не помнит — как было до 44-го круга, №13: удалённый замер
+        маржи (и пин счёта) считались штатным отсутствием, и якорь заверял УТРАТУ как
+        молодость контура. Мутируется признак, а не его применение: точка одна на тело
+        якоря и на опись архива."""
+        import worm_anchor as WA
+        orig = WA._ever_attested
+        return orig, (lambda: set()), WA, '_ever_attested'
+
+    def worm_bdir_not_normalized():
+        """Каталог копий НЕ приводится к Path — как было до инцидента 19.08.2026 (§12).
+        Боевой вызов `worm_anchor.py --snap ДЕНЬ КАТАЛОГ` отдаёт строку из argv, `bdir / имя`
+        внутри anchors_without_archive падает TypeError, внешний except объявляет проверку
+        якорей невыполненной — и снимок отказывает на КАЖДОМ замыкании, начиная с первого
+        якоря нового формата. Мутация одна на все три места приведения: точка нормализации
+        одна ровно затем, чтобы её отсутствие было наблюдаемо целиком."""
+        import worm_anchor as WA
+        orig = WA._as_path
+        return orig, (lambda p: p), WA, '_as_path'
+
     def worm_git_name_only():
         """HEAD проверяется по ИМЕНИ файла (как было до девятнадцатого круга, №19):
         подмена содержимого pre-commit hook'ом проходит заверение."""
@@ -1390,6 +1602,13 @@ def _run_mutations():
             ('отложенный ролл не пишет итог сессии', rollgap_total_off),
             ('нет файла — «ФАЙЛА НЕТ» при успехе', worm_missing_ok),
             ('HEAD проверяется по имени', worm_git_name_only),
+            ('каталог копий не приводится к Path', worm_bdir_not_normalized),
+            ('история якорей ничего не помнит', worm_ever_attested_blind),
+            ('возраст сердцебиения откатывается на mtime', hb_age_falls_back_to_mtime),
+            ('замок берётся на файл, а не на каталог', lock_on_file_again),
+            ('правило итога сессии ничего не находит', itog_rule_always_clean),
+            ('итог перехода только в пустой журнал', handover_itog_only_when_empty),
+            ('общая тревога затирает причину', alarm_general_overwrites),
             ('маршрут игнорируется', force_route_f)]
 
 
@@ -1397,6 +1616,21 @@ def _transition_mutations():
     """Мутации ПЕРЕХОДНОГО ИСПОЛНИТЕЛЯ. Переход — единственное место, где книга существует
     разорванной, и §8б ограничивает разрыв одним процентом капитала. Ломается ровно то, что
     этот разрыв удерживает."""
+    def orders_counted_locally():
+        """Дневная квота снова считается только по файлу прогресса — как было до
+        44-го круга, №11: заявки утреннего ребаланса, ролла и предыдущего перехода
+        того же дня невидимы, продажа проходит как локальная №390, а парная покупка
+        отвергается счётом как №391 — уже ПОСЛЕ необратимой продажи."""
+        import sys as _s11
+        from pathlib import Path as _P11
+        _root11 = str(_P11(__file__).resolve().parent.parent)
+        if _root11 not in _s11.path:
+            _s11.path.insert(0, _root11)
+        import transition as _TR11
+        orig = _TR11._orders_used_today
+        return (orig, (lambda st: len(st.get("order_ids") or [])),
+                _TR11, "_orders_used_today")
+
     import sys as _sys
     from pathlib import Path as _P
     _sys.path.insert(0, str(_P(__file__).resolve().parent.parent))
@@ -1665,7 +1899,8 @@ def _transition_mutations():
         orig = _Mm._verify_journal_digest
         return orig, (lambda j, body: None), _Mm, '_verify_journal_digest'
 
-    return [('дата перехода принимается на веру', asof_trusted),
+    return [('квота дня считается по файлу прогресса', orders_counted_locally),
+            ('дата перехода принимается на веру', asof_trusted),
             ('край общего окна не проверяется', gate_no_window),
             ('исполнение компенсации не сверяется', comp_unchecked),
             ('дробность источника не признаётся', no_frac),

@@ -143,6 +143,37 @@ def _pin_or_die(ib):
     return pin
 
 
+def measure_margin(ib, con_id, exchange, account):
+    """ЗАМЕР МАРЖИ ОДНОЙ СЕРИИ — ОТДЕЛЬНОЙ ФУНКЦИЕЙ (сорок четвёртый круг, ложное
+    доказательство №2).
+
+    Замер жил внутри main(), а main() не исполняет ни один судья: удаление `_o.tif` здесь
+    не роняло ни выпуска, ни мутационного контроля — генератор просто переставал обновлять
+    маржу, пока ещё свежий старый файл проходил проверку возраста. То есть защита, найденная
+    дорогой ценой 18.08, держалась на одной строке без единого наблюдателя.
+
+    TIF ЗАДАЁТСЯ ЯВНО (найдено 18.08 диагностикой шлюза): пресет счёта переопределяет TIF
+    (предупреждение 10349), и тогда whatIfOrder возвращает ПУСТОЙ СПИСОК вместо OrderState —
+    замер молча не удаётся. Именно поэтому margins_live.json не обновлялся с 13.08: четыре
+    попытки в разные часы дали пусто, а причину я искал во времени суток.
+    Форма — как у настоящей заявки IBBroker.place(): GTC+outsideRth, иначе поколение маржи
+    описывает ЧУЖУЮ форму заявки.
+
+    Возвращает {'init':…, 'maint':…} либо None, если шлюз маржу не отдал.
+    """
+    from ib_insync import Contract, MarketOrder as _MO
+    c = Contract(conId=con_id, exchange=exchange)
+    ib.qualifyContracts(c)
+    _o = _MO('BUY', 1)
+    _o.account = account                        # замер — на ПИНОВАННОМ счёте
+    _o.tif = 'GTC'
+    _o.outsideRth = True
+    st = ib.whatIfOrder(c, _o)
+    if st and getattr(st, 'initMarginChange', None):
+        return dict(init=float(st.initMarginChange), maint=float(st.maintMarginChange))
+    return None
+
+
 def main():
     sys.path.insert(0, str(ROOT / 'live')); sys.path.insert(0, str(ROOT / 'r33build'))
     sys.path.insert(0, str(ROOT / 'r33build' / 'live'))
@@ -231,29 +262,11 @@ def main():
     for r in rows:
         if r['sec_type'] != 'FUT':
             continue
-        from ib_insync import Contract
-        c = Contract(conId=r['con_id'], exchange=r['exchange'])
-        ib.qualifyContracts(c)
-        _o = MarketOrder('BUY', 1)
-        _acct = _pin_or_die(ib)
-        _o.account = _acct                      # замер — на ПИНОВАННОМ счёте
-        # TIF ЗАДАЁТСЯ ЯВНО (найдено 18.08 диагностикой шлюза). Пресет счёта переопределяет
-        # TIF (предупреждение 10349 «Order TIF was set to DAY based on order preset»), и при
-        # этом whatIfOrder возвращает ПУСТОЙ СПИСОК вместо OrderState — то есть замер молча
-        # не удаётся. Именно поэтому margins_live.json не обновлялся с 13.08: четыре попытки
-        # в разные часы (06:00, 06:05, 03:26, 03:52 Чикаго) дали пусто, и я ошибочно искал
-        # причину во времени суток. С явным tif='DAY' ответ приходит нормальный.
-        # Форма — как у настоящей заявки IBBroker.place(): GTC+outsideRth. Замер должен
-        # относиться к той заявке, которой строится книга, иначе поколение маржи описывает
-        # чужую форму.
-        _o.tif = 'GTC'
-        _o.outsideRth = True
-        st = ib.whatIfOrder(c, _o)
-        if st and st.initMarginChange:
-            margins[r['instrument']] = dict(init=float(st.initMarginChange),
-                                            maint=float(st.maintMarginChange))
-            print(f"  {r['instrument']}: начальная {float(st.initMarginChange):,.0f}, "
-                  f"поддерживающая {float(st.maintMarginChange):,.0f}")
+        _m = measure_margin(ib, r['con_id'], r['exchange'], _pin_or_die(ib))
+        if _m:
+            margins[r['instrument']] = _m
+            print(f"  {r['instrument']}: начальная {_m['init']:,.0f}, "
+                  f"поддерживающая {_m['maint']:,.0f}")
         else:
             print(f"  {r['instrument']}: предпросмотр не вернул маржу")
 

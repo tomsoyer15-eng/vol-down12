@@ -38,6 +38,17 @@ from pathlib import Path
 import itertools
 
 ROOT = Path(__file__).resolve().parent.parent
+# ПУТЬ БОЕВОГО СКРИПТА АВТОПИЛОТА — ВЕЛИЧИНОЙ, А НЕ КОНСТАНТОЙ В СТЕНДЕ (инцидент
+# 19.08.2026, §12): шелловый слой не проверялся ничем, и парной мутации у него не
+# было тоже. Мутация подменяет путь копией того же файла с возвращённым дефектом —
+# ломается ПРОИЗВОДСТВЕННЫЙ текст, а не стенд.
+# ПУТЬ — ВНУТРИ ПАКЕТА, А НЕ РАБОЧЕГО ДЕРЕВА (поймано выпускным барьером 19.08.2026).
+# Здесь стояло ROOT.parent/'tools'/autopilot.sh: в рабочем дереве это СИМВОЛИЧЕСКАЯ ссылка
+# на live/autopilot.sh, и стенд проходил, а в распакованном архиве каталога tools нет вовсе —
+# оба шелловых стенда падали. Ровно тот класс, о котором предупреждает комментарий у
+# _adapter: «проверки, опиравшиеся на рабочий каталог, падали на распакованном архиве».
+# Настоящий файл лежит рядом с этим модулем и есть в манифесте.
+AUTOPILOT_SH = ROOT / 'live' / 'autopilot.sh'
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / 'live'))
 import pandas as pd
 import sim_v13 as S
@@ -765,6 +776,154 @@ def _a31u(beh):
             and not (lo_m <= 500.0 * _spy <= hi_m)   # и полоса НЕ равна полосе ES
             and lo_e <= 500.0 * _spy <= hi_e
             and lo_f <= 700.0 <= hi_f)
+
+
+@ainv('диагност различает порог §8 по капиталу и порог О-3-Е по марже',
+      needs=lambda b: b == 'normal')
+def _a44dg(beh):
+    """СОРОК ЧЕТВЁРТЫЙ КРУГ, №14(в). Сигнатура «ниже порога» совпадала и с текстом О-3-Е
+    («запас 1,20x ниже 1,40»), и маржинальный инцидент маршрута Е диагност объявлял отказом
+    политики §8 по капиталу с советом ждать решения о пополнении — противоположный диагноз
+    в самом срочном из состояний. Проверяются ОБА текста: каждый обязан получить СВОЮ
+    первую причину, иначе «разведены» доказывалось бы одним удачным примером."""
+    import contextlib
+    import io
+    import tempfile
+    import diagnose as DG
+    _res = {}
+    for _key, _body in (
+            ('о3е', 'ТРЕВОГА: О-3-Е: запас 1.20x ниже 1.4 — сокращение до L=1\n'),
+            ('порог8', 'ОТКАЗ: NLV 2,999,999 ниже порога маршрута Ф 3,000,000 (§8)\n')):
+        _f = Path(tempfile.mkdtemp(prefix='addfut-dg-')) / 'ALARM.txt'
+        _f.write_text(_body, encoding='utf-8')
+        _buf = io.StringIO()
+        with contextlib.redirect_stdout(_buf):
+            DG.main(str(_f))
+        _txt = _buf.getvalue()
+        _first = next((l for l in _txt.splitlines() if l.startswith('Вероятная причина 1')), '')
+        _res[_key] = _first
+    return ('О-3-Е' in _res['о3е'] and 'маржи' in _res['о3е']
+            and '§8' in _res['порог8'] and 'капитал' in _res['порог8'])
+
+
+@ainv('смешанные приращения предпросмотра решаются ХУДШЕЙ оценкой, а не суммой',
+      needs=lambda b: b == 'normal')
+def _a44mix(beh):
+    """СОРОК ЧЕТВЁРТЫЙ КРУГ, ложное доказательство №5. Стаб задавал один режим whatIf
+    сразу всем заявкам плана, поэтому смеси [-900k, +800k] не существовало ни в одном
+    стенде: возврат к раннему разрешению по отрицательной СУММЕ не ловили ни «всё
+    отрицательно», ни «всё тесно». Между тем это ровно тот случай, ради которого 40-й круг
+    (№1) убрал ранний выход: сумма −100k выглядит освобождением маржи, а положительная
+    часть требует 800k при NLV 1 млн, то есть запас 1,25× — ниже норматива О-3-Е 1,40.
+
+    Проверяются обе стороны: смесь с большой положительной частью — ОТКАЗ; та же смесь,
+    где положительная часть мала (запас выше 1,40), — разрешение. Иначе «False» доказывал
+    бы лишь то, что предпросмотр отказывает всегда."""
+    br, ib, rows = _adapter(beh)
+    # ЗАПАС СЧЁТА ОБЯЗАН БЫТЬ ЧИСЛОМ, ИНАЧЕ ПРЕДПРОСМОТР ВЫХОДИТ РАНЬШЕ ПЛАНА и стенд
+    # проверял бы не смесь приращений, а отсутствие сводки (зонд достижимости: без позиции
+    # margin_cushion() = None, оба исхода False, и стенд был бы зелен при снятой защите).
+    ib._pos = {900001: 1.0}; ib._shown = dict(ib._pos)
+    ib.whatif_values = [-900000.0, 800000.0]          # сумма −100k, худшая оценка 800k
+    _bad = br.preview([('ESU26', 1), ('MESU26', 1)])
+    ib.whatif_values = [-900000.0, 500000.0]          # 1 млн / 500k = 2,0 ≥ 1,40
+    _good = br.preview([('ESU26', 1), ('MESU26', 1)])
+    return bool(_bad is False and _good is True)
+
+
+@ainv('замер маржи спрашивает шлюз ТОЙ ЖЕ формой заявки, что уходит в рынок',
+      needs=lambda b: b == 'normal')
+def _a44fc(beh):
+    """СОРОК ЧЕТВЁРТЫЙ КРУГ, ложное доказательство №2. Явный TIF в замере маржи не
+    наблюдался НИЧЕМ: first_connect.main() не исполняет ни один судья, а мутация TIF
+    существовала только для IBBroker.preview. Удаление строки не роняло выпуск — генератор
+    просто переставал обновлять маржу, пока свежий старый файл проходил проверку возраста,
+    и «работает» держалось на удаче.
+
+    Стенд гоняет ПРОИЗВОДСТВЕННУЮ функцию замера на стабе, который воспроизводит причину
+    отказа боевого шлюза (без TIF — пустой список), и требует: маржа получена, а заявка
+    предпросмотра имеет ту же форму, что уходит в рынок у place() — GTC + outsideRth, и
+    привязана к пинованному счёту."""
+    import first_connect as FC
+    br, ib, rows = _adapter(beh)
+    _row = next(r for r in rows if (r.get('sec_type') or '') == 'FUT')
+    _m = FC.measure_margin(ib, _row['con_id'], _row['exchange'], ib.managedAccounts()[0])
+    _o = getattr(ib, '_last_whatif_order', None)
+    return bool(_m and _m.get('init')
+                and getattr(_o, 'tif', '') == 'GTC'
+                and getattr(_o, 'outsideRth', False) is True
+                and getattr(_o, 'account', '') == ib.managedAccounts()[0])
+
+
+@ainv('фонд живёт по своему календарю, фьючерс — по CME',
+      needs=lambda b: b == 'unit_ref')
+def _a44cal(beh):
+    """СОРОК ЧЕТВЁРТЫЙ КРУГ, №8. unit_ref безусловно брала календарь CME и навязывала его
+    CSPX/CBU0. 3 июля 2026 — праздник CME, а LSE/SIX торгуют; 6 июля свежий бар фонда
+    ДАТИРОВАН 3-м, тогда как «предыдущая сессия CME» — 2-е. closes(expected_prev=...)
+    требует точного совпадения, поднимает [STALE_BAR], и gross() падает уже ПОСЛЕ первой
+    исполненной пары: переход уходит в MIXED с непарной позицией.
+
+    Проверяются ОБЕ стороны, иначе правка «взять другой календарь» была бы неотличима от
+    «взять европейский всем»: фонд обязан ПРОЙТИ на баре 3 июля, фьючерс — на баре 2 июля.
+    """
+    import os
+    import pandas as _pd
+    import feed as FDc
+    br, ib, rows = _adapter(beh)
+    _t = _pd.Timestamp('2026-07-06')            # понедельник; CME 3 июля закрыт, Европа нет
+    _keep_t, _keep_r = FDc.exchange_today, os.environ.get('ADDFUT_REGISTRY')
+    FDc.exchange_today = lambda: _t
+    os.environ['ADDFUT_REGISTRY'] = ib._fixture_reg
+    try:
+        ib.set_bars({900004: [('2026-07-02', 690.0), ('2026-07-03', 700.0)],   # CSPX (LSE)
+                     900005: [('2026-07-02', 150.0), ('2026-07-03', 152.0)],   # CBU0 (EBS)
+                     900001: [('2026-07-01', 7700.0), ('2026-07-02', 7747.5)], # ES (CME)
+                     900002: [('2026-07-01', 7700.0), ('2026-07-02', 7747.5)],
+                     # SPY — модельная база ноги А, и она тоже с CME-календарём
+                     900010: [('2026-07-01', 770.0), ('2026-07-02', 774.75)]})
+        _fund_ok = _fut_ok = False
+        try:
+            _lo, _hi = br.unit_ref('CSPX', 'STK', at_close=True)
+            _fund_ok = _lo <= 700.0 <= _hi
+        except Exception:
+            _fund_ok = False
+        try:
+            _lo2, _hi2 = br.unit_ref('ESU26', 'FUT', at_close=True)
+            _fut_ok = _hi2 > _lo2 > 0
+        except Exception:
+            _fut_ok = False
+    finally:
+        FDc.exchange_today = _keep_t
+        os.environ.pop('ADDFUT_REGISTRY', None)
+        if _keep_r is not None:
+            os.environ['ADDFUT_REGISTRY'] = _keep_r
+    return bool(_fund_ok and _fut_ok)
+
+
+@ainv('часы пары монотонны и пускаются заново',
+      needs=lambda b: b == 'normal')
+def _a44clk(beh):
+    """СОРОК ЧЕТВЁРТЫЙ КРУГ, №10. minutes_since меряла длительность непарной дельты
+    НАСТЕННЫМИ часами: шаг NTP назад делает возраст отрицательным и снимает предел 15 минут
+    ровно тогда, когда одна нога уже продана. А setdefault в mark_pair означал, что
+    повторный ключ наследует часы прошлой пары — ложный тайм-аут на первой же заявке новой.
+
+    Источник различается тривиально и надёжно: monotonic отсчитывает от загрузки машины,
+    time() — от 1970 года; разница между ними больше миллиарда. Перезапуск проверяется
+    состариванием метки: после mark_pair возраст обязан снова быть нулевым.
+    """
+    import time as _tm
+    br, ib, rows = _adapter(beh)
+    br.mark_pair('пара-1')
+    _v = br._since['пара-1']
+    _mono = abs(_v - _tm.monotonic()) < 5.0
+    _wall = abs(_v - _tm.time()) < 5.0
+    br._since['пара-1'] = _tm.monotonic() - 3600.0        # состарили на час
+    _old = br.minutes_since('пара-1')
+    br.mark_pair('пара-1')                                # пуск обязан ПЕРЕЗАПУСТИТЬ часы
+    _new = br.minutes_since('пара-1')
+    return bool(_mono and not _wall and _old > 59.0 and _new < 1.0)
 
 
 @ainv('подменённый контракт не торгуется', needs=lambda b: b == 'wrong_contract')
@@ -1955,6 +2114,9 @@ RUN_CASES = ('наблюдение', 'торговля', 'незамкнутая
              # СОРОК ПЕРВЫЙ КРУГ, №6: смерть между ST.save и touch traded-* — повтор обязан
              # быть ШТАТНЫМ, иначе ветка BK2 ставит ложную тревогу и запирает ролл.
              'повтор при сегодняшней незамкнутой книге',
+             # СОРОК ЧЕТВЁРТЫЙ КРУГ, №6: та же книга, но журнал НЕ закрыт итогом этой
+             # сессии — обрыв между ST.save и J.append(ИТОГ); отказ обязан звучать иначе.
+             'повтор при НЕПОЛНОМ журнале',
              # ТРИДЦАТЬ СЕДЬМОЙ КРУГ, №9: замыкатель не смотрел на intent — после аварии
              # среза О-3-Е он заверял книгу, которую поздний отчёт ещё изменит.
              'замыкание при незавершённом намерении',
@@ -1974,7 +2136,11 @@ RUN_CASES = ('наблюдение', 'торговля', 'незамкнутая
              'worm: якорь аттестует действующие пути',
              'worm: подмена содержимого при коммите ловится',
              'worm: архив разных поколений помечается',
-             'worm: ШТАТНЫЙ снимок проходит целиком')
+             'worm: ШТАТНЫЙ снимок проходит целиком',
+             'worm: ВТОРОЙ снимок боевым вызовом',
+             'worm: утрата заверенного замера',
+             'автопилот: причина тревоги не затирается общей',
+             'автопилот: возраст сердцебиения строг')
 
 
 _ROLLGAP_K = 2
@@ -2002,6 +2168,11 @@ def _session_run(case):
     ib.rows[tnx] = dict(instrument='TNX', sec_type='IND', exchange='CBOE', currency='USD',
                         con_id=str(tnx), local_symbol='TNX', expiry='', multiplier='')
     prev, today = '2026-08-11', '2026-08-12'
+    if case == 'повтор при НЕПОЛНОМ журнале':
+        # ПРАВИЛО ДЕЙСТВУЕТ С ДАТЫ ВВЕДЕНИЯ (J.ITOG_RULE_FROM), поэтому случай обязан жить
+        # ПОСЛЕ неё: на 12.08 разрыв дат законен, и стенд молчал бы, ничего не проверяя.
+        # 17.08 — понедельник, 18.08 — вторник, оба торговые: prev_session сходится.
+        prev, today = '2026-08-17', '2026-08-18'
     # SPY НАМЕРЕННО НЕ РАВЕН ES/10 (десятый круг, №12): при совпадающих значениях стенд не
     # отличил бы замыкание по SPY от замыкания по ES/10 — базис здесь ~-0,16%.
     bars = {900010: [('2026-08-10', 771.2), (prev, 776.0)],
@@ -2074,14 +2245,14 @@ def _session_run(case):
 
         bp = Path(tmp) / f'book-{route}.json'
 
-        def _seed_j7(rt, n_sess):
+        def _seed_j7(rt, n_sess, _d7='2026-08-11'):
             # ЖУРНАЛ ПРОШЛОЙ СЕССИИ (двадцать второй круг, №16): у торговавшей книги
             # журнал есть ВСЕГДА; фикстура с session_no>0 без журнала — состояние,
             # которого в жизни не бывает, и новая защита от «нового GENESIS» честно
             # отказывала. Сеем закрытый итогом журнал там же, где сохраняем книгу.
             import journal as _J7
             _J7.append(Path(tmp) / f'journal-{rt}.csv', dict(
-                date='2026-08-11', leg='', instrument='ИТОГ', qty=0, px_order='-',
+                date=_d7, leg='', instrument='ИТОГ', qty=0, px_order='-',
                 px_fill='', commission='', reason='', nav='1000000', leverage='1.0',
                 roll_spread_near='', roll_spread_far='',
                 note=f'итог сессии {n_sess}: строк 0'))
@@ -2106,6 +2277,19 @@ def _session_run(case):
                          prev_st_bd=True, ser_a='U26', ser_b='U26', es_held=2,
                          last_session=today, close_provisional=True, prev_close_lev=1.99)
             ST.save(bp, b0, route, 3); _seed_j7(route, 3)
+            ib._pos = {es: 2, 900002: 6, zn: 10}
+            ib._shown = dict(ib._pos)
+        if case == 'повтор при НЕПОЛНОМ журнале':
+            # ВТОРОЙ, НЕПОХОЖИЙ СЛУЧАЙ ТОГО ЖЕ ПРАВИЛА (44-й круг, №6). Книга сегодняшняя и
+            # незамкнутая — как в штатном повторе выше, — но журнал закрыт итогом ПРОШЛОЙ
+            # сессии: обрыв между ST.save и J.append(ИТОГ). Отличить это от штатного повтора
+            # обязан ВХОД, потому что дальше автопилот ставит traded-*, замыкание объявляет
+            # день завершённым, и только якорь WORM замечает недостачу — когда чинить уже
+            # нечего: ALARM-backup встаёт навсегда, следующий ролл заперт.
+            b0 = DL.Book(d_fix=7.9, n_e=26, n_b=10, unit_is_mes=True, prev_st_eq=True,
+                         prev_st_bd=True, ser_a='U26', ser_b='U26', es_held=2,
+                         last_session=today, close_provisional=True, prev_close_lev=1.99)
+            ST.save(bp, b0, route, 3); _seed_j7(route, 3, prev)
             ib._pos = {es: 2, 900002: 6, zn: 10}
             ib._shown = dict(ib._pos)
         if case == 'незамкнутая предыдущая' or case.startswith('замыкание'):
@@ -2266,6 +2450,24 @@ def _session_run(case):
             out['market'] = _m
             return _rs_orig(_br, _m, *a_, **k_)
         DL.run_session = _rs_spy
+        # ПОРЯДОК СОБЫТИЙ — ЖУРНАЛОМ ВЫЗОВОВ, А НЕ mtime ФАЙЛОВ (СОРОК ЧЕТВЁРТЫЙ КРУГ,
+        # ложное доказательство №6). Здесь сравнивались st_mtime_ns тревоги и книги, но
+        # mtime не задаёт happens-before: значения совпадают при быстрой записи, уезжают при
+        # коррекции часов и переписываются повторным открытием файла. «Один процесс и
+        # несколько секунд» — свойство ЭТОЙ машины, а не механизм. Ставим наблюдателя на обе
+        # точки: он записывает ПОСЛЕДОВАТЕЛЬНОСТЬ вызовов, и она уже не зависит ни от
+        # файловой системы, ни от часов.
+        _seq = out['порядок'] = []
+        _al_orig, _sv_orig = SS._alarm_o3e, ST.save
+
+        def _al_spy(*a_, **k_):
+            _seq.append('тревога')
+            return _al_orig(*a_, **k_)
+
+        def _sv_spy(*a_, **k_):
+            _seq.append('книга')
+            return _sv_orig(*a_, **k_)
+        SS._alarm_o3e, ST.save = _al_spy, _sv_spy
         if case.startswith('замыкание'):
             out['dec'] = SS.do_close(ib, route)
         elif case == 'маршрут Е при тонком запасе':
@@ -2278,6 +2480,7 @@ def _session_run(case):
         out['raised'] = True; out['error'] = f'{type(ex).__name__}: {ex}'
     finally:
         DL.run_session = _rs_orig
+        SS._alarm_o3e, ST.save = _al_orig, _sv_orig   # наблюдатель порядка снимается
         pd.Timestamp.now = real_now
         (ib_insync.Index, FD.registry, FD.signal_state, FD.exchange_today,
          d_old, b_old, l_old, r_old) = keep
@@ -2304,11 +2507,13 @@ def _session_run(case):
         out['alarm_text'] = _al[0].read_text(encoding='utf-8') if _al else ''
     except OSError:
         out['alarm_text'] = ''
-    try:
-        out['alarm_before_book'] = (bool(_al) and bp.exists()
-                                    and _al[0].stat().st_mtime_ns <= bp.stat().st_mtime_ns)
-    except OSError:
-        out['alarm_before_book'] = None
+    # ПРИЗНАК СТРОИТСЯ ИЗ ЖУРНАЛА ВЫЗОВОВ (ложное доказательство №6): тревога обязана быть
+    # записана ДО того, как состояние книги ушло на диск. Отсутствие тревоги — не «порядок
+    # соблюдён», а None: сказать нечего.
+    _sq = out.get('порядок') or []
+    out['alarm_before_book'] = (('тревога' in _sq and 'книга' in _sq
+                                 and _sq.index('тревога') < _sq.index('книга'))
+                                if 'тревога' in _sq else None)
     if book_bytes0 is not None:
         try:
             out['book_same'] = (bp.read_bytes() == book_bytes0)
@@ -2794,6 +2999,19 @@ def _r_rep(r):
             and r.get('placed') == 0)
 
 
+@rinv('неполная сессия отличается от штатного повтора и НЕ подаёт заявок',
+      needs=lambda r: r['case'] == 'повтор при НЕПОЛНОМ журнале')
+def _r44j(r):
+    """СОРОК ЧЕТВЁРТЫЙ КРУГ, №6. Три требования сразу, потому что порознь каждое зелено и
+    при снятой защите: отказ ЕСТЬ; он НЕ несёт слов штатного повтора («не новее последней
+    завершённой»), по которым автопилот ставит traded-* и идёт дальше, — иначе недостача
+    всплывёт лишь на замыкании, когда день уже объявлен отторгованным; заявок не подано."""
+    err = r.get('error') or ''
+    return (r['raised'] and 'НЕПОЛНА' in err
+            and 'не новее последней завершённой' not in err
+            and r.get('placed') == 0)
+
+
 @rinv('повторное замыкание отвергается',
       needs=lambda r: r['case'] == 'замыкание повторное')
 def _r9(r):
@@ -3089,6 +3307,13 @@ def _session_race():
     return out
 
 
+# ИСТОЧНИК ДЛЯ ДОЧЕРНИХ ПРОЦЕССОВ СТЕНДА ЗАМКА — ВЕЛИЧИНОЙ (сорок четвёртый круг, №9).
+# Оба участника гонки обязаны исполнять ОДИН И ТОТ ЖЕ код: пока держатель жил в родителе,
+# мутация замка меняла только его, дочерний брал неизменённый — и «поймана» получалось из
+# рассогласования стенда, а не из проверяемого свойства. Величина даёт мутации одну ручку.
+LOCK_SRC = str(Path(__file__).resolve().parent)
+
+
 def _session_lock():
     """ЗАМОК ОБЩИЙ МЕЖДУ ПРОЦЕССАМИ — доказательство отдельным процессом, а не пересказом.
 
@@ -3100,39 +3325,55 @@ def _session_lock():
     import subprocess
     import sys as _sys
     import tempfile
-    import state as ST
     tmp = tempfile.mkdtemp(prefix='addfut-lock-')
     env = dict(os.environ, ADDFUT_LOCK_DIR=tmp)
+    out = dict(case='замок между процессами', held='', freed='', raised=False)
+    # ДЕРЖАТЕЛЬ — ТОЖЕ ОТДЕЛЬНЫЙ ПРОЦЕСС (сорок четвёртый круг, №9): он берёт замок, говорит
+    # ГОТОВ и ждёт строки на stdin, не отпуская. Так обе стороны исполняют один источник.
+    holder_src = ('import sys; sys.path.insert(0, %r); import state as ST\n'
+                  'with ST.hold_book_lock(timeout_s=5):\n'
+                  '    print("ГОТОВ", flush=True)\n'
+                  '    sys.stdin.readline()\n' % LOCK_SRC)
     child = [_sys.executable, '-c',
              'import sys; sys.path.insert(0, %r); import state as ST\n'
              'try:\n'
              '    with ST.hold_book_lock(timeout_s=1):\n'
              '        print("ВЗЯЛ")\n'
              'except RuntimeError:\n'
-             '    print("ЗАНЯТО")' % str(Path(__file__).resolve().parent)]
-    out = dict(case='замок между процессами', held='', freed='', raised=False)
+             '    print("ЗАНЯТО")' % LOCK_SRC]
     keep_env = os.environ.get('ADDFUT_LOCK_DIR')
+    holder = None
     try:
-        # ОКРУЖЕНИЕ РОДИТЕЛЯ И РЕБЁНКА ВЫРАВНИВАЕТСЯ ЯВНО: env имеет приоритет над hint, и
-        # под selfcheck (свой ADDFUT_LOCK_DIR) родитель запирал каталог самопроверки, а
-        # ребёнок — tmp: снова два файла. Оба обязаны смотреть в ОДИН каталог.
         os.environ['ADDFUT_LOCK_DIR'] = tmp
         # МАРШРУТ ЕСТЬ ВСЕГДА (двадцать седьмой круг, №1): его пишет hand_over_book, а
         # пилот стартовал на Ф. Стенд без route.txt описывает состояние, которого нет.
         (Path(tmp) / 'route.txt').write_text('F', encoding='utf-8')
-        with ST.hold_book_lock(tmp):
-            r1 = subprocess.run(child, env=env, capture_output=True, text=True, timeout=30)
-            out['held'] = (r1.stdout or '').strip()
+        holder = subprocess.Popen([_sys.executable, '-c', holder_src], env=env,
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        out['держатель'] = (holder.stdout.readline() or '').strip()
+        r1 = subprocess.run(child, env=env, capture_output=True, text=True, timeout=30)
+        out['held'] = (r1.stdout or '').strip()
+        # ПОДМЕНА ФАЙЛА ЗАМКА ПОД ДЕРЖАТЕЛЕМ (тот же №9). flock запирает inode, а не имя:
+        # восстановление каталога из копии, unlink или атомарная замена давали второму
+        # процессу НОВЫЙ inode — он честно брал СВОЙ замок, и оба шли подавать заявки по
+        # одной книге. Держатель на месте, файл заменён — чужой обязан получить ЗАНЯТО.
+        import state as _STl
+        (Path(tmp) / '.подмена').write_text('чужой', encoding='utf-8')
+        os.replace(Path(tmp) / '.подмена', Path(tmp) / _STl.LOCK_NAME)
+        r1b = subprocess.run(child, env=env, capture_output=True, text=True, timeout=30)
+        out['held_after_swap'] = (r1b.stdout or '').strip()
+        holder.stdin.write('\n'); holder.stdin.flush()
+        holder.wait(timeout=30); holder = None
         r2 = subprocess.run(child, env=env, capture_output=True, text=True, timeout=30)
         out['freed'] = (r2.stdout or '').strip()
     except Exception as ex:
         out['raised'] = True; out['error'] = f'{type(ex).__name__}: {ex}'
     finally:
+        if holder is not None:
+            holder.kill()
         os.environ.pop('ADDFUT_LOCK_DIR', None)
         if keep_env is not None:
             os.environ['ADDFUT_LOCK_DIR'] = keep_env
-            # МАРШРУТ ЕСТЬ ВСЕГДА (двадцать седьмой круг, №1): его пишет hand_over_book, а
-            # пилот стартовал на Ф. Стенд без route.txt описывает состояние, которого нет.
             (Path(keep_env) / 'route.txt').write_text('F', encoding='utf-8')
     return out
 
@@ -3164,6 +3405,122 @@ def _session_statedir():
     return out
 
 
+
+def _autopilot_case(kind):
+    """ШЕЛЛОВЫЙ СЛОЙ ТОЖЕ ПРОВЕРЯЕТСЯ (инцидент 19.08.2026, §12).
+
+    Ветка run_close «копия не снята» затирала тревогу, которую backup_state уже написал с
+    ПРИЧИНОЙ: alarm_write открывает файл на запись. Причина нигде больше не живёт — в
+    журнал она попадает только при УСПЕХЕ, — поэтому разбор инцидента 18.08 начался с
+    воспроизведения того, что уже было напечатано и стёрто.
+
+    Стенд гоняет НАСТОЯЩУЮ функцию из настоящего файла: скрипт сорсится (ветка `*)` зовёт
+    exit, поэтому exit на время сорсинга подменён функцией), границы подставлены — вместо
+    питона исполняемая заглушка, вместо backup_state заглушка, которая ведёт себя как
+    боевая: пишет причину в ALARM-backup-ДЕНЬ и отказывает. Проверяется то, что случилось
+    в бою: причина обязана пережить общее сообщение."""
+    import os
+    import subprocess
+    import tempfile
+    out = dict(case=kind, raised=False, error='', ok=False)
+    tmp = tempfile.mkdtemp(prefix='addfut-autopilot-')
+    if kind == 'автопилот: возраст сердцебиения строг':
+        # СОРОК ЧЕТВЁРТЫЙ КРУГ, №12. Сторож занятого замка при пустой или нечисловой
+        # отметке снова брал mtime — изменяемую величину, ради ухода от которой правка и
+        # делалась: touch или восстановление каталога из копии делают ЗАВИСШЕЕ сердцебиение
+        # «свежим», сторож молчит, контур слеп, ролл пропущен. Метка из будущего была ещё
+        # хуже: отрицательный возраст обнулялся, и тревога не наступала вовсе.
+        # Проверяются ЧЕТЫРЕ точки: живая отметка даёт возраст (иначе стенд доказывал бы
+        # «всегда ломается»), пустая и нечисловая — поломку, будущая — поломку. Плюс
+        # атомарность записи: без неё строгость чтения давала бы ложные тревоги на гонке.
+        prog12 = r"""
+set -u -o pipefail
+export HOME=%(tmp)s
+mkdir -p "$HOME/.addfut"
+exit() { return 0; }
+source %(sh)s __стенд__ >/dev/null 2>&1
+unset -f exit
+f=$ST/проба
+hb_write "$f" >/dev/null 2>&1
+if v=$(hb_age "$f"); then echo "ЖИВАЯ=$v"; else echo "ЖИВАЯ-ПОЛОМКА=$v"; fi
+printf '' > "$f"
+if v=$(hb_age "$f"); then echo "ПУСТАЯ=$v"; else echo "ПУСТАЯ-ПОЛОМКА"; fi
+printf 'мусор' > "$f"
+if v=$(hb_age "$f"); then echo "МУСОР=$v"; else echo "МУСОР-ПОЛОМКА"; fi
+touch "$f"                     # mtime свежий, содержимое по-прежнему негодное
+if v=$(hb_age "$f"); then echo "ПОСЛЕ-TOUCH=$v"; else echo "TOUCH-ПОЛОМКА"; fi
+printf '%%s' "$(( $(date +%%s) + 5000 ))" > "$f"
+if v=$(hb_age "$f"); then echo "БУДУЩЕЕ=$v"; else echo "БУДУЩЕЕ-ПОЛОМКА"; fi
+printf '%%s' "$(( $(date +%%s) - 7200 ))" > "$f"
+if v=$(hb_age "$f"); then echo "СТАРАЯ=$v"; else echo "СТАРАЯ-ПОЛОМКА"; fi
+hb_write "$f" >/dev/null 2>&1
+echo "ВРЕМЕННЫХ=$(ls "$ST" | grep -c 'tmp' || true)"
+""" % dict(tmp=tmp, sh=str(AUTOPILOT_SH))
+        try:
+            r12 = subprocess.run(['bash', '-c', prog12], capture_output=True, text=True,
+                                 cwd=str(ROOT), timeout=120)
+            t12 = r12.stdout
+            out['вывод'] = t12.strip()[:400]
+            out['живая_читается'] = 'ЖИВАЯ=' in t12
+            out['пустая_поломка'] = 'ПУСТАЯ-ПОЛОМКА' in t12
+            out['мусор_поломка'] = 'МУСОР-ПОЛОМКА' in t12
+            out['touch_не_лечит'] = 'TOUCH-ПОЛОМКА' in t12
+            out['будущее_поломка'] = 'БУДУЩЕЕ-ПОЛОМКА' in t12
+            out['старая_считается'] = 'СТАРАЯ=7200' in t12 or 'СТАРАЯ=7201' in t12
+            out['без_временных'] = 'ВРЕМЕННЫХ=0' in t12
+            out['ok'] = all([out['живая_читается'], out['пустая_поломка'],
+                             out['мусор_поломка'], out['touch_не_лечит'],
+                             out['будущее_поломка'], out['старая_считается'],
+                             out['без_временных']])
+        except Exception as ex:
+            out['raised'] = True
+            out['error'] = f'{type(ex).__name__}: {ex}'
+        return out
+    prog = r"""
+set -u -o pipefail
+export HOME=%(tmp)s
+mkdir -p "$HOME/.addfut"
+exit() { return 0; }                 # ветка `*)` боевого dispatch не должна убить сорсинг
+source %(sh)s __стенд__ >/dev/null 2>&1
+unset -f exit
+echo F > "$ST/route.txt"
+cat > "$HOME/fakepy" <<'FP'
+#!/bin/sh
+echo "замкнуто: NLV закрытия 1"
+FP
+chmod +x "$HOME/fakepy"
+PY=$HOME/fakepy                      # граница с питоном подставлена
+backup_state() {                     # ведёт себя как боевая: пишет ПРИЧИНУ и отказывает
+    alarm_write "$ST/ALARM-backup-$1.txt" "снимок состояния/WORM за $1 не создан: ПРИЧИНА-ЗОНДА"
+    return 1
+}
+run_close 2026-08-18 >/dev/null 2>&1
+echo "RC=$?"
+echo "ФАЙЛ-НАЧАЛО"
+cat "$ST/ALARM-backup-2026-08-18.txt" 2>/dev/null
+echo "ФАЙЛ-КОНЕЦ"
+[ -e "$ST/closed-2026-08-18" ] && echo "ОТМЕТКА=есть" || echo "ОТМЕТКА=нет"
+""" % dict(tmp=tmp, sh=str(AUTOPILOT_SH))
+    try:
+        r = subprocess.run(['bash', '-c', prog], capture_output=True, text=True,
+                           cwd=str(ROOT), timeout=120)
+        txt = r.stdout
+        body = txt.split('ФАЙЛ-НАЧАЛО', 1)[1].split('ФАЙЛ-КОНЕЦ', 1)[0] if 'ФАЙЛ-НАЧАЛО' in txt else ''
+        out['вывод'] = txt.strip()[:400]
+        out['причина_жива'] = 'ПРИЧИНА-ЗОНДА' in body
+        out['общее_сказано'] = 'не ставится (О-5)' in body
+        # ЗОНД ДОСТИЖИМОСТИ: без входа в саму ветку оба признака ничего не значат — ветка
+        # выполняется только когда run_close дошёл до backup_state и получил отказ.
+        out['ветка_пройдена'] = 'RC=1' in txt and out['общее_сказано']
+        out['день_не_закрыт'] = 'ОТМЕТКА=нет' in txt
+        out['ok'] = bool(out['причина_жива'] and out['ветка_пройдена']
+                         and out['день_не_закрыт'])
+    except Exception as ex:
+        out['raised'] = True
+        out['error'] = f'{type(ex).__name__}: {ex}'
+    return out
+
+
 def _worm_case(kind):
     """Стенды WORM-якоря (девятнадцатый круг, №18/№19): обязательные файлы, действующие
     пути, blob-сверка HEAD. Всё — на временных каталогах и временном git-репозитории;
@@ -3189,7 +3546,13 @@ def _worm_case(kind):
         for k in ('ADDFUT_BOOK_PATH', 'ADDFUT_DIR'):
             os.environ.pop(k, None)
         os.environ['ADDFUT_REGISTRY'] = str(ib_stub.fixture_registry(tmp))
-        os.environ['ADDFUT_MARGINS'] = str(Path(tmp) / 'margins_live.json')
+        # ЗАМЕР МАРЖИ — В ФИКСТУРЕ, А НЕ ПУСТЫМ ПУТЁМ (сорок четвёртый круг, №13). С этого
+        # круга обязательность файла берётся из ИСТОРИИ ЯКОРЕЙ: раз машина уже заверяла
+        # замер, его отсутствие — утрата, а не молодость контура. Стенд, подставлявший
+        # несуществующий путь, описывал состояние, которого на этой машине не бывает,
+        # и падал по существу. Кладём настоящий замер, построенный из той же фикстуры
+        # реестра; случай «утрата заверенного замера» задаёт свой путь сам.
+        os.environ['ADDFUT_MARGINS'] = str(ib_stub.fixture_margins(tmp))
         os.environ['ADDFUT_SIGNALS'] = str(Path(tmp) / 'signals_live.csv')
         b0 = DL.Book(d_fix=8.0, n_e=26, n_b=10, unit_is_mes=True, prev_st_eq=True,
                      prev_st_bd=True, ser_a='U26', ser_b='U26', es_held=2,
@@ -3217,6 +3580,16 @@ def _worm_case(kind):
         # его всегда несёт. Прежняя фикстура его не создавала.
         (Path(tmp) / 'signals_levels.csv').write_text(
             ',IEF,SPY\n2026-07-31,92.630000,747.030000\n', encoding='utf-8')
+        # ПИН СЧЁТА И САЙДКАР КОНТРОЛЬНОЙ СУММЫ — ТОЖЕ ЧАСТЬ ЖИВОГО СОСТОЯНИЯ (44-й круг,
+        # №13). Обязательность приходит из истории якорей, и она растёт: пин уже заверялся,
+        # сайдкар начнёт заверяться первым же снимком после этой правки. Кладём оба СЕЙЧАС,
+        # иначе батарея краснела бы не на правке, а на следующем замыкании — «траектория, а
+        # не снимок».
+        (Path(tmp) / 'account.txt').write_text('DU000001\n', encoding='utf-8')
+        import hashlib as _hl13
+        _sig13 = Path(tmp) / 'signals_live.csv'
+        (Path(tmp) / 'signals_live.csv.sha256').write_text(
+            _hl13.sha256(_sig13.read_bytes()).hexdigest() + '\n', encoding='utf-8')
         if kind == 'worm: ШТАТНЫЙ снимок проходит целиком':
             # ТРИДЦАТЫЙ КРУГ, №11. Успешный производственный путь snap() не исполнял НИ
             # ОДИН стенд: единственный вызов проверял ОТКАЗ. Поэтому правка, из-за которой
@@ -3258,6 +3631,106 @@ def _worm_case(kind):
                              and bool(_in_head) and _bind)
                 out['files'] = dict(рабочие=_rab, помеченные=_rej, якоря=_anch,
                                     архив_привязан=_bind)
+            finally:
+                WA.ROOT, WA.ANCHORS = keep_root, keep_anch
+            return out
+        if kind == 'worm: утрата заверенного замера':
+            # СОРОК ЧЕТВЁРТЫЙ КРУГ, №13. Обязательность файла не может выводиться из него
+            # самого: удали замер — и он объявит себя необязательным, а якорь заверит утрату
+            # как штатное отсутствие. Признак берётся из ИСТОРИИ ЯКОРЕЙ. Стенд проверяет обе
+            # стороны в одном прогоне, иначе «отказал» ничего не говорит: без истории тот же
+            # вызов обязан ПРОЙТИ (молодой контур), с историей — ОТКАЗАТЬ (утрата).
+            _anch_dir = Path(tempfile.mkdtemp(prefix='addfut-ever-')) / 'anchors'
+            _anch_dir.mkdir(parents=True)
+            keep_anch = WA.ANCHORS
+            WA.ANCHORS = _anch_dir
+            os.environ['ADDFUT_MARGINS'] = str(Path(tmp) / 'замера-нет.json')
+            try:
+                try:
+                    WA._anchor_body('2026-08-14')
+                    out['молодой_проходит'] = True
+                except RuntimeError:
+                    out['молодой_проходит'] = False
+                (_anch_dir / 'worm-2026-08-01.txt').write_text(
+                    'sha256 замера маржи (margins_live.json): ' + 'a' * 64 + '\n',
+                    encoding='utf-8')
+                try:
+                    WA._anchor_body('2026-08-14')
+                    out['утрата_отвергнута'] = False
+                except RuntimeError as _ex13:
+                    out['утрата_отвергнута'] = 'обязательный файл отсутствует' in str(_ex13)
+                _must13 = [_m for _l, _p, _a, _m in WA._attested_paths()
+                           if _l == 'замер маржи']
+                out['опись_требует'] = _must13 == [True]
+            finally:
+                WA.ANCHORS = keep_anch
+            out['ok'] = (out['молодой_проходит'] is True
+                         and out['утрата_отвергнута'] is True
+                         and out['опись_требует'] is True)
+            return out
+        if kind == 'worm: ВТОРОЙ снимок боевым вызовом':
+            # ИНЦИДЕНТ 19.08.2026 (§12): контур встал на первом же замыкании после того,
+            # как появился якорь НОВОГО формата. Стенд «ШТАТНЫЙ снимок» этого не видел,
+            # потому что отличался от боя ДВУМЯ вещами сразу, и обе нужны вместе:
+            #   (1) он передавал bdir объектом Path, а `worm_anchor.py --snap ДЕНЬ КАТАЛОГ`
+            #       отдаёт СТРОКУ из argv — и `bdir / имя` внутри anchors_without_archive
+            #       падало TypeError только в бою;
+            #   (2) он снимал ПЕРВУЮ копию в пустом каталоге якорей, а список кандидатов
+            #       собирается лишь из якорей со строкой «sha256 архива» — на первом снимке
+            #       он пуст, и дефектная строка недостижима вовсе.
+            # Отсюда траектория, а не снимок: снимаем ДВЕ копии подряд боевой формой вызова.
+            # Второй снимок и есть проверяемое место; на нём выпуск и падал.
+            bdir = Path(tmp) / 'backups'
+            rd = Path(tempfile.mkdtemp(prefix='addfut-git-argv-'))
+            subprocess.run(['git', 'init', '-q', str(rd)], check=True, capture_output=True)
+            for _k, _v in (('user.email', 'stend@local'), ('user.name', 'stend')):
+                subprocess.run(['git', '-C', str(rd), 'config', _k, _v],
+                               check=True, capture_output=True)
+            (rd / 'anchors').mkdir()
+            keep_root, keep_anch = WA.ROOT, WA.ANCHORS
+            WA.ROOT, WA.ANCHORS = rd, rd / 'anchors'
+            import re as _re44
+            try:
+                WA.snap('2026-08-14', str(bdir))          # СТРОКА, как из argv
+                _t1 = (rd / 'anchors' / 'worm-2026-08-14.txt').read_text(encoding='utf-8')
+                # ЗОНД ДОСТИЖИМОСТИ: без якоря со строкой «sha256 архива» второй снимок
+                # проверяемую ветку не проходит вовсе, и стенд был бы пустым.
+                out['якорь_несёт_архив'] = 'sha256 архива (' in _t1
+                WA.snap('2026-08-17', str(bdir))          # ЗДЕСЬ И ОТКАЗЫВАЛО 18.08
+                _rab = sorted(x.name for x in bdir.glob('addfut-*.tgz'))
+                _rej = sorted(x.name for x in bdir.glob('addfut-*.rejected'))
+                _anch = sorted(x.name for x in (rd / 'anchors').glob('worm-*.txt'))
+                # ПОЛОЖИТЕЛЬНЫЙ КОНТРОЛЬ (угол «от отрицания»): пройти ветку мало — она
+                # обязана в ней ГОВОРИТЬ. Прячем архив последнего якоря под .pending, то
+                # есть воспроизводим обрыв между коммитом и публикацией, и требуем, чтобы
+                # ТОТ ЖЕ боевой вызов со строкой назвал разрыв поимённо. Иначе «снимок
+                # прошёл» доказывало бы лишь отсутствие исключения.
+                _t2 = (rd / 'anchors' / 'worm-2026-08-17.txt').read_text(encoding='utf-8')
+                _nm2 = _re44.search(r'addfut-[0-9A-Za-z\-]+\.tgz', _t2).group(0)
+                (bdir / _nm2).rename(bdir / (_nm2 + '.pending'))
+                _bad = WA.anchors_without_archive(str(bdir))
+                out['разрыв_назван'] = bool(_bad) and any(_nm2 in x for x in _bad)
+                # ОШИБКА КОДА ОБЯЗАНА ПАДАТЬ, А НЕ СТАНОВИТЬСЯ ВЕРДИКТОМ (инцидент
+                # 19.08.2026). Воспроизводим исходный дефект точечно — снимаем приведение
+                # пути — и требуем ИСКЛЮЧЕНИЯ, а не списка: прежде здесь получался мягкий
+                # «считать недоказанной», и контур останавливался с чужим диагнозом.
+                _keep_ap = WA._as_path
+                WA._as_path = lambda x: x
+                try:
+                    WA.anchors_without_archive(str(bdir))
+                    out['ошибка_кода_громко'] = False
+                except TypeError:
+                    out['ошибка_кода_громко'] = True
+                except Exception:
+                    out['ошибка_кода_громко'] = False
+                finally:
+                    WA._as_path = _keep_ap
+                out['ok'] = (len(_rab) == 2 and not _rej and len(_anch) == 2
+                             and out['якорь_несёт_архив'] is True
+                             and out['разрыв_назван'] is True
+                             and out['ошибка_кода_громко'] is True)
+                out['files'] = dict(рабочие=_rab, помеченные=_rej, якоря=_anch,
+                                    разрыв=_bad)
             finally:
                 WA.ROOT, WA.ANCHORS = keep_root, keep_anch
             return out
@@ -3339,10 +3812,61 @@ def _r30a(r):
     return not r['raised'] and r['ok'] is True
 
 
+@rinv('утрата однажды заверенного замера отвергается, а молодой контур проходит',
+      needs=lambda r: r['case'] == 'worm: утрата заверенного замера')
+def _r44e(r):
+    """СОРОК ЧЕТВЁРТЫЙ КРУГ, №13. Обе половины в одном утверждении: без истории якорей
+    отсутствие замера законно (иначе стенд доказывал бы «отказывает всегда»), с историей —
+    утрата, и опись архива требует файл так же, как тело якоря."""
+    return (not r['raised'] and r['ok'] is True
+            and r.get('молодой_проходит') is True and r.get('утрата_отвергнута') is True)
+
+
+@rinv('второй снимок WORM боевым вызовом (строка из argv) проходит, а разрыв назван',
+      needs=lambda r: r['case'] == 'worm: ВТОРОЙ снимок боевым вызовом')
+def _r44w(r):
+    """ИНЦИДЕНТ 19.08.2026 (§12). Проверяются три вещи разом, потому что поодиночке каждая
+    зелена и при сломанной защите: снимок не поднял исключения; якорь первого снимка
+    ДЕЙСТВИТЕЛЬНО несёт имя архива (иначе проверяемая ветка недостижима и стенд пуст);
+    та же боевая форма вызова НАЗЫВАЕТ разрыв, когда он есть."""
+    return (not r['raised'] and r['ok'] is True
+            and r.get('якорь_несёт_архив') is True and r.get('разрыв_назван') is True)
+
+
+@rinv('возраст сердцебиения читается по содержимому, а touch его не лечит',
+      needs=lambda r: r['case'] == 'автопилот: возраст сердцебиения строг')
+def _r44h(r):
+    """СОРОК ЧЕТВЁРТЫЙ КРУГ, №12. Живая отметка обязана ЧИТАТЬСЯ (иначе доказывалось бы
+    «ломается всегда»), пустая и нечисловая — быть поломкой, touch поверх негодного
+    содержимого — не лечить её, метка из будущего — быть поломкой, а не нулём. Плюс
+    атомарность записи: строгое чтение без неё ловило бы гонку писателя."""
+    return not r['raised'] and r['ok'] is True
+
+
+@rinv('общая тревога автопилота не затирает причину отказа снимка',
+      needs=lambda r: r['case'] == 'автопилот: причина тревоги не затирается общей')
+def _r44a(r):
+    """ИНЦИДЕНТ 19.08.2026 (§12). Проверяется вместе: ветка ПРОЙДЕНА (run_close вернул 1 и
+    сказал своё общее слово), причина от backup_state в файле ОСТАЛАСЬ, день закрытым не
+    объявлен. Порознь каждый признак зелен и при затирании."""
+    return (not r['raised'] and r['ok'] is True and r.get('причина_жива') is True
+            and r.get('ветка_пройдена') is True)
+
+
 @rinv('чужой процесс не берёт занятый замок и берёт свободный',
       needs=lambda r: r['case'] == 'замок между процессами')
 def _r19(r):
     return not r['raised'] and r['held'] == 'ЗАНЯТО' and r['freed'] == 'ВЗЯЛ'
+
+
+@rinv('подмена файла замка под держателем не впускает второго',
+      needs=lambda r: r['case'] == 'замок между процессами')
+def _r44l(r):
+    """СОРОК ЧЕТВЁРТЫЙ КРУГ, №9. Проверяется вместе с соседним утверждением намеренно:
+    «ЗАНЯТО после подмены» без «ВЗЯЛ на свободном» доказывалось бы и наглухо сломанным
+    замком, который не даётся никому."""
+    return (not r['raised'] and r.get('held_after_swap') == 'ЗАНЯТО'
+            and r['freed'] == 'ВЗЯЛ')
 
 
 @rinv('подмена книги внутри окна замыкания отвергается',
@@ -3491,6 +4015,31 @@ def _session_route_switch():
             out['route_saved'] = None
         rt = ST.lock_dir() / 'route.txt'
         out['route_file'] = rt.read_text(encoding='utf-8').strip() if rt.exists() else None
+        # ВОЗВРАТ В РАНЕЕ РАБОТАВШИЙ МАРШРУТ (СОРОК ЧЕТВЁРТЫЙ КРУГ, №7). journal-F.csv здесь
+        # УЖЕ непуст — маршрут Ф торговал 12.08, — и прежде hand_over_book писал итоговую
+        # строку ТОЛЬКО в пустой журнал. Книга получала сегодняшнюю дату и новый номер
+        # сессии, а последней строкой журнала оставался итог старой эпохи Ф: первое же
+        # замыкание — отказ якоря WORM по несовпадению даты, ALARM-backup навсегда, ролл
+        # заперт. Выпускной round-trip этого не видел, потому что после возврата не
+        # замыкает день. Проверяем ФАКТ в журнале: последняя строка — итог ЭТОЙ сессии.
+        try:
+            import journal as _J7t
+            _jf = ST.lock_dir() / 'journal-F.csv'
+            out['f_rows_before'] = len(_J7t.read(_jf))
+            ib._pos = {es: 2.0, 900002: 6.0, zn: 10.0}
+            ib._shown = dict(ib._pos)
+            _brf = IBB.IBBroker(ib, registry=reg, settle_s=0.0, timeout_s=1.0)
+            _bk_back = TRN.hand_over_book(_brf, 'E', 'F')
+            _rows_f = _J7t.read(_jf)
+            _last_f = _rows_f[-1] if _rows_f else {}
+            out['back_last_note'] = str(_last_f.get('note', ''))
+            out['back_last_date'] = str(_last_f.get('date', ''))
+            out['back_book_date'] = str(getattr(_bk_back, 'last_session', ''))
+            # ИМЕННО ТО, ЧТО СПРОСИТ ЯКОРЬ: журнал закрыт итогом ЭТОЙ сессии.
+            out['back_gap'] = _J7t.session_incomplete(_rows_f, _bk_back.last_session)
+        except BaseException as ex:
+            out['error'] += f'возврат Е->Ф: {type(ex).__name__}: {ex} | '
+
     finally:
         pd.Timestamp.now = real_now
         (ib_insync.Index, FD.registry, FD.signal_state, FD.exchange_today,
@@ -3512,6 +4061,19 @@ def _r17(r):
     # route.txt обязан быть написан ПЕРЕХОДОМ (одиннадцатый круг, №4).
     return (r['f_ok'] and r['handed'] is not None and r.get('same_day_refused')
             and r['e_ok'] and r['route_saved'] == 'E' and r.get('route_file') == 'E')
+
+
+@rinv('возврат в ранее работавший маршрут закрывает журнал итогом ЭТОЙ сессии',
+      needs=lambda r: r['case'] == 'смена маршрута в связке с торговлей')
+def _r44h(r):
+    """СОРОК ЧЕТВЁРТЫЙ КРУГ, №7. Три требования: журнал целевого маршрута БЫЛ непуст
+    (иначе стенд проверял бы ветку «новый маршрут», где итог писался и раньше), последняя
+    строка — итог этой сессии, и разрыва нет по тому самому правилу, которое спросит якорь
+    WORM при замыкании."""
+    return (int(r.get('f_rows_before') or 0) > 0
+            and str(r.get('back_last_note', '')).startswith('итог сессии')
+            and r.get('back_last_date') == r.get('back_book_date')
+            and r.get('back_gap') == '')
 
 
 @rinv('после перехода книга состоит ТОЛЬКО из долей фондов',
@@ -3647,6 +4209,7 @@ def run_run():
                  else _session_lock() if case == 'замок между процессами'
                  else _session_statedir() if case == 'пути состояния: один namespace'
                  else _worm_case(case) if case.startswith('worm:')
+                 else _autopilot_case(case) if case.startswith('автопилот:')
                  else _session_run(case))
         except Exception as ex:
             r = dict(case=case, raised=True, error=f'СТЕНД: {type(ex).__name__}: {ex}',
@@ -3691,6 +4254,7 @@ TR_CASES = ('план целых фьючерсов', 'план дробных �
             'остаток непарной дельты при resume',
             'предпросмотр resume спрашивает остаток, а не весь план',
             'лимит заявок: покупка №391 не подаётся',
+            'лимит заявок: дневной контур уже потратил квоту',
             'маржа цели: фактическая книга дороже отображённой',
             'замер с нечисловой маржой', 'замер устарел',
             'замер: init прежде maint', 'замер: карта поколения неполна',
@@ -3982,6 +4546,46 @@ def _tr_run(case):
                               _f8)
             finally:
                 out['calls'] = list(br.calls)
+        elif case == 'лимит заявок: дневной контур уже потратил квоту':
+            # СОРОК ЧЕТВЁРТЫЙ КРУГ, №11. Лимит 390 принадлежит СЧЁТУ ЗА ДЕНЬ, а считался как
+            # len(st['order_ids']) — заявки только текущего файла прогресса. Утренний
+            # ребаланс, ролл и предыдущий переход того же дня в счёт не шли: при 389
+            # израсходованных счётом продажа источника проходила как локальная №390, а
+            # парная покупка была для счёта №391 и отвергалась ПОСЛЕ продажи — непарная
+            # позиция ровно на границе, ради которой ворота и заведены.
+            # Ставим 5 строк §7 за СЕГОДНЯШНЮЮ биржевую дату (это и есть дневной контур) и
+            # 386 заявок в исполнении: локально 386 < 390, по счёту 391 — ворота обязаны
+            # остановить переход ДО первой заявки.
+            import journal as _J11
+            import feed as _FD11
+            import state as _ST11
+            _d11 = _FD11.exchange_today().strftime('%Y-%m-%d')
+            _jp11 = _ST11.lock_dir() / 'journal-F.csv'
+            for _i11 in range(5):
+                _J11.append(_jp11, dict(
+                    date=_d11, leg='Б', instrument='ZNU26', qty=1, px_order='', px_fill='',
+                    commission='', reason='', nav='', leverage='',
+                    roll_spread_near='', roll_spread_far='', note='заявка дневного контура'))
+            out['j7_rows'] = len(_J11.read(_jp11))
+            lots = TRN.plan_lots(legs_fut, 10e6)
+            lim = TRN.unpaired_limit(legs_fut, 10e6)
+            br = _TrBroker()
+            st = dict(done=[], order_ids=[f'y{i}' for i in range(TRN.ORDERS_PER_DAY - 4)],
+                      log=[], executed_usd=0.0)
+            sp = Path(tempfile.mkdtemp(prefix='addfut-tr-')) / 'st.json'
+
+            def _f11(msg, cancel=True):
+                raise TRN.Incident(msg)
+
+            try:
+                TRN._run_lots(br, lots, st, sp, lim, _Unp({k: 0.0 for k in legs_fut}), {},
+                              _f11)
+            finally:
+                out['calls'] = list(br.calls)
+                try:
+                    _jp11.unlink()          # стенд не оставляет следов в каталоге стендов
+                except OSError:
+                    pass
         elif case == 'компенсация исполнена не полностью':
             # ДВАДЦАТЫЙ КРУГ, №2: брокер недобирает КАЖДУЮ покупку на единицу. Основная
             # покупка оставляет недостачу, компенсация её не закрывает — и прежде это
@@ -4362,6 +4966,19 @@ def _t_g1(r):
     """
     calls = r.get('calls') or []
     return (r['raised'] and 'дневной лимит' in r['error']
+            and not any(k in ('sell', 'buy') for k, *_ in calls))
+
+
+@tinv('квота дня считается по СЧЁТУ, а не по файлу прогресса',
+      needs=lambda r: r['case'] == 'лимит заявок: дневной контур уже потратил квоту')
+def _t_g44(r):
+    """СОРОК ЧЕТВЁРТЫЙ КРУГ, №11. Локально заявок 386 — меньше 390, и прежний счёт пустил
+    бы переход; вместе со строками §7 дневного контура их 391. Требуется: отказ ДО первой
+    заявки, отказ ИМЕННО по дневному лимиту, и в фикстуре действительно были строки §7 —
+    иначе стенд повторял бы соседний случай."""
+    calls = r.get('calls') or []
+    return (r['raised'] and 'дневной лимит' in r['error']
+            and int(r.get('j7_rows') or 0) >= 5
             and not any(k in ('sell', 'buy') for k, *_ in calls))
 
 
