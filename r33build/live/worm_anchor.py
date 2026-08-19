@@ -40,8 +40,9 @@ def _sha(p, required=False):
         return 'ФАЙЛА НЕТ'
 
 
-# ОШИБКИ КОДА, КОТОРЫЕ НЕЛЬЗЯ ЛОВИТЬ ШИРОКИМ except (инцидент 19.08.2026, §12).
-CODE_ERRORS = (TypeError, AttributeError, NameError, ImportError)
+# ОШИБКИ КОДА — ИЗ ОДНОЙ ТОЧКИ (state.CODE_ERRORS, сведено рецензией 19.08).
+import state as _STce
+CODE_ERRORS = _STce.CODE_ERRORS
 
 
 def _as_path(p):
@@ -84,6 +85,23 @@ def _atomic_write(path, body):
             os.unlink(tmp)
 
 
+# МЕТКИ ЗАВЕРЕННОГО — ОДНОЙ КОНСТАНТОЙ НА ОБА КОНЦА (рецензия 19.08, угол «упрощение»).
+# Правило «обязателен, раз однажды заверен» связывает ТЕКСТ строки якоря с проверкой
+# required=; когда метка написана в двух местах руками, переименование строки молча
+# обрывает связь: регекс начнёт извлекать новую метку, старые якоря несут старую, и
+# required обваливается в False — дефект №13 воскресает тем самым механизмом, который его
+# чинил. Метка теперь одна на запись и на проверку.
+LBL_MARGIN = 'замера маржи'
+LBL_PIN = 'пина счёта'
+LBL_SUM = 'контрольной суммы ряда'
+
+# КЭШ ИСТОРИИ ЯКОРЕЙ, ключ — поколение каталога (рецензия 19.08, угол «эффективность»):
+# за один snap() _ever_attested() звалась ЧЕТЫРЕЖДЫ (два тела якоря и два обхода описи), а
+# якоря не ротируются — их число растёт на один за торговый день и живёт в git вечно.
+# Ключ строится из имён, размеров и mtime_ns файлов: дописанный якорь ключ меняет.
+_EVER_CACHE = {'key': None, 'val': frozenset()}
+
+
 def _ever_attested():
     """ЧТО ЯКОРЯ УЖЕ ЗАВЕРЯЛИ НЕПУСТЫМ (СОРОК ЧЕТВЁРТЫЙ КРУГ, №13).
 
@@ -103,6 +121,13 @@ def _ever_attested():
         _files = sorted(ANCHORS.glob('worm-*.txt'))
     except OSError:
         return out
+    try:
+        _key = (str(ANCHORS), tuple((x.name, x.stat().st_size, x.stat().st_mtime_ns)
+                                    for x in _files))
+    except OSError:
+        _key = None
+    if _key is not None and _EVER_CACHE['key'] == _key:
+        return set(_EVER_CACHE['val'])
     for _a in _files:
         try:
             _txt = _a.read_text(encoding='utf-8')
@@ -112,6 +137,8 @@ def _ever_attested():
             _m = _re13.match(r'^sha256 ([^:(]+?)\s*(?:\([^)]*\))?:\s*([0-9a-f]{64})\s*$', _ln)
             if _m:
                 out.add(_m.group(1).strip())
+    if _key is not None:
+        _EVER_CACHE.update(key=_key, val=frozenset(out))
     return out
 
 
@@ -192,20 +219,20 @@ def _anchor_body(day):
             f'журнал §7: строк {n}, корень цепочки {tail}\n'
             f'sha256 журнала-файла: {_sha(jp, required=True)}\n'
             f'sha256 реестра ({reg.name}): {_sha(reg, required=True)}\n'
-            f'sha256 замера маржи ({mrg.name}): {_sha(mrg, required="замера маржи" in _ever)}\n'
+            f'sha256 {LBL_MARGIN} ({mrg.name}): {_sha(mrg, required=LBL_MARGIN in _ever)}\n'
             f'sha256 живого ряда сигналов: {_sha(_signals_path(), required=True)}\n'
             # ДВАДЦАТЬ ПЕРВЫЙ КРУГ, №14: сайдкар уровней и пин счёта попадают в tar, но в
             # теле якоря их не было — архив с подменённым пином или другим поколением
             # уровней имел бы полностью «правильный» WORM-текст. Уровни обязательны:
             # без них сигнал недоказуем. Пин может отсутствовать до первого запуска.
             f'sha256 сайдкара уровней: {_sha(st / "signals_levels.csv", required=True)}\n'
-            f'sha256 пина счёта: {_sha(st / "account.txt", required="пина счёта" in _ever)}\n'
+            f'sha256 {LBL_PIN}: {_sha(st / "account.txt", required=LBL_PIN in _ever)}\n'
             # КОНТРОЛЬНАЯ СУММА РЯДА СИГНАЛОВ (44-й круг, №13): сам ряд заверялся, а его
             # сайдкар — нет, хотя именно он доказывает, что ряд не подменён между сборками.
             # Обязательность приходит из истории: первый якорь запишет её, дальше отсутствие
             # станет утратой.
-            f'sha256 контрольной суммы ряда: '
-            f'{_sha(_signals_path().with_suffix(_signals_path().suffix + ".sha256"), required="контрольной суммы ряда" in _ever)}\n'
+            f'sha256 {LBL_SUM}: '
+            f'{_sha(_signals_path().with_suffix(_signals_path().suffix + ".sha256"), required=LBL_SUM in _ever)}\n'
             # ЖУРНАЛ МР — ТОЖЕ В ЯКОРЕ (тридцать первый круг, №13). Он единственный
             # источник действующего маршрута и одобрений перехода, а внешнего следа не имел
             # вовсе: правка «на месте» (inode тот же, схема цела) была видна только тому,
@@ -417,7 +444,7 @@ def _attested_paths():
     _mr_live = _mrj.exists() or _dep.exists()
     # ЗАМЕР МАРЖИ ОБЯЗАТЕЛЕН, КАК ТОЛЬКО ОН ХОТЬ РАЗ БЫЛ ЗАВЕРЕН (44-й круг, №13):
     # признак внешний (история якорей), поэтому файл не решает свою судьбу сам.
-    _mrg_live = 'замера маржи' in _ever_attested()
+    _mrg_live = LBL_MARGIN in _ever_attested()
     return [
         ('реестр контрактов', _reg, f'attested/{_reg.name}', True),
         ('замер маржи', _mrg, f'attested/{_mrg.name}', _mrg_live),

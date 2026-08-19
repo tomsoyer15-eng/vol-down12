@@ -22,6 +22,13 @@ import fcntl, hashlib, json, os, tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
+# ОШИБКИ КОДА, КОТОРЫЕ НЕЛЬЗЯ ЛОВИТЬ ШИРОКИМ except — ОДНО ОПРЕДЕЛЕНИЕ НА СЛОЙ
+# (инцидент 19.08.2026, §12; сведено в одну точку по рецензии того же дня). Широкий except
+# превращает «я сломан» в доменный вердикт и отправляет контур останавливаться с чужим
+# диагнозом. Живёт здесь, потому что state импортируют все, кому правило нужно; две копии
+# разошлись бы на первом же добавленном классе — ровно то, что правило и запрещает.
+CODE_ERRORS = (TypeError, AttributeError, NameError, ImportError)
+
 STATE_VERSION = 1
 LOCK_NAME = 'addfut-book.lock'      # ОДНО имя для daily и transition
 

@@ -2270,26 +2270,20 @@ def _session_run(case):
             ST.save(bp, b0, route, 1); _seed_j7(route, 1)
             ib._pos = {es: 2, 900002: 6, zn: 10}
             ib._shown = dict(ib._pos)
-        if case == 'повтор при сегодняшней незамкнутой книге':
-            # книга СЕГОДНЯШНЕЙ даты, close_provisional=True, отметки traded-* нет —
-            # ровно состояние после обрыва между сохранением книги и созданием отметки
+        if case in ('повтор при сегодняшней незамкнутой книге', 'повтор при НЕПОЛНОМ журнале'):
+            # ДВА СЛУЧАЯ ОДНОЙ ФИКСТУРЫ, ОТЛИЧИЕ РОВНО В ОДНОМ (сведено рецензией 19.08).
+            # Книга СЕГОДНЯШНЕЙ даты, close_provisional=True, отметки traded-* нет — ровно
+            # состояние после обрыва между сохранением книги и созданием отметки. Разница:
+            # в штатном повторе журнал закрыт итогом легаси-даты (правило ИТОГа её не
+            # трогает), а во втором — итогом ПРОШЛОЙ сессии при книге за 18.08, то есть
+            # обрыв между ST.save и J.append(ИТОГ), который вход обязан отличить. Две копии
+            # блока разъехались бы на первой же правке, и «второй, непохожий случай того же
+            # правила» тихо стал бы случаем ДРУГОГО правила.
             b0 = DL.Book(d_fix=7.9, n_e=26, n_b=10, unit_is_mes=True, prev_st_eq=True,
                          prev_st_bd=True, ser_a='U26', ser_b='U26', es_held=2,
                          last_session=today, close_provisional=True, prev_close_lev=1.99)
-            ST.save(bp, b0, route, 3); _seed_j7(route, 3)
-            ib._pos = {es: 2, 900002: 6, zn: 10}
-            ib._shown = dict(ib._pos)
-        if case == 'повтор при НЕПОЛНОМ журнале':
-            # ВТОРОЙ, НЕПОХОЖИЙ СЛУЧАЙ ТОГО ЖЕ ПРАВИЛА (44-й круг, №6). Книга сегодняшняя и
-            # незамкнутая — как в штатном повторе выше, — но журнал закрыт итогом ПРОШЛОЙ
-            # сессии: обрыв между ST.save и J.append(ИТОГ). Отличить это от штатного повтора
-            # обязан ВХОД, потому что дальше автопилот ставит traded-*, замыкание объявляет
-            # день завершённым, и только якорь WORM замечает недостачу — когда чинить уже
-            # нечего: ALARM-backup встаёт навсегда, следующий ролл заперт.
-            b0 = DL.Book(d_fix=7.9, n_e=26, n_b=10, unit_is_mes=True, prev_st_eq=True,
-                         prev_st_bd=True, ser_a='U26', ser_b='U26', es_held=2,
-                         last_session=today, close_provisional=True, prev_close_lev=1.99)
-            ST.save(bp, b0, route, 3); _seed_j7(route, 3, prev)
+            ST.save(bp, b0, route, 3)
+            _seed_j7(route, 3, prev if case == 'повтор при НЕПОЛНОМ журнале' else '2026-08-11')
             ib._pos = {es: 2, 900002: 6, zn: 10}
             ib._shown = dict(ib._pos)
         if case == 'незамкнутая предыдущая' or case.startswith('замыкание'):
@@ -3424,6 +3418,19 @@ def _autopilot_case(kind):
     import tempfile
     out = dict(case=kind, raised=False, error='', ok=False)
     tmp = tempfile.mkdtemp(prefix='addfut-autopilot-')
+    # ОБВЯЗКА СОРСИНГА — ОДНИМ ШАБЛОНОМ (рецензия 19.08, угол «упрощение»): она была
+    # скопирована в оба стенда, а стендов будет больше. Когда у autopilot.sh появится новый
+    # побочный эффект при сорсинге и понадобится ещё одна заглушка рядом с exit, её добавят
+    # в один экземпляр из трёх — остальные начнут сорсить полуинициализированный скрипт и
+    # падать не по проверяемой причине.
+    _PREFIX = r"""
+set -u -o pipefail
+export HOME=%(tmp)s
+mkdir -p "$HOME/.addfut"
+exit() { return 0; }                 # ветка `*)` боевого dispatch не должна убить сорсинг
+source %(sh)s __стенд__ >/dev/null 2>&1
+unset -f exit
+""" % dict(tmp=tmp, sh=str(AUTOPILOT_SH))
     if kind == 'автопилот: возраст сердцебиения строг':
         # СОРОК ЧЕТВЁРТЫЙ КРУГ, №12. Сторож занятого замка при пустой или нечисловой
         # отметке снова брал mtime — изменяемую величину, ради ухода от которой правка и
@@ -3433,13 +3440,7 @@ def _autopilot_case(kind):
         # Проверяются ЧЕТЫРЕ точки: живая отметка даёт возраст (иначе стенд доказывал бы
         # «всегда ломается»), пустая и нечисловая — поломку, будущая — поломку. Плюс
         # атомарность записи: без неё строгость чтения давала бы ложные тревоги на гонке.
-        prog12 = r"""
-set -u -o pipefail
-export HOME=%(tmp)s
-mkdir -p "$HOME/.addfut"
-exit() { return 0; }
-source %(sh)s __стенд__ >/dev/null 2>&1
-unset -f exit
+        prog12 = _PREFIX + r"""
 f=$ST/проба
 hb_write "$f" >/dev/null 2>&1
 if v=$(hb_age "$f"); then echo "ЖИВАЯ=$v"; else echo "ЖИВАЯ-ПОЛОМКА=$v"; fi
@@ -3449,13 +3450,13 @@ printf 'мусор' > "$f"
 if v=$(hb_age "$f"); then echo "МУСОР=$v"; else echo "МУСОР-ПОЛОМКА"; fi
 touch "$f"                     # mtime свежий, содержимое по-прежнему негодное
 if v=$(hb_age "$f"); then echo "ПОСЛЕ-TOUCH=$v"; else echo "TOUCH-ПОЛОМКА"; fi
-printf '%%s' "$(( $(date +%%s) + 5000 ))" > "$f"
+printf '%s' "$(( $(date +%s) + 5000 ))" > "$f"
 if v=$(hb_age "$f"); then echo "БУДУЩЕЕ=$v"; else echo "БУДУЩЕЕ-ПОЛОМКА"; fi
-printf '%%s' "$(( $(date +%%s) - 7200 ))" > "$f"
+printf '%s' "$(( $(date +%s) - 7200 ))" > "$f"
 if v=$(hb_age "$f"); then echo "СТАРАЯ=$v"; else echo "СТАРАЯ-ПОЛОМКА"; fi
 hb_write "$f" >/dev/null 2>&1
 echo "ВРЕМЕННЫХ=$(ls "$ST" | grep -c 'tmp' || true)"
-""" % dict(tmp=tmp, sh=str(AUTOPILOT_SH))
+"""
         try:
             r12 = subprocess.run(['bash', '-c', prog12], capture_output=True, text=True,
                                  cwd=str(ROOT), timeout=120)
@@ -3476,13 +3477,7 @@ echo "ВРЕМЕННЫХ=$(ls "$ST" | grep -c 'tmp' || true)"
             out['raised'] = True
             out['error'] = f'{type(ex).__name__}: {ex}'
         return out
-    prog = r"""
-set -u -o pipefail
-export HOME=%(tmp)s
-mkdir -p "$HOME/.addfut"
-exit() { return 0; }                 # ветка `*)` боевого dispatch не должна убить сорсинг
-source %(sh)s __стенд__ >/dev/null 2>&1
-unset -f exit
+    prog = _PREFIX + r"""
 echo F > "$ST/route.txt"
 cat > "$HOME/fakepy" <<'FP'
 #!/bin/sh
@@ -3500,7 +3495,7 @@ echo "ФАЙЛ-НАЧАЛО"
 cat "$ST/ALARM-backup-2026-08-18.txt" 2>/dev/null
 echo "ФАЙЛ-КОНЕЦ"
 [ -e "$ST/closed-2026-08-18" ] && echo "ОТМЕТКА=есть" || echo "ОТМЕТКА=нет"
-""" % dict(tmp=tmp, sh=str(AUTOPILOT_SH))
+"""
     try:
         r = subprocess.run(['bash', '-c', prog], capture_output=True, text=True,
                            cwd=str(ROOT), timeout=120)
@@ -4065,7 +4060,7 @@ def _r17(r):
 
 @rinv('возврат в ранее работавший маршрут закрывает журнал итогом ЭТОЙ сессии',
       needs=lambda r: r['case'] == 'смена маршрута в связке с торговлей')
-def _r44h(r):
+def _r44ret(r):
     """СОРОК ЧЕТВЁРТЫЙ КРУГ, №7. Три требования: журнал целевого маршрута БЫЛ непуст
     (иначе стенд проверял бы ветку «новый маршрут», где итог писался и раньше), последняя
     строка — итог этой сессии, и разрыва нет по тому самому правилу, которое спросит якорь

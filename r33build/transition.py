@@ -2545,6 +2545,10 @@ def _window_till(asof=None):
     return till
 
 
+# КЭШ СТРОК §7 ЗА СЕГОДНЯ, ключ — поколение файлов журналов (рецензия 19.08, эффективность).
+_J7_TODAY = {'key': None, 'n': 0}
+
+
 def _orders_used_today(st):
     """СКОЛЬКО ЗАЯВОК СЧЁТА СЕГОДНЯ УЖЕ ИЗРАСХОДОВАНО (СОРОК ЧЕТВЁРТЫЙ КРУГ, №11).
 
@@ -2571,15 +2575,36 @@ def _orders_used_today(st):
         _sq.path.insert(0, _lvq)
     import state as _STq, journal as _Jq, feed as _FDq
     _today_q = _FDq.exchange_today().strftime('%Y-%m-%d')
+    # ЖУРНАЛЫ ЧИТАЮТСЯ ОДИН РАЗ НА ПОКОЛЕНИЕ ФАЙЛОВ (найдено рецензией 19.08, угол
+    # «эффективность»). Ворота стоят перед КАЖДОЙ заявкой — продажей, покупкой, обеими
+    # компенсациями и восстановительными заявками resume: до ~780 вызовов на переход, а
+    # значит и до ~780 полных разборов обоих журналов §7. Хуже задержки то, ГДЕ она
+    # ложится: чтение перед покупкой удлиняет окно непарной дельты, когда источник уже
+    # продан. Ключ кэша — не время и не флаг, а ПОКОЛЕНИЕ файлов (размер и mtime_ns обоих
+    # журналов): любая дописанная строка ключ меняет, поэтому кэш не может показать
+    # устаревшее число — в отличие от «посчитать один раз на входе», где дневной контур,
+    # дописавший журнал между попытками resume, остался бы невидимым.
+    _sig, _paths = [], []
     for _rt_q in ('F', 'E'):
         _jpq = _STq.lock_dir() / f'journal-{_rt_q}.csv'
-        if not _jpq.exists():
-            continue
-        for _r_q in _Jq.read(_jpq):
-            if (str(_r_q.get('date')) == _today_q
-                    and str(_r_q.get('instrument')) not in ('ИТОГ', '', 'None')):
-                n += 1
-    return n
+        _paths.append(_jpq)
+        try:
+            _stq = _jpq.stat()
+            _sig.append((str(_jpq), _stq.st_size, _stq.st_mtime_ns))
+        except OSError:
+            _sig.append((str(_jpq), None, None))
+    _key = (_today_q, tuple(_sig))
+    if _J7_TODAY.get('key') != _key:
+        _cnt = 0
+        for _jpq in _paths:
+            if not _jpq.exists():
+                continue
+            for _r_q in _Jq.read(_jpq):
+                if (str(_r_q.get('date')) == _today_q
+                        and str(_r_q.get('instrument')) not in ('ИТОГ', '', 'None')):
+                    _cnt += 1
+        _J7_TODAY.update(key=_key, n=_cnt)
+    return n + _J7_TODAY['n']
 
 
 def _order_gate(st, broker, fail, where='', window_till=None, need=1):
@@ -2600,9 +2625,12 @@ def _order_gate(st, broker, fail, where='', window_till=None, need=1):
             # НЕИЗМЕРИМЫЙ РАСХОД — ОТКАЗ, А НЕ НОЛЬ: молчаливое «считаем только своё» и
             # было дефектом. Журнал §7 к этому месту уже проверен целиком (verify), поэтому
             # его нечитаемость здесь — инцидент, а не штатное состояние.
+            # fail() поднимает Incident — страховочного присваивания здесь нет намеренно
+            # (рецензия 19.08, угол «упрощение»): с ним невозбуждающий fail дал бы ЛОЖНЫЙ
+            # диагноз «лимит исчерпан (390)» вместо настоящего «расход непроверяем».
             fail(f'дневной расход заявок непроверяем ({type(_exq).__name__}: {_exq}) перед '
                  f'заявкой {where} — переход останавливается (О-5)')
-            _used = ORDERS_PER_DAY
+            raise Incident('дневной расход заявок непроверяем — переход остановлен (О-5)')
         if _used + max(0, need - 1) >= ORDERS_PER_DAY:
             fail(f'дневной лимит {ORDERS_PER_DAY} заявок исчерпан по счёту '
                  f'({_used}; из них {len(st["order_ids"])} в этом исполнении) перед заявкой '

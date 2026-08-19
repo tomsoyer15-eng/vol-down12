@@ -1,4 +1,4 @@
-# git-base 09b009c558bf71cc76eaae9a45cf08afe6a86167 (+13 изменённых файлов r33build относительно HEAD на момент выпуска)
+# git-base 5bfefd5f4182d37e8f387bbe2db22cfe6af396b0 (+0 изменённых файлов r33build относительно HEAD на момент выпуска)
 #  git-base b6fc27b73bc2c644fcc8ed52e4045de0af52e4e2 (+13 изменённых файлов r33build относительно HEAD на момент выпуска)
 c8e4d5bdc2d4ca1eb3f92691be49379b5c0806e17519da2fe8e41d656480e38c  ADD-FUT-v1_6_0-r33.pdf
 1c90f5ae5841677a6efa0017163c7d50c88fdced547569d8371933f8e8d867a0  ADD-FUT-v1_6_0-r33.txt
@@ -48,7 +48,7 @@ d48a2691dff1de926f1604bae06cfdf358b5b77957b998ade8d9670f3b1307d5  mr_journal.csv
 ba3aab8aaf6217c2c1185aa6490d1246bcb23a33daa4e0b3459fe18b008d61e2  nav_etf_modern.csv
 55b6d1f11dc8286285aea3922dea9a468b815dd8b67ab5a8f638f1f6a815ddd8  nav_v164_modern.csv
 50ee28f3c288bfafc23108a0227736f8b86edf925b1434e9ab682bc2005322b2  nav_v164_splice.csv
-b1317d73cc51dee3c71028d2e7b1cadbf938ecf5c794813bc3e2d6bc247a006f  selfcheck_v192.py
+652dcff2faab61b246202eb9c9e66c87ce31c0da8ca19a3643be99ad545f424e  selfcheck_v192.py
 a11ad51f2994cf2e150209b6fb84893054ad9df2dbd2fe829dae10ba9110c900  sim_etf.py
 e079bec09e5f74104bcc5822928e69d727a15fa2e6ee8c0ca8cb7fd60842ef53  sim_v13.py
 9cdfe9b59bfafa14aeab48b5c9f1910c55e507f73c3ac7e38fbc359ef4d9dfff  sim_v164.py
