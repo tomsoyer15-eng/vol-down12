@@ -75,6 +75,53 @@ def dva_nogi_mesyachno(nachalo=None, konec=None):
     return spx, obl
 
 
+def stupenki_dlya_dvizhka(kal, ryady_real):
+    """Синтетические ЕЖЕМЕСЯЧНЫЕ строки ES и ZN для склейки с реальными рядами.
+
+    По каждой ноге — своя точка стыка (первая дата реальных данных: 1997-09-09
+    у ES, 1982-05-03 у ZN — ZN нуждается в синтетике только на 1979-1982).
+    Синтетический уровень отмасштабирован так, чтобы ПОСЛЕДНЕЕ синтетическое
+    значение точно совпало с ПЕРВОЙ реальной ценой (backadj) — иначе на стыке
+    возникнет ложный скачок цены и фиктивный П/У. Масштаб не меняет доходности
+    внутри синтетического участка (умножение на константу).
+    Дата каждой синтетической строки — последний день соответствующего месяца
+    в общем календаре `kal` (том самом, что уже собран из реальных 64 рынков).
+    """
+    spx, obl = dva_nogi_mesyachno(None, None)
+    out = {}
+    for sym, indeks in (('ES', spx), ('ZN', obl)):
+        real = ryady_real[sym]
+        styk_data = real.index[0]
+        styk_cena = float(real['cena_adj'].iloc[0])
+        per = indeks.index[indeks.index < pd.Period(styk_data, 'M')]
+        if len(per) == 0:
+            continue
+        ryad = indeks.loc[per] * (styk_cena / indeks.loc[per].iloc[-1])
+        daty = []
+        for p in per:
+            d = kal[(kal.year == p.year) & (kal.month == p.month) & (kal < styk_data)]
+            if len(d):
+                daty.append(d[-1])
+        ryad = ryad.iloc[-len(daty):]
+        idx = pd.DatetimeIndex(daty)
+        out[sym] = pd.DataFrame({'cena': ryad.values, 'cena_adj': ryad.values,
+                                 'post_mes': np.nan, 'oborot': np.nan}, index=idx)
+    return out
+
+
+def skleit(dan):
+    """Возвращает НОВЫЙ словарь данных (как zagruzka.sobrat()) с синтетическими
+    строками ES/ZN, приклеенными спереди к реальным рядам. Календарь `kal` не
+    расширяется — синтетические даты берутся из уже собранного kal."""
+    import copy
+    dan2 = copy.copy(dan)
+    dan2['ryady'] = dict(dan['ryady'])
+    stup = stupenki_dlya_dvizhka(dan['kalendar'], dan['ryady'])
+    for sym, sint in stup.items():
+        dan2['ryady'][sym] = pd.concat([sint, dan['ryady'][sym]]).sort_index()
+    return dan2
+
+
 if __name__ == '__main__':
     spx, obl = dva_nogi_mesyachno('1962-01', '2026-07')
     print('SPX синтетика:', spx.index[0], '..', spx.index[-1], '| значения', spx.iloc[0], '->', round(spx.iloc[-1]))

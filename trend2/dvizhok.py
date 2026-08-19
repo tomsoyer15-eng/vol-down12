@@ -70,7 +70,13 @@ def prognoz(p, m=None, nastr=None, mnozhitel=1.0, signal_mes=None, sdvig=0):
     dni = np.r_[0.0, np.diff(kal.values).astype('timedelta64[D]').astype(float)]
 
     sig_eff = np.fmax(m['SG'], m['PL'])                     # пол на оценку колебаний
-    dostup = (~np.isnan(m['P'])) & (~np.isnan(sig_eff))
+    # широкая нога размерена через σ (формула равного риска) — нужна оценка колебаний;
+    # часть 1 (ES/ZN) размерена прямым плечом (cel=eq1/stoim) — σ ей не участвует
+    # в формуле вообще, и требовать её для допуска к торговле неверно: на синтетическом
+    # участке (до появления реальных фьючерсов) окно 252 дня может не успеть накопиться
+    # на редкой (месячной) сетке синтетики, а сигнал и цена уже есть.
+    dostup_wide = (~np.isnan(m['P'])) & (~np.isnan(sig_eff))
+    dostup_nogi = ~np.isnan(m['P'])
     stoim = m['P'] * m['PV'] * m['FX']                      # номинал торгуемого контракта, USD
 
     t0 = int(kal.get_indexer([pd.Timestamp(n['nachalo'])], method='bfill')[0])
@@ -102,19 +108,22 @@ def prognoz(p, m=None, nastr=None, mnozhitel=1.0, signal_mes=None, sdvig=0):
             if n['delim_kapital_popolam']:                  # ответ 5.7
                 eq1 = eq2 = 0.5 * (eq1 + eq2)
             sg = SIG0[t] if t == t0 else SIG[t]
-            est_t = dostup[t] & (~np.isnan(sg))
-            dlin = est_t & (sg == 1)
-            nn = int((est_t & wide).sum()) if n['n_v_formule'] == 'vse_dostupnye' \
-                else int((dlin & wide).sum())
+            est_wide = dostup_wide[t] & (~np.isnan(sg))
+            est_nogi = dostup_nogi[t] & (~np.isnan(sg))
+            dlin_wide = est_wide & (sg == 1)
+            dlin_nogi = est_nogi & (sg == 1)
+            dlin = np.where(wide, dlin_wide, dlin_nogi)
+            nn = int((est_wide & wide).sum()) if n['n_v_formule'] == 'vse_dostupnye' \
+                else int((dlin_wide & wide).sum())
             cel = np.zeros(M)
             if nn > 0:
                 s = K.CEL_KOLEBANIJ / np.sqrt(nn + nn * (nn - 1) * rho[t])
                 sgm = np.where(sig_eff[t] > 0, sig_eff[t], np.inf)
-                nom = np.where(dlin & wide, s * eq2 / sgm, 0.0)
+                nom = np.where(dlin_wide & wide, s * eq2 / sgm, 0.0)
                 nom = np.minimum(nom, n['potolok_nominala'] * eq2)
                 cel = np.where(stoim[t] > 0, nom / stoim[t], 0.0)
             for i in i1:
-                if dlin[i]:
+                if dlin_nogi[i]:
                     cel[i] = eq1 / stoim[t, i]              # 0.5 * плечо 2.00 * капитал
             nov = np.floor(np.nan_to_num(cel * mnozhitel) + 1e-9)
             nov = np.where(dlin, np.maximum(nov, 0.0), 0.0)
