@@ -778,6 +778,33 @@ def _a31u(beh):
             and lo_f <= 700.0 <= hi_f)
 
 
+@ainv('каждый отказ предпросмотра называет СВОЮ причину, а не общую',
+      needs=lambda b: b == 'normal')
+def _a44why(beh):
+    """СОРОК ЧЕТВЁРТЫЙ КРУГ, №14(б) + рецензия 19.08. Правка обещала «оператор читает
+    настоящую причину», но проверялось это НИЧЕМ: мутация причины в пустую строку
+    оставляла батарею зелёной, а пять выходов из десяти не исполнял ни один стенд —
+    включая ПУСТОЙ ОТВЕТ шлюза, то есть ровно семью граблей 18.08, ради которой правка и
+    делалась.
+
+    Проверяются три разных исхода: молчание шлюза, недостаток запаса по худшей оценке и
+    успех. Причины обязаны РАЗЛИЧАТЬСЯ между собой (иначе годилась бы одна общая строка)
+    и быть пустыми при успехе — отказа не было, объяснять нечего."""
+    br, ib, rows = _adapter(beh)
+    ib._pos = {900001: 1.0}; ib._shown = dict(ib._pos)
+    ib.whatif = 'нет'                                  # шлюз молчит (семья 18.08)
+    _pusto = (br.preview([('ESU26', 1)]), br._preview_why)
+    ib.whatif = ''
+    ib.whatif_values = [-900000.0, 800000.0]           # худшая оценка 800k при NLV 1 млн
+    _tesno = (br.preview([('ESU26', 1), ('MESU26', 1)]), br._preview_why)
+    ib.whatif_values = [-900000.0, 500000.0]
+    _ok = (br.preview([('ESU26', 1), ('MESU26', 1)]), br._preview_why)
+    return bool(_pusto[0] is False and 'пустой ответ whatIf' in _pusto[1]
+                and _tesno[0] is False and 'О-3-Е' in _tesno[1]
+                and _pusto[1] != _tesno[1]
+                and _ok[0] is True and _ok[1] == '')
+
+
 @ainv('диагност различает порог §8 по капиталу и порог О-3-Е по марже',
       needs=lambda b: b == 'normal')
 def _a44dg(beh):
@@ -3639,29 +3666,66 @@ def _worm_case(kind):
             _anch_dir.mkdir(parents=True)
             keep_anch = WA.ANCHORS
             WA.ANCHORS = _anch_dir
-            os.environ['ADDFUT_MARGINS'] = str(Path(tmp) / 'замера-нет.json')
+            # ПРОВЕРЯЮТСЯ ВСЕ ТРИ МЕТКИ, И ЧЕРЕЗ КОНСТАНТЫ (рецензия 19.08): у пина счёта и
+            # контрольной суммы ряда не было стенда вовсе — переименование любой из них
+            # молча снимало обязательность навсегда, и батарея оставалась зелёной. Литерал
+            # в стенде ловил бы только совпадение с самим собой; ссылка на WA.LBL_* ловит
+            # расхождение между записью в тело якоря и чтением истории.
+            _mrg_missing = str(Path(tmp) / 'замера-нет.json')
+            # ЛИТЕРАЛЫ — ЭТО ИСТОРИЯ, КОНСТАНТЫ — ЭТО КОД (уточнено зондом при этой же
+            # правке). Первая редакция писала фикстуру ЧЕРЕЗ WA.LBL_*, и переименование
+            # константы стенд не ловило: запись и чтение менялись согласованно. А в бою
+            # метку несут якоря, УЖЕ ЛЕЖАЩИЕ В GIT, — она заморожена и переименованию не
+            # подлежит. Поэтому фикстура пишет ровно те строки, что лежат в истории, а
+            # совпадение с константами проверяется отдельно и прямо.
+            out['метки_заморожены'] = (
+                (WA.LBL_MARGIN, WA.LBL_PIN, WA.LBL_SUM)
+                == ('замера маржи', 'пина счёта', 'контрольной суммы ряда'))
+            _cases13 = (
+                ('замера маржи', 'margins_live.json',
+                 lambda: os.environ.__setitem__('ADDFUT_MARGINS', _mrg_missing)),
+                ('пина счёта', 'account.txt',
+                 lambda: (Path(tmp) / 'account.txt').unlink()),
+                ('контрольной суммы ряда', 'signals_live.csv.sha256',
+                 lambda: (Path(tmp) / 'signals_live.csv.sha256').unlink()),
+            )
+            out['метки'] = {}
             try:
-                try:
-                    WA._anchor_body('2026-08-14')
-                    out['молодой_проходит'] = True
-                except RuntimeError:
-                    out['молодой_проходит'] = False
-                (_anch_dir / 'worm-2026-08-01.txt').write_text(
-                    'sha256 замера маржи (margins_live.json): ' + 'a' * 64 + '\n',
-                    encoding='utf-8')
-                try:
-                    WA._anchor_body('2026-08-14')
-                    out['утрата_отвергнута'] = False
-                except RuntimeError as _ex13:
-                    out['утрата_отвергнута'] = 'обязательный файл отсутствует' in str(_ex13)
-                _must13 = [_m for _l, _p, _a, _m in WA._attested_paths()
-                           if _l == 'замер маржи']
-                out['опись_требует'] = _must13 == [True]
+                for _lbl13, _name13, _lose13 in _cases13:
+                    WA._EVER_CACHE.update(key=None, val=frozenset())
+                    for _f13 in _anch_dir.glob('worm-*.txt'):
+                        _f13.unlink()
+                    _lose13()                       # файл утрачен
+                    try:
+                        WA._anchor_body('2026-08-14')
+                        _young = True               # истории нет — молодой контур проходит
+                    except RuntimeError:
+                        _young = False
+                    (_anch_dir / 'worm-2026-08-01.txt').write_text(
+                        f'sha256 {_lbl13} ({_name13}): ' + 'a' * 64 + '\n', encoding='utf-8')
+                    WA._EVER_CACHE.update(key=None, val=frozenset())
+                    try:
+                        WA._anchor_body('2026-08-14')
+                        _lost = False
+                    except RuntimeError as _ex13:
+                        _lost = 'обязательный файл отсутствует' in str(_ex13)
+                    out['метки'][_lbl13] = (_young, _lost)
+                    if _lbl13 == 'замера маржи':
+                        # ОПИСЬ СВЕРЯЕТСЯ, ПОКА В ИСТОРИИ ЛЕЖИТ ИМЕННО ЭТОТ ЯКОРЬ: после
+                        # следующей итерации он затирается, и проверка мерила бы пустоту.
+                        _must13 = [_m for _l, _p, _a, _m in WA._attested_paths()
+                                   if _l == 'замер маржи']
+                        out['опись_требует'] = _must13 == [True]
+                out['молодой_проходит'] = all(v[0] for v in out['метки'].values())
+                out['утрата_отвергнута'] = all(v[1] for v in out['метки'].values())
             finally:
                 WA.ANCHORS = keep_anch
+                WA._EVER_CACHE.update(key=None, val=frozenset())
             out['ok'] = (out['молодой_проходит'] is True
                          and out['утрата_отвергнута'] is True
-                         and out['опись_требует'] is True)
+                         and out.get('опись_требует') is True
+                         and out['метки_заморожены'] is True
+                         and len(out['метки']) == 3)
             return out
         if kind == 'worm: ВТОРОЙ снимок боевым вызовом':
             # ИНЦИДЕНТ 19.08.2026 (§12): контур встал на первом же замыкании после того,
@@ -3814,7 +3878,8 @@ def _r44e(r):
     отсутствие замера законно (иначе стенд доказывал бы «отказывает всегда»), с историей —
     утрата, и опись архива требует файл так же, как тело якоря."""
     return (not r['raised'] and r['ok'] is True
-            and r.get('молодой_проходит') is True and r.get('утрата_отвергнута') is True)
+            and r.get('молодой_проходит') is True and r.get('утрата_отвергнута') is True
+            and r.get('метки_заморожены') is True and len(r.get('метки') or {}) == 3)
 
 
 @rinv('второй снимок WORM боевым вызовом (строка из argv) проходит, а разрыв назван',
@@ -4554,6 +4619,12 @@ def _tr_run(case):
             import journal as _J11
             import feed as _FD11
             import state as _ST11
+            # КЭШ СБРАСЫВАЕТСЯ ЯВНО (рецензия 19.08): модульный _J7_TODAY переживает
+            # границу «чистый базлайн -> мутант» внутри одного процесса мутационного
+            # прогона, и мутант, живущий ПОД кэшем, был бы объявлен пойманным по чужой
+            # причине. Сегодня его спасает то, что фикстура каждый раз пересоздаёт журнал и
+            # даёт свежий mtime_ns, — но это совпадение фикстуры, а не механизм.
+            TRN._J7_TODAY.update(key=None, n=0)
             _d11 = _FD11.exchange_today().strftime('%Y-%m-%d')
             _jp11 = _ST11.lock_dir() / 'journal-F.csv'
             for _i11 in range(5):

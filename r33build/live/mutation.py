@@ -797,6 +797,17 @@ def _adapter_mutations():
             return None
         return orig, patched, _FCm      # носитель — модуль замера, не адаптер
 
+    def preview_why_empty():
+        """Причина отказа предпросмотра снова не называется (дефект №14 до правки):
+        «маржа цели не проходит О-3-Е» подставляется на любой беде, включая молчание
+        шлюза, и оператор ищет деньги там, где сломан справочник."""
+        orig = B.IBBroker._preview_no
+
+        def patched(self, why):
+            self._preview_why = ""
+            return False
+        return orig, patched
+
     def diagnose_signs_merged():
         """Сигнатуры §8 и О-3-Е снова слиты в «ниже порога» — как было до 44-го круга,
         №14(в): маржинальный инцидент маршрута Е диагност объявляет отказом политики
@@ -832,7 +843,8 @@ def _adapter_mutations():
             return True
         return orig, patched
 
-    return [('сигнатуры диагноста слиты', 'SIGNS', diagnose_signs_merged),
+    return [('причина отказа предпросмотра не называется', '_preview_no', preview_why_empty),
+            ('сигнатуры диагноста слиты', 'SIGNS', diagnose_signs_merged),
             ('ранний выход по отрицательной сумме', 'preview', preview_negative_sum_passes),
             ('TIF снят в замере маржи', 'measure_margin', measure_margin_no_tif),
             ('календарь CME навязан фондам', '_venue_prev', venue_prev_cme_for_all),

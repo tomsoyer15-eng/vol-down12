@@ -37,7 +37,13 @@ def _git_base():
 def refresh_manifest():
     out, miss = [], []
     for ln in MAN.read_text(encoding='utf-8').splitlines():
-        if ln.lstrip().startswith('# git-base'):
+        # СЛЕД ПРОШЛОГО ВЫПУСКА СНИМАЕТСЯ ПО СУТИ, А НЕ ПО ТОЧНОМУ НАБОРУ ПРОБЕЛОВ
+        # (рецензия 19.08). Условие `startswith('# git-base')` не совпадало с формой
+        # `#  git-base` — а её писал сам этот инструмент: строка пережила все выпуски и
+        # застряла в корне доверия навсегда. Аудитор, распаковав пакет, читал ДВА взаимно
+        # исключающих происхождения и не мог определить, каким коммитом собран архив.
+        _st = ln.lstrip()
+        if _st.startswith('#') and 'git-base' in _st:
             continue                       # след прошлого выпуска заменяется свежим
         m = re.match(r'^([0-9a-f]{64})\s+(\S+)$', ln.strip())
         if not m:
