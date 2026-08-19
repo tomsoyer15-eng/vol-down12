@@ -19,7 +19,8 @@ for sym in ('ES', 'ZN'):
           f'стало с {dan_sint["ryady"][sym].index[0].date()} '
           f'(+{len(dan_sint["ryady"][sym])-len(dan["ryady"][sym])} синтетических строк)')
 
-p = PG.sobrat(dan_sint, nastr={'nachalo': NACHALO, 'konec': KONEC})
+p = PG.sobrat(dan_sint, nastr={'nachalo': NACHALO, 'konec': KONEC},
+             put=K.KESH / 'paneli_polnoe_okno.pkl')
 m = D.podgotovit(p)
 e, z = D.prognoz(p, m, nastr={'nachalo': NACHALO, 'konec': KONEC})
 e_bez, z_bez = D.prognoz(p, m, nastr={'nachalo': NACHALO, 'konec': KONEC, 'platim_rolly': False})

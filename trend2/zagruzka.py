@@ -44,7 +44,7 @@ def ryady():
     out, meta = {}, {}
     for sym in tab.index:
         u, b = _csv(sym, 'unadj'), _csv(sym, 'backadj')
-        if u is None:
+        if u is None or b is None:
             continue
         df = pd.DataFrame({'cena': u['close'], 'cena_adj': b['close'],
                            'post_mes': u['delivery_month'], 'oborot': u['volume']})
@@ -75,11 +75,11 @@ def kursy(kalendar):
     """
     fx = pd.DataFrame(index=kalendar)
     fx['USD'] = 1.0
+    sp = _spec()
     for val, (sym, razmer) in K.FX_FJUCHERSY.items():
         u = _csv(sym, 'unadj')
         if u is None:
             continue
-        sp = _spec()
         # ответ 2.2: постоянный курс — последняя цена фьючерса, на всю историю
         k = float(u['close'].iloc[-1]) * sp.loc[sym, 'point_value'] / razmer
         fx[val] = k

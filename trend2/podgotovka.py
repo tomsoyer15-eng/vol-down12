@@ -94,11 +94,19 @@ def svyaz_nakopitelno(r_dnevnye, nastr=None):
 
 
 def daty_rollov(ryady, posl_torgi, tablica, kal):
-    """Ответ 0.2: даты роллов из смены delivery_month; ES и ZN — по правилу §21."""
+    """Ответ 0.2: даты роллов из смены delivery_month; ES и ZN — по правилу §21 (N=1/N=21).
+
+    Для ES/ZN колонка delivery_month тоже заполнена (выгрузка №1 — обычная
+    склейка Norgate), поэтому ветку по правилу §21 нужно форсировать явно —
+    иначе она недостижима и для этих двух рынков даты ролла молча берутся
+    так же, как для остальных 62 (смена delivery_month), а не по N дням от
+    последних торгов, как подтвердил заказчик в ответе 7.4. Найдено ревью
+    18.08.2026 (роли не пуст. §21-веткой ни разу не проходили).
+    """
     out = {}
     for s, v in ryady.items():
         dm = v['post_mes'].dropna()
-        if len(dm):
+        if len(dm) and s not in K.NOGI_ADDFUT:
             dm = dm.astype(int).astype(str)
             smena = dm[(dm != dm.shift()) & dm.shift().notna()]
             out[s] = pd.DatetimeIndex(smena.index)
@@ -116,7 +124,12 @@ def daty_rollov(ryady, posl_torgi, tablica, kal):
     return out
 
 
-def sobrat(dan=None, nastr=None):
+def sobrat(dan=None, nastr=None, put=None):
+    """put — куда писать кеш панелей; по умолчанию kesh/paneli.pkl (общий для
+    zapusk.py/dvizhok.py/proverki.py). Другой путь обязателен для АЛЬТЕРНАТИВНЫХ
+    наборов данных (например, склеенных с синтетикой в polnoe_okno.py) — иначе
+    вызов молча подменяет общий кеш, и следующий standalone-запуск dvizhok.py
+    или proverki.py читает не те панели без единой ошибки (найдено ревью 18.08)."""
     n = dict(K.NASTROJKI, **(nastr or {}))
     if dan is None:
         dan = pickle.load(open(K.KESH / 'dannye.pkl', 'rb'))
@@ -132,8 +145,9 @@ def sobrat(dan=None, nastr=None):
              rolly=daty_rollov(r, dan['posl_torgi'], dan['tablica'], kal),
              kalendar=kal, meta=dan['meta'], fx=dan['fx'], stavka=dan['stavka'],
              tablica=dan['tablica'])
-    K.KESH.mkdir(parents=True, exist_ok=True)
-    with open(K.KESH / 'paneli.pkl', 'wb') as f:
+    put = put or (K.KESH / 'paneli.pkl')
+    put.parent.mkdir(parents=True, exist_ok=True)
+    with open(put, 'wb') as f:
         pickle.dump(p, f)
     return p
 

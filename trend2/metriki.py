@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Итоговые меры и самопроверки."""
 import numpy as np, pandas as pd
+import konfig as K
 
 
 def let(x):
@@ -19,8 +20,14 @@ def prosadka(x):
     return float((x / x.cummax() - 1.0).min())
 
 
-def denezhnyj_schet(stavka, index, baza=360):
-    """Капитал, пролежавший всё окно в трёхмесячных векселях."""
+def denezhnyj_schet(stavka, index, baza=None):
+    """Капитал, пролежавший всё окно в трёхмесячных векселях.
+
+    База начисления по умолчанию = K.NASTROJKI — та же, что использует
+    движок, а не отдельная зашитая константа (найдено ревью 18.08: обе
+    сейчас равны 360, но были бы независимы, если ответ 3.1 пересмотрят).
+    """
+    baza = K.NASTROJKI['baza_nachisleniya'] if baza is None else baza
     # ставка берётся на предыдущий день — так же, как её начисляет движок,
     # иначе зонд достижимости D в proverki.py разойдётся на своём же сдвиге
     s = stavka.reindex(index).ffill().shift().fillna(0.0)
