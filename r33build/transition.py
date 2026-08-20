@@ -983,7 +983,7 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
         raise RuntimeError(
             f'книга маршрута {from_route} не замкнута (close_provisional) — сначала '
             f'замыкание сессии, затем переход: иначе плечо закрытия теряется')
-    _jp = _STp.lock_dir() / f'journal-{to_route}.csv'
+    _jp = _STp.journal_path(to_route)        # один путь на всех (рецензия 20.08)
     # СЕРИЯ И d_fix — В ПРЕДПОЛЁТЕ (двадцать седьмой круг, №7 и №8). Обе проверки жили
     # только в hand_over_book, то есть срабатывали ПОСЛЕ продажи источника и покупки цели.
     if to_route == 'F':
@@ -1387,6 +1387,15 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         # выход неотличим от планового ни в коде, ни в разборе.
         _pv = (broker.preview(sorted(_pv_orders.items()), emergency=bool(emergency))
                if _pv_orders else broker.preview(emergency=bool(emergency)))
+    except _STce_tr.CODE_ERRORS:
+        # ОШИБКА КОДА ПАДАЕТ ГРОМКО И ЗДЕСЬ (рецензия 20.08). Запрет, заведённый в самом
+        # preview, тут же снимался ЕГО ЕДИНСТВЕННЫМ боевым вызывающим: широкий except
+        # переодевал TypeError обратно в доменный «margin preview оборван». Хуже того, исход
+        # УЖЕСТОЧАЛСЯ: до правки опечатка давала False -> POSTPONED (восстановимо, три
+        # попытки), а с re-raise она стала писать MIXED в нормативный журнал при resume.
+        # Ошибку кода разбирает человек по трассировке, а не по маржинальному диагнозу;
+        # состояние при этом не портится, потому что заявок ещё не подавали.
+        raise
     except Exception as ex:
         if resume or st.get('opened') or st.get('executed_usd', 0.0) > TOL \
                 or st.get('cancel_fills'):
@@ -2246,6 +2255,20 @@ def open_session_in_journal(jp, day, sess_no, from_route, to_route, was_used):
     итоге старой эпохи: первое же замыкание отвергалось якорем WORM.
     """
     import journal as _J2
+    # ИДЕМПОТЕНТНОСТЬ (рецензия 20.08). Прежнее условие `if not _rows2` было неверным по
+    # смыслу (возврат Е->Ф оставался без итога), но попутно давало идемпотентность: повтор
+    # передачи после обрыва между ST.save и этой записью не клал ВТОРОЙ итог. Номер сессии
+    # считается от ИСХОДНОЙ книги, которую hand_over_book не меняет, поэтому повтор
+    # вычисляет тот же номер и ту же дату. Две строки «итог сессии N» за один день ломают
+    # счёт §7 и неотличимы от настоящих: цепочка хэшей цела, а session_incomplete смотрит
+    # только на последнюю. Проверяем ровно то, что собираемся написать.
+    try:
+        _last2 = (_J2.read(jp) or [])[-1:]
+    except OSError:
+        _last2 = []
+    if _last2 and str(_last2[0].get('date')) == str(day) \
+            and str(_last2[0].get('note', '')).startswith(f'итог сессии {sess_no}:'):
+        return
     _J2.append(jp, dict(
         date=day, leg='', instrument='ИТОГ', qty=0, px_order='-', px_fill='',
         commission='', reason='', nav='', leverage='',
@@ -2412,7 +2435,7 @@ def hand_over_book(broker, from_route, to_route, positions=None):
     # осталось и при следующем запуске затирало новую книгу. Заявление «всё до
     # движения денег» было обратным коду.
     import journal as _J2
-    _jp2 = _ST2.lock_dir() / f'journal-{to_route}.csv'
+    _jp2 = _ST2.journal_path(to_route)
     # НАМЕРЕНИЕ СТАРОЙ ЭПОХИ ЦЕЛЕВОГО МАРШРУТА (двадцать третий круг, №9). Перед
     # записью book-{to_route}.json никто не смотрел на book-{to_route}.json.intent.json.
     # После COMPLETE первый же run_session разбирал ЧУЖОЕ намерение прошлой эпохи: при
@@ -2485,7 +2508,7 @@ def hand_over_book(broker, from_route, to_route, positions=None):
     # правило, которым 42-й круг ввёл нулевой ИТОГ, а 44-й (№5) закрыл отложенный ролл.
     # Выпускной round-trip этого не видел: он возвращается в Ф, но не замыкает день.
     try:
-        _jp2 = _ST2.lock_dir() / f'journal-{to_route}.csv'
+        _jp2 = _ST2.journal_path(to_route)
         open_session_in_journal(_jp2, _today, int(_prev_sess or 0) + 1,
                                 from_route, to_route, bool(_rows2))
     except Exception as _exj:
@@ -2609,7 +2632,7 @@ def _orders_used_today(st):
     # дописавший журнал между попытками resume, остался бы невидимым.
     _sig, _paths = [], []
     for _rt_q in ('F', 'E'):
-        _jpq = _STq.lock_dir() / f'journal-{_rt_q}.csv'
+        _jpq = _STq.journal_path(_rt_q)
         _paths.append(_jpq)
         try:
             _stq = _jpq.stat()
@@ -2689,13 +2712,17 @@ def _order_gate(st, broker, fail, where='', window_till=None, need=1):
         # ПОРЯДОК: сперва ЖЁСТКОЕ закрытие окна, потом запас на пару. Иначе уже закрытое
         # окно объяснялось бы «не хватит времени», что неверно по существу и сбивает
         # оператора: окна нет вовсе, а не мало.
+        # ТЕ ЖЕ ГАРАНТИИ, ЧТО И У ЛИМИТА (рецензия 20.08): правило «остановка обеспечивается,
+        # а не предполагается» было применено к одному выходу из трёх — оконные ворота
+        # остались на голом fail(). Невозбуждающий fail пропустил бы заявку ЗА КРАЕМ окна
+        # после уже проданной ноги: та же непарная позиция, только по другой причине.
         if _now >= window_till:
-            fail(f'общее окно LSE/CME закрыто ({_now:%H:%M:%S} >= {window_till:%H:%M}) '
-                 f'перед заявкой {where} — переход останавливается, непарная позиция '
-                 f'разбирается вручную')
+            _stop(f'общее окно LSE/CME закрыто ({_now:%H:%M:%S} >= {window_till:%H:%M}) '
+                  f'перед заявкой {where} — переход останавливается, непарная позиция '
+                  f'разбирается вручную')
         if need > 1 and _now >= window_till - _pd.Timedelta(minutes=_need_min):
-            fail(f'до края общего окна ({window_till:%H:%M}) осталось меньше {_need_min} мин '
-                 f'— пары не хватит времени: продажа прошла бы, а парная покупка опоздала')
+            _stop(f'до края общего окна ({window_till:%H:%M}) осталось меньше {_need_min} мин '
+                  f'— пары не хватит времени: продажа прошла бы, а парная покупка опоздала')
 
 
 def _run_lots(broker, plan, st, state_path, lim, unp, dst_bought, fail, _M=None,

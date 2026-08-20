@@ -46,8 +46,13 @@ def _machine_snapshot():
     # копирует незакоммиченное на Drive; его журнал и замок живут в ~/.addfut той же
     # семьёй, что и журнал автопилота, и торгового состояния не несут. Без исключения
     # часовой selfcheck валился о СТРАХОВКУ, а не о стенды — ровно как 13.08 о живой тик.
+    # + ВРЕМЕННЫЕ ФАЙЛЫ АТОМАРНОЙ ЗАПИСИ ОТМЕТОК (рецензия 20.08): hb_write пишет
+    # tick-heartbeat.tmp / lock-nohb.tmp и переименовывает. Тик, попавший внутрь часового
+    # прогона, ронял бы «стенды не тронули машинное состояние» и блокировал выпуск — тот же
+    # ложный отказ, ради которого сюда внесли сам tick-heartbeat 13.08.
     _DISPATCH = {'autopilot.log', 'tick-heartbeat', 'autopilot.lock', 'push-fails',
-                 'wip-push.log', 'wip-push.lock'}
+                 'wip-push.log', 'wip-push.lock',
+                 'tick-heartbeat.tmp', 'lock-nohb.tmp', 'lock-nohb'}
     out = {}
     if not os.path.isdir(_REAL_ADDFUT):
         return out

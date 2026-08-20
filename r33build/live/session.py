@@ -404,7 +404,7 @@ def do_o3e_cut(ib, route):
         if float(_pc) >= DL.O3E_MIN:
             print(f'запас О-3-Е {float(_pc):.2f}x не ниже {DL.O3E_MIN} — сокращение не требуется')
             return None
-        jp = state_dir() / f'journal-{route}.csv'
+        jp = ST.journal_path(route)
         try:
             J.verify(jp)
         except Exception as ex:
@@ -690,7 +690,7 @@ def do_trade(ib, route, dry):
             # ловится своим типом.
             import journal as _J6
             try:
-                _jp6 = state_dir() / f'journal-{route}.csv'
+                _jp6 = ST.journal_path(route)
                 _rows6 = _J6.read(_jp6) if _jp6.exists() else []
                 _incomplete = _J6.session_incomplete(_rows6, book.last_session)
             except (OSError, ValueError, KeyError) as _ex6:
@@ -773,7 +773,7 @@ def do_trade(ib, route, dry):
     # серия долгих запросов; run_session сам читает NLV ПОД ЗАМКОМ прямо перед решением.
     dec, orders, diff = DL.run_session(
         br, m, dirpath=str(state_dir()), route=route, capital=None, closing_nav=None,
-        journal_path=str(state_dir() / f'journal-{route}.csv'), dry_run=dry,
+        journal_path=str(ST.journal_path(route)), dry_run=dry,
         paper=paper_mode(),
         ref_prices=refs, book_path=str(bp), series_a=src.get('series'),
         # КРАЙ ТОРГОВОГО ОКНА ВНУТРЬ СЕССИИ (двадцатый круг, №6): один источник с

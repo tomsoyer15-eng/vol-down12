@@ -22,11 +22,20 @@ RCLONE="$HOME/bin/rclone"
 DRIVE_REMOTE="${ADDFUT_DRIVE_REMOTE:-vol-down12-drive:vol-down12-backups/}"
 cd "$ROOT" || exit 0
 
-# ОДИН ЭКЗЕМПЛЯР: перекрытие с самим собой или с backup_push бессмысленно и шумно.
-exec 9>"$HOME/.addfut/wip-push.lock" 2>/dev/null || exit 0
-flock -n 9 || exit 0
-
+# STDERR НЕ ГЛУШИТСЯ (рецензия 20.08). Здесь стояло `exec 9>… 2>/dev/null`, а `exec` БЕЗ
+# КОМАНДЫ применяет перенаправления к самой оболочке НАВСЕГДА: stderr скрипта уходил в
+# /dev/null на весь прогон, и любой отказ — нет rclone, git спросил пароль, mktemp не удался,
+# unbound-переменная под set -u — исчезал бесследно. Cron доставляет письмом именно stderr,
+# то есть страховка от потери работы переставала страховать МОЛЧА. Это тот же дефект, что
+# чинил autopilot.sh в 37-м круге (№11), воспроизведённый в новом файле.
 log() { echo "$(date '+%F %T') | $*" >> "$LOG"; }
+
+# ОДИН ЭКЗЕМПЛЯР: перекрытие с самим собой или с backup_push бессмысленно и шумно.
+if ! exec 9>"$HOME/.addfut/wip-push.lock"; then
+    echo "ADDFUT wip_push: не открыть замок $HOME/.addfut/wip-push.lock" >&2
+    exit 3
+fi
+flock -n 9 || exit 0
 
 # --- 1) незапушенные коммиты ----------------------------------------------------------
 for R in mirror origin; do
@@ -46,10 +55,24 @@ for R in mirror origin; do
 done
 
 # --- 2) незакоммиченная работа -> Drive wip/<дата>/ -----------------------------------
-LIST=$(mktemp /tmp/wip-list-XXXX)
-{ git diff --name-only; git diff --cached --name-only; \
-  git ls-files --others --exclude-standard; } 2>/dev/null | sort -u \
-  | while IFS= read -r f; do [ -f "$f" ] && printf '%s\n' "$f"; done > "$LIST"
+# ОТКАЗ СБОРА СПИСКА ОТЛИЧАЕТСЯ ОТ «НЕЧЕГО ВЫГРУЖАТЬ» (рецензия 20.08): при .git/index.lock
+# от параллельного git, идущем rebase или неудавшемся mktemp список выходил пустым, и прогон
+# молчал ровно так же, как при чистом дереве, — «молчать при неснятой копии запрещено».
+if ! LIST=$(mktemp /tmp/wip-list-XXXX); then
+    log "wip: ОТКАЗ mktemp — незакоммиченное НЕ покрыто"
+    exit 4
+fi
+if ! { git diff --name-only && git diff --cached --name-only \
+       && git ls-files --others --exclude-standard; } > "$LIST.raw" 2>>"$LOG"; then
+    log "wip: ОТКАЗ сбора списка изменённых файлов (git) — незакоммиченное НЕ покрыто"
+    unlink "$LIST.raw" 2>/dev/null || true
+    unlink "$LIST" 2>/dev/null || true
+    exit 5
+fi
+sort -u "$LIST.raw" | while IFS= read -r f; do
+    [ -f "$f" ] && printf '%s\n' "$f"
+done > "$LIST"
+unlink "$LIST.raw" 2>/dev/null || true
 if [ -s "$LIST" ]; then
     if [ -x "$RCLONE" ]; then
         DST="${DRIVE_REMOTE}wip/$(date +%F)/"

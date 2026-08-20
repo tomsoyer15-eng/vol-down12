@@ -27,6 +27,34 @@ import tempfile as _tf0
 # обратного: стенды не трогают машинное состояние ни при каких переменных окружения.
 # Унаследованное значение теперь именно ПЕРЕКРЫВАЕТСЯ, а не принимается на веру; выпуск и
 # так подставляет временный путь, но полагаться на дисциплину вызывающего здесь нельзя.
+# ВРЕМЕННЫЕ КАТАЛОГИ УБИРАЮТСЯ ЗА СОБОЙ (рецензия 20.08). Стенды создают их десятками за
+# прогон, мутационный — тысячами, и ни один не удалялся: на машине скопилось 226 тысяч
+# каталогов /tmp/addfut-* общим весом 5 ГБ. Переполненный /tmp роняет не батарею, а ЖИВОЙ
+# автопилот. Перехватываем сам mkdtemp: правка в одном месте покрывает все 33 точки вызова
+# в этом файле, ib_stub и mutation, и не требует помнить об уборке в каждом новом стенде.
+import atexit as _at0
+import shutil as _sh0
+_MADE_TMP0 = []
+_ORIG_MKDTEMP0 = _tf0.mkdtemp
+
+
+def _mkdtemp_tracked(*a, **k):
+    _d = _ORIG_MKDTEMP0(*a, **k)
+    _MADE_TMP0.append(_d)
+    return _d
+
+
+_tf0.mkdtemp = _mkdtemp_tracked
+
+
+@_at0.register
+def _sweep_tmp0():
+    # Только СВОИ каталоги этого процесса и только под /tmp: чужого не трогаем.
+    for _d in _MADE_TMP0:
+        if str(_d).startswith('/tmp/'):
+            _sh0.rmtree(_d, ignore_errors=True)
+
+
 _os0.environ['ADDFUT_LOCK_DIR'] = _tf0.mkdtemp(prefix='addfut-inv-')
 import pathlib as _pl0
 (_pl0.Path(_os0.environ['ADDFUT_LOCK_DIR']) / 'route.txt').write_text('F')
@@ -778,6 +806,53 @@ def _a31u(beh):
             and lo_f <= 700.0 <= hi_f)
 
 
+@ainv('часовой шлюза «не посчитано» не идёт в маржу',
+      needs=lambda b: b == 'normal')
+def _a44sent(beh):
+    """РЕЦЕНЗИЯ 20.08. UNSET_DOUBLE = 1.7976931348623157E308 конечен, и фильтр ib_insync
+    его не ловит (сравнивает со строкой Python «…e+308», а TWS шлёт запись Java с заглавной
+    E). Часовой доходил до нас обычным значением: одна заявка давала «запас 0.00x», две —
+    переполнение в inf, и законный переход уходил в ABORT со словом «маржа» там, где шлюз
+    просто не считал. Защита была введена без единого наблюдателя.
+
+    Проверяются ОБА конца: часовой отвергнут с ЧЕСТНОЙ причиной (не «маржа не прошла»), а
+    крупная, но законная маржа проходит — иначе порог, опечатанный вниз, запер бы весь
+    предпросмотр и стенд этого не заметил."""
+    br, ib, rows = _adapter(beh)
+    ib._pos = {900001: 1.0}; ib._shown = dict(ib._pos)
+    ib.whatif_values = [1.7976931348623157e308]
+    _sent = (br.preview([('ESU26', 1)]), br._preview_why)
+    ib.whatif_values = [500000.0]                      # крупно, но законно: 1 млн / 500k = 2,0
+    _ok = (br.preview([('ESU26', 1)]), br._preview_why)
+    return bool(_sent[0] is False and 'не посчитано' in _sent[1]
+                and _ok[0] is True and _ok[1] == '')
+
+
+@ainv('ошибка кода в предпросмотре падает громко, а не становится вердиктом',
+      needs=lambda b: b == 'normal')
+def _a44code(beh):
+    """ИНЦИДЕНТ 19.08 + РЕЦЕНЗИЯ 20.08. Правило слоя «ошибка кода не переодевается в
+    доменный вердикт» заведено в state.CODE_ERRORS и применено воротами в preview и
+    _release_by_measure — но не наблюдалось ничем: снятие любого из этих `raise` возвращало
+    дефект молча. Стенд ломает КОД внутри пути предпросмотра (подменяет helper на
+    поднимающий AttributeError) и требует, чтобы исключение вышло НАРУЖУ, а не превратилось
+    в False с маржинальным объяснением."""
+    br, ib, rows = _adapter(beh)
+    ib._pos = {900001: 1.0}; ib._shown = dict(ib._pos)
+    _keep = type(br)._contract
+    type(br)._contract = lambda self, name: (_ for _ in ()).throw(
+        AttributeError('проба: ошибка кода в предпросмотре'))
+    try:
+        _res, _raised = None, False
+        try:
+            _res = br.preview([('ESU26', 1)])
+        except AttributeError:
+            _raised = True
+    finally:
+        type(br)._contract = _keep
+    return bool(_raised and _res is None)
+
+
 @ainv('каждый отказ предпросмотра называет СВОЮ причину, а не общую',
       needs=lambda b: b == 'normal')
 def _a44why(beh):
@@ -817,10 +892,21 @@ def _a44dg(beh):
     import io
     import tempfile
     import diagnose as DG
+    # ТЕКСТЫ БЕРУТСЯ У ПРОИЗВОДИТЕЛЕЙ, А НЕ ПИШУТСЯ РУКОЙ (рецензия 20.08). Прежняя пара
+    # фикстур была скопирована из двух строк daily.py — тех самых, под которые и подгонялись
+    # сигнатуры, — поэтому стенд зеленел, а пять ДРУГИХ фактических формулировок (переход
+    # запрещён по §8, маржа целевой книги, вахта О-3-Е, пост-трейд О-3-Е, отказ mr_engine)
+    # не классифицировались вовсе. Здесь перечислены реальные формы всех производителей;
+    # добавление шестой обязано начинаться с добавления сюда.
     _res = {}
     for _key, _body in (
-            ('о3е', 'ТРЕВОГА: О-3-Е: запас 1.20x ниже 1.4 — сокращение до L=1\n'),
-            ('порог8', 'ОТКАЗ: NLV 2,999,999 ниже порога маршрута Ф 3,000,000 (§8)\n')):
+            ('о3е', 'О-3-Е: запас 1.20x ниже 1.4 — сокращение до L=1\n'),
+            ('о3е-после', 'О-3-Е ПОСЛЕ ИСПОЛНЕНИЙ: запас 1.20x ниже 1.4 — книга сокращена\n'),
+            ('о3е-вахта', 'О-3-Е ВНУТРИДНЕВНАЯ ВАХТА: запас 1.31x ниже 1.4\n'),
+            ('о3е-цель', 'маржинальный запас целевой книги 1.20x ниже порога 1.40x О-3-Е\n'),
+            ('порог8', 'NLV 2,999,999 ниже порога маршрута Ф 3,000,000 (§8)\n'),
+            ('порог8-переход', 'переход в Ф запрещён: NLV 2,999,999 ниже порога 3,000,000 (§8)\n'),
+            ('порог8-мр', 'сигнал в Ф при NLV ниже порога §8 (3,000,000)\n')):
         _f = Path(tempfile.mkdtemp(prefix='addfut-dg-')) / 'ALARM.txt'
         _f.write_text(_body, encoding='utf-8')
         _buf = io.StringIO()
@@ -829,8 +915,11 @@ def _a44dg(beh):
         _txt = _buf.getvalue()
         _first = next((l for l in _txt.splitlines() if l.startswith('Вероятная причина 1')), '')
         _res[_key] = _first
-    return ('О-3-Е' in _res['о3е'] and 'маржи' in _res['о3е']
-            and '§8' in _res['порог8'] and 'капитал' in _res['порог8'])
+    _o3e = all('маржи' in _res[k] and 'О-3-Е' in _res[k]
+               for k in ('о3е', 'о3е-после', 'о3е-вахта', 'о3е-цель'))
+    _p8 = all('капитал' in _res[k] and '§8' in _res[k]
+              for k in ('порог8', 'порог8-переход', 'порог8-мр'))
+    return bool(_o3e and _p8)
 
 
 @ainv('смешанные приращения предпросмотра решаются ХУДШЕЙ оценкой, а не суммой',
@@ -2233,6 +2322,13 @@ def _session_run(case):
     keep = (ib_insync.Index, FD.registry, FD.signal_state, FD.exchange_today,
             os.environ.get('ADDFUT_DIR'), os.environ.get('ADDFUT_BOOK_PATH'),
             os.environ.get('ADDFUT_LOCK_DIR'), os.environ.get('ADDFUT_REGISTRY'))
+    # ОРИГИНАЛЫ СВЯЗЫВАЮТСЯ ДО try, А НЕ ЧЕРЕЗ ДВЕСТИ СТРОК ВНУТРИ НЕГО (рецензия 20.08).
+    # Прежде _rs_orig/_al_orig/_sv_orig присваивались глубоко в теле, а finally восстанавливал
+    # их безусловно: любой отказ на подготовке фикстуры уводил в finally, где имён ещё нет, —
+    # UnboundLocalError ЗАМЕЩАЛ настоящую причину и вылетал мимо `except BaseException`.
+    # Стенд сообщал бессмыслицу вместо падения случая, а подменённые SS._alarm_o3e и ST.save
+    # оставались подменёнными на весь остаток батареи.
+    _rs_orig, _al_orig, _sv_orig = DL.run_session, SS._alarm_o3e, ST.save
     book_bytes0 = None
     try:
         ib_insync.Index = Idx
@@ -2465,7 +2561,7 @@ def _session_run(case):
         # могло сверять экспозицию только САМУ С СОБОЙ (тождество exposure == ne*px при
         # px = exposure/ne) — то есть не наблюдало объявленную границу вовсе. Перехватываем
         # ВХОД run_session: цены — независимый от Decision источник.
-        _rs_orig = DL.run_session
+        _rs_orig = DL.run_session          # (уже связан выше, до try — см. правку ниже)
 
         def _rs_spy(_br, _m, *a_, **k_):
             out['market'] = _m
@@ -2479,7 +2575,6 @@ def _session_run(case):
         # точки: он записывает ПОСЛЕДОВАТЕЛЬНОСТЬ вызовов, и она уже не зависит ни от
         # файловой системы, ни от часов.
         _seq = out['порядок'] = []
-        _al_orig, _sv_orig = SS._alarm_o3e, ST.save
 
         def _al_spy(*a_, **k_):
             _seq.append('тревога')
@@ -4257,7 +4352,11 @@ def _r_rollgap_total(r):
             and str(last.get('date')) == str(getattr(b, 'last_session', '')))
 
 
-def run_run():
+def run_run(stop_on_first=False):
+    """stop_on_first — для мутационного прогона (рецензия 20.08): вердикт «мутацию не поймал
+    НИКТО» требует прогнать ВСЕ случаи, а вот «поймана» доказывается ПЕРВЫМ же несогласным
+    утверждением. Досрочный выход не ослабляет доказательства и снимает с прогона ~15 минут:
+    полная батарея RUN идёт две минуты, а мутаций запуска уже 34."""
     cov, bad = {}, {}
     for case in RUN_CASES:
         try:
@@ -4285,6 +4384,8 @@ def run_run():
                 ok = False; name = f'{name} [исключение: {type(ex).__name__}: {ex}]'
             if not ok:
                 bad.setdefault(name, []).append(f"{case}: {r.get('error','')[:80]}")
+                if stop_on_first:
+                    return cov, bad        # мутация поймана — остальные случаи излишни
     return cov, bad
 
 

@@ -106,7 +106,12 @@ def fixture_margins(dirpath, rows=None, account='DU000001'):
     ser = {r['instrument']: 2200.0 if str(r['instrument']).startswith('ZN')
            else 3500.0 if str(r['instrument']).startswith('MES') else 35000.0
            for r in src if (r.get('sec_type') or '') == 'FUT'}
-    raw = {'_meta': {'date': str(_dt.date.today()), 'account': account,
+    # ДАТА — UTC, КАК У ЧИТАТЕЛЯ (рецензия 20.08). `date.today()` берёт часы МАШИНЫ
+    # (Europe/Minsk, +03), а transition._meta_age_ok сравнивает с датой UTC: с полуночи до
+    # трёх ночи фикстура датировалась БУДУЩИМ, возраст выходил −1 и замер объявлялся
+    # устаревшим. Батарея краснела бы не по существу, а по часу запуска — те самые грабли
+    # «часы машины ≠ биржа» (§7 CLAUDE.md), внесённые в стенд правкой про изоляцию стенда.
+    raw = {'_meta': {'date': str(_dt.datetime.now(_dt.timezone.utc).date()), 'account': account,
                      'series': sorted(ser),
                      'con_ids': {r['instrument']: str(r['con_id']) for r in src
                                  if (r.get('sec_type') or '') == 'FUT'}}}
@@ -506,7 +511,17 @@ class StubIB:
         # больше, чем счёт может дать. Список whatif_values расходуется по одной величине на
         # заявку — это и есть смесь, которую живой шлюз отдаёт на плане перехода.
         _seq = getattr(self, 'whatif_values', None)
-        if _seq:
+        if _seq is not None:
+            # ИСЧЕРПАНИЕ — ГРОМКО (рецензия 20.08). Прежде проверялась ИСТИННОСТЬ списка:
+            # опустев, он молча возвращал стаб в одиночный режим self.whatif, и «лишняя»
+            # заявка получала +10% номинала. Стенд, задавший смесь на N заявок при плане в
+            # N+1, доказывал бы не то, что написано в его докстроке, — ложное доказательство
+            # ровно того класса, ради которого механизм и заводился. Значение 0.0 в списке
+            # раньше тоже уводило в откат.
+            if not _seq:
+                raise AssertionError(
+                    'whatif_values исчерпан: заявок больше, чем заданных приращений — '
+                    'стенд проверял бы не тот сценарий')
             return _WhatIf(_seq.pop(0))
         _mode = getattr(self, 'whatif', '')
         if _mode == 'нет':

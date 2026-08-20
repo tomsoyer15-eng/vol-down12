@@ -797,6 +797,22 @@ def _adapter_mutations():
             return None
         return orig, patched, _FCm      # носитель — модуль замера, не адаптер
 
+    def sentinel_passes_as_margin():
+        """Часовой шлюза «не посчитано» (UNSET_DOUBLE) снова суммируется как маржа —
+        как было до рецензии 20.08: одна заявка даёт «запас 0.00x», две — inf, и
+        законный переход уходит в ABORT с маржинальным объяснением."""
+        import ib_broker as _Bs
+        orig = _Bs.UNSET_DOUBLE_MIN
+        return orig, float("inf"), _Bs, "UNSET_DOUBLE_MIN"
+
+    def code_error_dressed_again():
+        """Запрет переодевания ошибки кода снят: state.CODE_ERRORS пуст, и широкие
+        except в preview/_release_by_measure снова превращают TypeError в доменный
+        вердикт — инцидент 19.08 в чистом виде."""
+        import state as _STs
+        orig = _STs.CODE_ERRORS
+        return orig, (), _STs, "CODE_ERRORS"
+
     def preview_why_empty():
         """Причина отказа предпросмотра снова не называется (дефект №14 до правки):
         «маржа цели не проходит О-3-Е» подставляется на любой беде, включая молчание
@@ -843,7 +859,9 @@ def _adapter_mutations():
             return True
         return orig, patched
 
-    return [('причина отказа предпросмотра не называется', '_preview_no', preview_why_empty),
+    return [('часовой шлюза идёт в маржу', 'UNSET_DOUBLE_MIN', sentinel_passes_as_margin),
+            ('запрет переодевания ошибки кода снят', 'CODE_ERRORS', code_error_dressed_again),
+            ('причина отказа предпросмотра не называется', '_preview_no', preview_why_empty),
             ('сигнатуры диагноста слиты', 'SIGNS', diagnose_signs_merged),
             ('ранний выход по отрицательной сумме', 'preview', preview_negative_sum_passes),
             ('TIF снят в замере маржи', 'measure_margin', measure_margin_no_tif),
@@ -2479,7 +2497,10 @@ def run_run_mutations():
             orig, patched, holder, attr = got
             setattr(holder, attr, patched)
             try:
-                _, bad = I.run_run()
+                # ДОСРОЧНЫЙ ВЫХОД (рецензия 20.08): «поймана» доказывает ПЕРВОЕ несогласное
+                # утверждение; вердикт «не поймал НИКТО» по-прежнему требует полного
+                # прогона — при пустом bad выход не срабатывает по построению.
+                _, bad = I.run_run(stop_on_first=True)
             finally:
                 setattr(holder, attr, orig)
             print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
@@ -2496,7 +2517,7 @@ def run_run_mutations():
             holder = SS if hasattr(SS, attr) else FD
         setattr(holder, attr, patched)
         try:
-            _, bad = I.run_run()
+            _, bad = I.run_run(stop_on_first=True)      # то же (рецензия 20.08)
         finally:
             setattr(holder, attr, orig)
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')

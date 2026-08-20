@@ -184,7 +184,7 @@ def _anchor_body(day):
     book, sess, saved_route = STm.load(STm.book_path(route), cls)
     if book is None:
         raise RuntimeError('книга отсутствует — якорь не о чем писать')
-    jp = st / f'journal-{route}.csv'
+    jp = STm.journal_path(route)   # один путь на писателя и читателей
     if not jp.exists():
         # журнал §7 обязателен (девятнадцатый круг, №18): J.verify пустого пути отдаёт 0
         # без ошибки, и якорь заверял бы «журнал цел» про несуществующий файл.

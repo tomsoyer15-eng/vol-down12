@@ -170,7 +170,18 @@ def measure_margin(ib, con_id, exchange, account):
     _o.outsideRth = True
     st = ib.whatIfOrder(c, _o)
     if st and getattr(st, 'initMarginChange', None):
-        return dict(init=float(st.initMarginChange), maint=float(st.maintMarginChange))
+        _im = float(st.initMarginChange)
+        _mm = float(st.maintMarginChange)
+        # ЧАСОВОЙ «НЕ ПОСЧИТАНО» ФИЛЬТРУЕТСЯ У ПРОИЗВОДИТЕЛЯ (рецензия 20.08). Порог стоял
+        # только в preview — потребителе того же ответа, — а ЗАПИСЫВАЕТ маржу в файл этот
+        # код. UNSET_DOUBLE конечен, поэтому проходит и `0 < val < inf` в _live_margins:
+        # 1.797e308 лёг бы в margins_live.json как настоящая маржа, попал в WORM-якорь как
+        # аттестованная истина, и переход (включая аварийный выход Е→Ф) был бы заперт
+        # маржинальным диагнозом до следующего успешного замера — до 35 дней.
+        import ib_broker as _IBBm
+        if abs(_im) >= _IBBm.UNSET_DOUBLE_MIN or abs(_mm) >= _IBBm.UNSET_DOUBLE_MIN:
+            return None
+        return dict(init=_im, maint=_mm)
     return None
 
 
@@ -312,7 +323,12 @@ def main():
         _con_by_name = {r['instrument']: str(r['con_id']) for r in rows}
         margins['_meta'] = dict(
             date=_dt.datetime.now(_dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),
-            account=_acct, series=sorted(k for k in margins if k != '_meta'),
+            # ПИН БЕРЁТСЯ ИЗ ЕДИНСТВЕННОГО ИСТОЧНИКА (рецензия 20.08). Вынося замер в
+            # measure_margin, я удалил единственное присваивание _acct — и оставил его
+            # потребителя здесь: NameError на УСПЕШНОМ пути, реестр уже заменён атомарно, а
+            # margins_live.json остаётся прежним. С обязательностью замера (№13) это дало бы
+            # отказ якоря на КАЖДОМ замыкании — инцидент 19.08, заведённый правкой.
+            account=_pin_or_die(ib), series=sorted(k for k in margins if k != '_meta'),
             con_ids={k: _con_by_name.get(k, '') for k in margins if k != '_meta'})
         # атомарно и по тому же адресу, откуда читает переход (тринадцатый круг, №5)
         _tmp = _mp.with_suffix('.json.tmp')
