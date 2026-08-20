@@ -1541,6 +1541,12 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         _preflight_handover(from_route, to_route,
                             _dst_names=[spec['dst'][0] for spec in legs.values()],
                             _broker_p=broker, _resume=resume)
+    except _STce_tr.CODE_ERRORS:
+        # ПЯТЫЙ ШИРОКИЙ ПЕРЕХВАТ (45-й круг, №9). Ошибка кода в предполёте становилась
+        # доменным «предполет не пройден» — и дороже всего это на АВАРИЙНОМ выходе Е→Ф:
+        # законный выход блокируется ложным диагнозом вместо трассировки, а книга остаётся
+        # с займом при пробитой марже. Проверять надо не место запрета, а место ЛОВЛИ.
+        raise
     except Exception as _exph:
         raise Incident(f'предполётная проверка передачи книги не пройдена ({_exph}) — '
                        f'переход не начат, деньги не переведены')

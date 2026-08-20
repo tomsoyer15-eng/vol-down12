@@ -500,8 +500,19 @@ class IBBroker:
         if _is_fund:
             px = None if at_close else self._px_now(name)
             if px is None:
+                # У ФОНДОВ — НИЖНЯЯ ГРАНИЦА, А НЕ ТОЧНОЕ СОВПАДЕНИЕ (СОРОК ПЯТЫЙ КРУГ, №5).
+                # CSPX торгуется на LSE, CBU0 — на SIX/EBS, и eu_holidays даёт ОБЪЕДИНЕНИЕ
+                # их закрытий: «последняя ОБЩАЯ сессия». После одностороннего праздника
+                # площадка, работавшая в одиночку, законно несёт БОЛЕЕ СВЕЖИЙ бар, и
+                # требование точного совпадения роняло closes() с [STALE_BAR] — то есть
+                # gross() падал уже ПОСЛЕ первой исполненной пары, и переход уходил в MIXED
+                # с изменённой позицией. feed.build_market и замыкание маршрута Е давно
+                # используют здесь min_prev; полоса единицы осталась единственным местом со
+                # строгим равенством. Смысл границы: бар не смеет быть СТАРШЕ общей сессии,
+                # а свежее — законно.
                 px, _d, _, _ = _FDu.closes(self.ib, _FDu.contract_of(self.ib, name), today,
-                                           expected_prev=_prev if at_close else None)
+                                           expected_prev=None,
+                                           min_prev=_prev if at_close else None)
                 self._last_close_date = _d
             px = float(px)
             return (px * (1.0 - self.UNIT_BAND_ETF), px * (1.0 + self.UNIT_BAND_ETF))
@@ -558,8 +569,13 @@ class IBBroker:
             # проходит, старый dref размеряет ZN, а полоса, построенная по столь же старому
             # dref, этого не ловит. CLOSE_CAP=2,00 пропустил бы фактически более крупную
             # книгу. Семья «один момент» была исправлена на две трети.
-            y, _ = _FDu.yield_pct(self.ib, today, expected_prev=_prev if at_close else None)
-            dref = _FDu.dref_from_yield(float(y) / 100.0)
+            # ЧТЕНИЕ КЭШИРУЕТСЯ НА ВЫЗОВ gross (45-й круг, №11): комментарий ниже обещал
+            # «одно чтение доходности на весь расчёт», а на деле один gross() спрашивал TNX
+            # ДВАЖДЫ — здесь для полосы и в ветке ZN для единицы. Исправление или
+            # перепубликация бара между запросами давали полосу поколения A и плечо
+            # поколения B; широкая полоса D=3..12 такое обычно пропускает, и ворота 2,00
+            # завершали бы переход по величине, не существовавшей ни в один момент.
+            dref = self._dref_once(today, _prev if at_close else None)
             base = _Su.ZN_MODEL_PX_EQ * _Su.CTD_RATIO
             # d_fix книги неизвестен: границы по крайним дюрациям норматива.
             return (base * _FDu.DUR_MIN / dref * (1.0 - self.UNIT_BAND),
@@ -611,6 +627,25 @@ class IBBroker:
             return float(px) if px is not None else None
         except Exception:
             return None
+
+    def _dref_once(self, today, expected_prev):
+        """ДЮРАЦИОННАЯ БАЗА — ОДНО ЧТЕНИЕ НА РАСЧЁТ (СОРОК ПЯТЫЙ КРУГ, №11).
+
+        Полоса единицы ZN и сама единица считались по ДВУМ независимым запросам TNX внутри
+        одного gross(): исправление бара между ними давало полосу одного поколения и плечо
+        другого, и ворота CLOSE_CAP=2,00 могли завершить переход по величине, которой не
+        существовало ни в один момент времени. Кэш живёт в пределах вызова: ключ — дата и
+        ожидаемая предыдущая сессия, то есть ровно то, что задаёт поколение бара.
+        """
+        import feed as _FDd
+        _key = (str(today), str(expected_prev))
+        _c = getattr(self, '_dref_cache', None)
+        if _c is not None and _c[0] == _key:
+            return _c[1]
+        _y, _ = _FDd.yield_pct(self.ib, today, expected_prev=expected_prev)
+        _d = _FDd.dref_from_yield(float(_y) / 100.0)
+        self._dref_cache = (_key, _d)
+        return _d
 
     def _venue_prev(self, is_fund, today):
         """Предыдущая сессия ПЛОЩАДКИ инструмента — одной функцией, чтобы правило было
@@ -701,6 +736,7 @@ class IBBroker:
         """
         import feed as _FDg
         import sim_v13 as _Sg
+        self._dref_cache = None            # кэш живёт ровно один расчёт (45-й круг, №11)
         pos = self.net_positions() or {}
         nlv = float(self.net_liquidation())
         if not nlv or nlv != nlv:
@@ -740,13 +776,8 @@ class IBBroker:
                 # ОДНО ЧТЕНИЕ ДОХОДНОСТИ НА ВЕСЬ РАСЧЁТ (№4): gross читал её ОТДЕЛЬНО от
                 # полосы, то есть полоса и единица могли опираться на разные бары. Читаем
                 # с той же ожидаемой датой, что и полоса, — и один раз на вызов.
-                import daily as _DLg2
-                _prev_g = _FDg.prev_session(_FDg.exchange_today(),
-                                            holidays=_DLg2.holidays_for(
-                                                _FDg.exchange_today().year))
-                _y, _ = _FDg.yield_pct(self.ib, _FDg.exchange_today(),
-                                       expected_prev=_prev_g)
-                _dref = _FDg.dref_from_yield(float(_y) / 100.0)
+                _dref = self._dref_once(_FDg.exchange_today(),
+                                        self._venue_prev(False, _FDg.exchange_today()))
                 if not _dref or _dref != _dref:
                     raise BrokerError(f'{_inst}: dref {_dref!r} не конечен — плечо '
                                       f'непроверяемо')
