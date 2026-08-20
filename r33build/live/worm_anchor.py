@@ -107,6 +107,38 @@ LBL_SUM = 'контрольной суммы ряда'
 _EVER_CACHE = {'key': None, 'val': frozenset()}
 
 
+def _registry_margins_mismatch(reg, mrg):
+    """Расходятся ли поколения реестра и замера (45-й круг, №10). '' — согласованы.
+
+    Замер несёт _meta.series и _meta.con_ids — это и есть его привязка к поколению реестра
+    (16-й и 32-й круги). Якорю достаточно сверить их с ТЕКУЩИМ реестром: имена FUT-серий и
+    con_id каждой. Отсутствие замера здесь не разбирается — им ведает обязательность из
+    истории якорей; здесь только СОГЛАСОВАННОСТЬ двух существующих файлов.
+    """
+    import csv as _csv10
+    import json as _js10
+    try:
+        if not (Path(reg).exists() and Path(mrg).exists()):
+            return ''
+        with open(reg, encoding='utf-8') as _f:
+            _rows = list(_csv10.DictReader(_f))
+        _fut = {r['instrument']: str(r.get('con_id') or '')
+                for r in _rows if (r.get('sec_type') or '') == 'FUT'}
+        _raw = _js10.loads(Path(mrg).read_text(encoding='utf-8'))
+        _meta = _raw.get('_meta') or {}
+        _ser = set(_meta.get('series') or [])
+        _cid = _meta.get('con_ids') or {}
+    except (OSError, ValueError, KeyError) as _ex10:
+        return f'сверка невозможна ({type(_ex10).__name__}: {_ex10})'
+    _miss = sorted(set(_fut) - _ser)
+    if _miss:
+        return f'замер не покрывает серии реестра {_miss}'
+    _bad = sorted(k for k, v in _fut.items() if v and str(_cid.get(k, '')) != v)
+    if _bad:
+        return f'con_id расходятся у {_bad}'
+    return ''
+
+
 def _ever_attested():
     """ЧТО ЯКОРЯ УЖЕ ЗАВЕРЯЛИ НЕПУСТЫМ (СОРОК ЧЕТВЁРТЫЙ КРУГ, №13).
 
@@ -234,6 +266,18 @@ def _anchor_body(day):
     mrg = Path(os.environ.get('ADDFUT_MARGINS') or (HERE / 'margins_live.json'))
     raw_digest = json.loads(STm.book_path(route).read_text(encoding='utf-8')).get('digest')
     _ever = _ever_attested()         # что якоря уже заверяли непустым (№13)
+    # РЕЕСТР И ЗАМЕР ЗАВЕРЯЮТСЯ ПАРОЙ, А НЕ ПОРОЗНЬ (СОРОК ПЯТЫЙ КРУГ, №10). Якорь хэшировал
+    # оба файла независимо и проверял лишь их наличие — то есть спокойно заверял
+    # НЕСОВМЕСТИМУЮ пару: first_connect сначала атомарно заменяет реестр, а при последующем
+    # отказе whatIf оставляет ПРЕЖНИЙ margins_live.json. День объявлялся закрытым, а
+    # расхождение всплывало позже — возможно, уже при срочном переходе. Этим же замечанием
+    # опровергнуто моё утверждение в BRIEF, будто такая пара обязательно роняет замыкание.
+    # Сверяем то, чем замер и привязан к поколению реестра: серии и con_id.
+    _pair = _registry_margins_mismatch(reg, mrg)
+    if _pair:
+        raise RuntimeError(
+            f'реестр и замер маржи описывают РАЗНЫЕ поколения ({_pair}) — якорь не заверяет '
+            f'несовместимую пару: перегенерировать first_connect (О-5)')
     # ОБЯЗАТЕЛЬНЫ: журнал, реестр, живой ряд сигналов (№18). Замер маржи может законно
     # отсутствовать до первого перехода — его пустота называется честно строкой.
     return (f'WORM-якорь ADD-FUT v1.6.0 ред. 33 — {day} (маршрут {route}, сессия {sess})\n'

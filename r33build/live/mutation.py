@@ -830,6 +830,23 @@ def _adapter_mutations():
                 return _pd4.Timestamp('2100-01-01')     # «не сегодня и не просрочено»
         return orig, patched, _DLm4
 
+    def units_direction_inverted():
+        """Продажа единиц идёт ПОКУПКОЙ (45-й круг, №13): инверсия направления
+        удваивает источник вместо выхода из него — денежная граница без мутационного
+        контроля."""
+        orig = B.IBBroker.sell_units
+
+        def patched(self, instrument, units):
+            rec = self.place(instrument, abs(float(units)), self._px_hint(instrument))
+            return rec.get('order_id'), float(rec.get('filled') or 0.0)
+        return orig, patched
+
+    def executions_empty():
+        """Отчёты дня всегда пусты (45-й круг, №13): «заявок не было» разрешает
+        повтор поверх уже исполненного — ABORT там, где обязан быть MIXED."""
+        orig = B.IBBroker.todays_executions
+        return orig, (lambda self: [])
+
     def sentinel_passes_as_margin():
         """Часовой шлюза «не посчитано» (UNSET_DOUBLE) снова суммируется как маржа —
         как было до рецензии 20.08: одна заявка даёт «запас 0.00x», две — inf, и
@@ -892,7 +909,9 @@ def _adapter_mutations():
             return True
         return orig, patched
 
-    return [('предпросмотр без плана судит по единице', 'preview',
+    return [('продажа единиц идёт покупкой', 'sell_units', units_direction_inverted),
+            ('отчёты дня всегда пусты', 'todays_executions', executions_empty),
+            ('предпросмотр без плана судит по единице', 'preview',
              preview_noplan_unit_threshold),
             ('срок ролла неизвестен — «роллить не пора»', '_roll_deadline_or_stop',
              roll_deadline_fail_open),

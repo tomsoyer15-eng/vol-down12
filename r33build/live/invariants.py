@@ -863,6 +863,48 @@ def _a45roll(beh):
     return bool(_stopped == 4 and _ok_normal)
 
 
+@ainv('покупка и продажа единиц двигают позицию в СВОЮ сторону',
+      needs=lambda b: b == 'normal')
+def _a45units(beh):
+    """СОРОК ПЯТЫЙ КРУГ, №13. buy_units и sell_units — денежная граница: инверсия
+    направления удвоит источник или продаст цель, а SAME_API сверял лишь МОДУЛЬ
+    возвращённого объёма и не смотрел на изменение позиции. Мутационного контроля у них не
+    было вовсе.
+
+    Проверяется ФАКТ у брокера, а не ответ метода: позиция после покупки выросла ровно на
+    заказанное, после продажи — упала. Возвращённый объём сверяется с изменением позиции —
+    иначе метод, честно вернувший число и не подавший заявку, прошёл бы."""
+    br, ib, rows = _adapter(beh)
+    _inst = 'ESU26'
+    _cid = 900001
+    ib._pos = {_cid: 0.0}
+    ib._shown = dict(ib._pos)
+    _oid1, _f1 = br.buy_units(_inst, 3)
+    _after_buy = float((ib._pos or {}).get(_cid, 0.0))
+    _oid2, _f2 = br.sell_units(_inst, 2)
+    _after_sell = float((ib._pos or {}).get(_cid, 0.0))
+    return bool(abs(_after_buy - 3.0) < 1e-9 and abs(_f1 - 3.0) < 1e-9
+                and abs(_after_sell - 1.0) < 1e-9 and abs(_f2 - 2.0) < 1e-9)
+
+
+@ainv('отчёты дня видят исполнение НАШЕЙ метки, а не пустоту',
+      needs=lambda b: b == 'normal')
+def _a45exec(beh):
+    """СОРОК ПЯТЫЙ КРУГ, №13. todays_executions решает ABORT против MIXED и
+    допустимость повторной подачи: пустой ответ означает «заявок не было», то есть
+    разрешает повтор поверх уже исполненного. Мутации не было.
+
+    Проверяются оба конца: после исполнения список НЕ пуст и содержит permId поданной
+    заявки; на чистом брокере он пуст — иначе годился бы метод, возвращающий что угодно."""
+    br, ib, rows = _adapter(beh)
+    ib._pos = {900001: 0.0}
+    ib._shown = dict(ib._pos)
+    _before = list(br.todays_executions() or [])
+    br.buy_units('ESU26', 1)
+    _after = list(br.todays_executions() or [])
+    return bool(not _before and _after)
+
+
 @ainv('часовой шлюза «не посчитано» не идёт в маржу',
       needs=lambda b: b == 'normal')
 def _a44sent(beh):
