@@ -1503,6 +1503,25 @@ def _run_mutations():
         orig = _Im9.LOCK_SRC
         return orig, str(_dir), _Im9, 'LOCK_SRC'
 
+    def verdict_reads_whole_answer():
+        """Вердикт вахты снова читается как «весь ответ начинается с LOW» — как было до
+        45-го круга, №1: диагностические строки ib_insync встают перед маркером, разбор
+        уходит в `*)`, и предписанный §8 срез в ту же сессию не запускается.
+        Мутируется ПРОИЗВОДСТВЕННЫЙ текст: копия скрипта, где verdict() возвращает ответ
+        целиком."""
+        import invariants as _I45
+        import tempfile as _tf45
+        from pathlib import Path as _P45
+        orig = _I45.AUTOPILOT_SH
+        _src = _P45(orig).read_text(encoding='utf-8')
+        _was = "    printf '%s\\n' \"$1\" | sed -n 's/.*ADDFUT-VERDICT //p' | tail -1"
+        _now = "    printf '%s' \"$1\""
+        _mut = _src.replace(_was, _now)
+        assert _mut != _src, 'мутация вердикта не нашла своего места'
+        _dst = _P45(_tf45.mkdtemp(prefix='addfut-mut-verd-')) / 'autopilot.sh'
+        _dst.write_text(_mut, encoding='utf-8')
+        return orig, _dst, _I45, 'AUTOPILOT_SH'
+
     def hb_age_falls_back_to_mtime():
         """Возраст сердцебиения снова откатывается на mtime при негодном содержимом — как
         было до 44-го круга, №12: touch или восстановление каталога из копии делают
@@ -1635,6 +1654,7 @@ def _run_mutations():
             ('каталог копий не приводится к Path', worm_bdir_not_normalized),
             ('история якорей ничего не помнит', worm_ever_attested_blind),
             ('возраст сердцебиения откатывается на mtime', hb_age_falls_back_to_mtime),
+            ('вердикт вахты читается целиком', verdict_reads_whole_answer),
             ('замок берётся на файл, а не на каталог', lock_on_file_again),
             ('правило итога сессии ничего не находит', itog_rule_always_clean),
             ('итог перехода только в пустой журнал', handover_itog_only_when_empty),

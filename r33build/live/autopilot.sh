@@ -218,6 +218,18 @@ counter_read() {
 # ровно те ветки, где ждать устаревания бессмысленно по их же комментарию.
 HB_LIMIT_S=3600
 
+verdict() {
+    # ВЕРДИКТ ИЗВЛЕКАЕТСЯ ПО МЕТКЕ, А НЕ «ВЕСЬ ОТВЕТ НАЧИНАЕТСЯ С LOW» (45-й круг, №1, P0).
+    # Пробы запускаются с 2>&1 — и правильно: ответы шлюза нужны в журнале (урок 18.08, где
+    # разгадка пустого whatIf лежала в строке класса 10349). Но ib_insync пишет туда же свои
+    # диагностические строки («Error 2104 … farm connection is OK»), и они встают ПЕРЕД
+    # маркером. Тогда `case` по началу строки уходил в `*)`: замер прочитан, запас LOW, а
+    # предписанный §8 срез В ТУ ЖЕ СЕССИЮ не запускался — только счётчик слепоты, тревога
+    # через три тика, и сокращение уже пропущено. Метка снимает двусмысленность целиком:
+    # ищем ПОСЛЕДНЮЮ строку с меткой, всё прочее — шум для журнала.
+    printf '%s\n' "$1" | sed -n 's/.*ADDFUT-VERDICT //p' | tail -1
+}
+
 hb_write() {
     # СЕРДЦЕБИЕНИЕ ПИШЕТСЯ АТОМАРНО (СОРОК ЧЕТВЁРТЫЙ КРУГ, №12). Прежде оно писалось как
     # `date +%s > файл`: усечение и запись — два шага, и читатель мог законно застать файл
@@ -811,10 +823,10 @@ try:
     c = IBB.IBBroker(ib).margin_cushion()
     ib.disconnect()
 except Exception as ex:
-    sys.stdout.write('SKIP %r' % (ex,)); raise SystemExit
-sys.stdout.write(('LOW %.3f' % c) if (c is not None and c < DL.O3E_MIN)
-                 else ('OK %.3f' % c if c is not None else 'SKIP запаса нет'))" 2>&1)
-            case "$_cwa" in
+    sys.stdout.write('ADDFUT-VERDICT SKIP %r' % (ex,)); raise SystemExit
+sys.stdout.write('ADDFUT-VERDICT ' + (('LOW %.3f' % c) if (c is not None and c < DL.O3E_MIN)
+                 else ('OK %.3f' % c if c is not None else 'SKIP запаса нет')))" 2>&1)
+            case "$(verdict "$_cwa")" in
                 LOW\ *) log "ВНИМАНИЕ под тревогой: запас О-3-Е $_cwa ниже порога" ;;
                 OK\ *) rm -f "$ST/o3e-alarm-fail-$_d0" ;;
                 # СБОЙ ЗАМЕРА ПОД ТРЕВОГОЙ — НЕ «ВСЁ В ПОРЯДКЕ» (двадцать девятый круг,
@@ -849,8 +861,8 @@ sys.stdout.write(('LOW %.3f' % c) if (c is not None and c < DL.O3E_MIN)
         _h=$(cd "$LIVE" && "$PY" -c "
 import sys, feed
 ok, msg = feed.calendar_horizon('$(route)')
-sys.stdout.write(('OK ' if ok else 'NO ') + msg)" 2>&1)
-        case "$_h" in
+sys.stdout.write('ADDFUT-VERDICT ' + ('OK ' if ok else 'NO ') + msg)" 2>&1)
+        case "$(verdict "$_h")" in
             OK\ *) : ;;
             *) echo "$_h" > "$_wd"; log "ВНИМАНИЕ: $_h" ;;
         esac
@@ -869,10 +881,10 @@ try:
     bk, _, rt = state.load(state.book_path('$(route)'),
                            daily.BookE if '$(route)' == 'E' else daily.Book)
     ok, msg = (True, 'книги нет') if bk is None else feed.registry_horizon(bk)
-    sys.stdout.write(('OK ' if ok else 'NO ') + msg)
+    sys.stdout.write('ADDFUT-VERDICT ' + ('OK ' if ok else 'NO ') + msg)
 except Exception as ex:
-    sys.stdout.write('NO проверка горизонта реестра сломана: %r' % (ex,))" 2>&1)
-        case "$_rh" in
+    sys.stdout.write('ADDFUT-VERDICT NO проверка горизонта реестра сломана: %r' % (ex,))" 2>&1)
+        case "$(verdict "$_rh")" in
             OK\ *) : ;;
             *) echo "$_rh" > "$_wr"; log "ВНИМАНИЕ: $_rh" ;;
         esac
@@ -911,10 +923,10 @@ try:
     c = IBB.IBBroker(ib).margin_cushion()
     ib.disconnect()
 except Exception as ex:
-    sys.stdout.write('SKIP %r' % (ex,)); raise SystemExit
-sys.stdout.write(('LOW %.3f' % c) if (c is not None and c < DL.O3E_MIN)
-                 else ('OK %.3f' % c if c is not None else 'SKIP запаса нет'))" 2>&1)
-                case "$_cw" in
+    sys.stdout.write('ADDFUT-VERDICT SKIP %r' % (ex,)); raise SystemExit
+sys.stdout.write('ADDFUT-VERDICT ' + (('LOW %.3f' % c) if (c is not None and c < DL.O3E_MIN)
+                 else ('OK %.3f' % c if c is not None else 'SKIP запаса нет')))" 2>&1)
+                case "$(verdict "$_cw")" in
                     LOW\ *)
                         alarm_write "$ST/ALARM-o3e-holiday-$day.txt" \
                             "в НЕторговый день запас О-3-Е упал: $_cw (порог 1.40) — О-5" \
@@ -1101,14 +1113,14 @@ try:
     c = IBB.IBBroker(ib).margin_cushion()
     ib.disconnect()
 except Exception as ex:
-    sys.stdout.write('SKIP %r' % (ex,)); raise SystemExit
+    sys.stdout.write('ADDFUT-VERDICT SKIP %r' % (ex,)); raise SystemExit
 if c is None:
-    sys.stdout.write('SKIP запаса нет (пустая книга или неполная сводка)')
+    sys.stdout.write('ADDFUT-VERDICT SKIP запаса нет (пустая книга или неполная сводка)')
 elif c < DL.O3E_MIN:
-    sys.stdout.write('LOW %.3f' % c)
+    sys.stdout.write('ADDFUT-VERDICT LOW %.3f' % c)
 else:
-    sys.stdout.write('OK %.3f' % c)" 2>&1)
-        case "$_cw" in
+    sys.stdout.write('ADDFUT-VERDICT OK %.3f' % c)" 2>&1)
+        case "$(verdict "$_cw")" in
             LOW\ *)
                 # НОРМАТИВ §8 ТРЕБУЕТ СОКРАЩЕНИЯ В ТУ ЖЕ СЕССИЮ (тридцать первый круг, №1).
                 # Прежде вахта только писала ALARM — и этим же ALARM запирала любой запуск,
