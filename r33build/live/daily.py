@@ -136,6 +136,27 @@ def roll_deadline(tag, holidays=()):
     return roll_date(ry, rm, holidays)
 
 
+def _roll_deadline_or_stop(held, hol, what):
+    """СРОК РОЛЛА НЕИЗВЕСТЕН — ЭТО ОСТАНОВКА, А НЕ «РОЛЛ НЕ НУЖЕН» (СОРОК ПЯТЫЙ КРУГ, №4, P0).
+
+    Здесь стояло `except Exception: return False` в обеих функциях сразу: ЛЮБАЯ ошибка
+    календаря — непокрытый праздничной таблицей год, нечитаемый тег серии, опечатка в коде —
+    молча превращалась в доменный ответ «роллить не пора». Дальше сессия идёт как ни в чём не
+    бывало и может даже УВЕЛИЧИТЬ старую серию, а delivery_risk молчит до месяца поставки:
+    поставочный сторож был fail-open ровно там, где поставка и решается.
+
+    Поставка — первый приоритет проекта, и незнание срока обязано останавливать день, а не
+    разрешать его. Ошибка кода при этом падает своим типом (правило слоя), а доменная
+    неизвестность — своим текстом, чтобы О-5 начинался с верного места.
+    """
+    try:
+        return roll_deadline(held, hol)
+    except Exception as _ex:
+        raise RuntimeError(
+            f'{what}: срок серии {held!r} непроверяем ({type(_ex).__name__}: {_ex}) — '
+            f'поставочный риск неизвестен, сессия остановлена (О-5)')
+
+
 def leg_roll_due(held, m):
     """СЕГОДНЯ ли срок ролла ИМЕННО ЭТОЙ серии (тридцать шестой круг, №1).
 
@@ -153,10 +174,7 @@ def leg_roll_due(held, m):
     if held is None:
         return False
     hol = getattr(m, 'holidays', ()) or ()
-    try:
-        return m.date == roll_deadline(held, hol)
-    except Exception:
-        return False
+    return m.date == _roll_deadline_or_stop(held, hol, 'срок ролла')
 
 
 def leg_target_roll(held, m):
@@ -181,10 +199,7 @@ def leg_roll_overdue(held, m):
     if held is None:
         return False
     hol = getattr(m, 'holidays', ()) or ()
-    try:
-        return m.date > roll_deadline(held, hol)
-    except Exception:
-        return False
+    return m.date > _roll_deadline_or_stop(held, hol, 'просрочка ролла')
 
 
 def missed_roll_check(b, m):
@@ -1874,12 +1889,21 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
         # когда замок занят, а первый же тик после провала берёт замок и затирает улику.
         # Здесь сверяется ТОЧНАЯ предыдущая биржевая сессия: пропуск = ручной разбор.
         if book.last_session:
+            # ОТКАЗ КАЛЕНДАРЯ НЕ ОТКЛЮЧАЕТ ПРОВЕРКУ (45-й круг, №4, P0). Прежде здесь
+            # стояло `_prev_s = None`, а ниже — `if _prev_s and …`: то есть любая ошибка
+            # вычисления предыдущей сессии ТИХО снимала сторож пропущенных дней — тот
+            # самый, что ловит пропущенный день ролла. Вместе с fail-open срока ролла это
+            # давало полную слепоту к поставке: пропущен ролловый день, проверка снята,
+            # старая серия идёт к поставке, и до месяца поставки никто не скажет ни слова.
             try:
                 import feed as _FDg
                 _prev = _FDg.prev_session(market.date, getattr(market, 'holidays', ()) or ())
                 _prev_s = _prev.strftime('%Y-%m-%d')
-            except Exception:
-                _prev_s = None
+            except Exception as _exg:
+                raise RuntimeError(
+                    f'предыдущая биржевая сессия непроверяема ({type(_exg).__name__}: '
+                    f'{_exg}) — пропуск торгового дня и пропущенный РОЛЛ обнаружить нечем, '
+                    f'сессия остановлена (О-5)')
             if _prev_s and book.last_session != _prev_s:
                 # ПРОПУЩЕННЫЙ РОЛЛ НАЗЫВАЕТСЯ ПОИМЁННО (тридцатый круг, №10). Отказ
                 # остаётся — пропущенный день мог нести и переключение сигнала, а О-5

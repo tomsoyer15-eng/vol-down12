@@ -806,6 +806,37 @@ def _a31u(beh):
             and lo_f <= 700.0 <= hi_f)
 
 
+@ainv('неизвестный срок ролла ОСТАНАВЛИВАЕТ, а не отвечает «роллить не пора»',
+      needs=lambda b: b == 'normal')
+def _a45roll(beh):
+    """СОРОК ПЯТЫЙ КРУГ, №4 (P0). В leg_roll_due и leg_roll_overdue стояло
+    `except Exception: return False`: любая ошибка календаря — непокрытый год, нечитаемый
+    тег серии, опечатка — молча становилась доменным «роллить не пора». Дальше сессия идёт
+    как ни в чём не бывало и может УВЕЛИЧИТЬ старую серию, а delivery_risk молчит до месяца
+    поставки: поставочный сторож был fail-open ровно там, где поставка и решается.
+
+    Проверяются ОБА конца: нечитаемая серия обязана ОСТАНОВИТЬ обе функции, а штатная —
+    пройти. Без второго конца годился бы код, отказывающий всегда."""
+    import daily as _DLr
+    import pandas as _pdr
+
+    class _M:
+        date = _pdr.Timestamp('2026-08-20')
+        holidays = ()
+
+    _stopped = 0
+    for _tag in ('XX', ''):
+        for _fn in (_DLr.leg_roll_due, _DLr.leg_roll_overdue):
+            try:
+                _fn(_tag, _M())
+            except RuntimeError as _ex:
+                if 'поставочный риск неизвестен' in str(_ex):
+                    _stopped += 1
+    _ok_normal = (_DLr.leg_roll_due('U26', _M()) is False
+                  and _DLr.leg_roll_overdue('U26', _M()) is False)
+    return bool(_stopped == 4 and _ok_normal)
+
+
 @ainv('часовой шлюза «не посчитано» не идёт в маржу',
       needs=lambda b: b == 'normal')
 def _a44sent(beh):

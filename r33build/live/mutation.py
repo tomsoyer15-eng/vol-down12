@@ -797,6 +797,21 @@ def _adapter_mutations():
             return None
         return orig, patched, _FCm      # носитель — модуль замера, не адаптер
 
+    def roll_deadline_fail_open():
+        """Неизвестный срок ролла снова отвечает «роллить не пора» — как было до 45-го
+        круга, №4: любая ошибка календаря отключает поставочный сторож, сессия идёт дальше
+        и может увеличить старую серию, а delivery_risk молчит до месяца поставки."""
+        import daily as _DLm4
+        orig = _DLm4._roll_deadline_or_stop
+
+        def patched(held, hol, what):
+            try:
+                return _DLm4.roll_deadline(held, hol)
+            except Exception:
+                import pandas as _pd4
+                return _pd4.Timestamp('2100-01-01')     # «не сегодня и не просрочено»
+        return orig, patched, _DLm4
+
     def sentinel_passes_as_margin():
         """Часовой шлюза «не посчитано» (UNSET_DOUBLE) снова суммируется как маржа —
         как было до рецензии 20.08: одна заявка даёт «запас 0.00x», две — inf, и
@@ -859,7 +874,9 @@ def _adapter_mutations():
             return True
         return orig, patched
 
-    return [('часовой шлюза идёт в маржу', 'UNSET_DOUBLE_MIN', sentinel_passes_as_margin),
+    return [('срок ролла неизвестен — «роллить не пора»', '_roll_deadline_or_stop',
+             roll_deadline_fail_open),
+            ('часовой шлюза идёт в маржу', 'UNSET_DOUBLE_MIN', sentinel_passes_as_margin),
             ('запрет переодевания ошибки кода снят', 'CODE_ERRORS', code_error_dressed_again),
             ('причина отказа предпросмотра не называется', '_preview_no', preview_why_empty),
             ('сигнатуры диагноста слиты', 'SIGNS', diagnose_signs_merged),
