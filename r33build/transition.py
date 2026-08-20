@@ -811,22 +811,36 @@ def _execute_guarded(broker, state_path, capital, legs, signal_id='', from_route
         _ctx.__exit__(None, None, None)
 
 
-def pv_remainder(plan, done):
-    """ОСТАТОК ПЛАНА ДЛЯ ПРЕДПРОСМОТРА (сорок четвёртый круг, №4, P0).
+def pv_remainder(plan, done, partial=None):
+    """ОСТАТОК ПЛАНА ДЛЯ ПРЕДПРОСМОТРА (44-й круг, №4; внутрилотовый прогресс — 45-й, №3).
 
     Ключ исполненного лота — тот же, которым _run_lots пропускает сделанное:
-    f"{src}:{step}" в st['done']. Правило вынесено в отдельную функцию сознательно: пока
-    оно жило внутри цикла сборки заявок, мутировать его можно было только вместе с
-    соседним кодом, а два одинаковых правила в разных местах разъезжаются при первой же
-    правке одного из них (урок сорок второго круга, leg_target_roll).
+    f"{src}:{step}" в st['done'].
+
+    ВНУТРИЛОТОВЫЙ ПРОГРЕСС ВЫЧИТАЕТСЯ ТОЖЕ (СОРОК ПЯТЫЙ КРУГ, №3, P0). Прежде из
+    предпросмотра исключались только ЦЕЛИКОМ завершённые лоты, а st['partial'] — проданные
+    3 из 10 внутри лота — нет. Законный частично исполненный переход просматривался как
+    покупка ПОЛНОЙ цели поверх уже купленной части: whatIf отвечал по завышенному плану,
+    предпросмотр давал ложные POSTPONED, а на третьем отказе — MIXED с разорванной книгой.
+    Ключ тот же, что у _run_lots (st['partial'][src] в единицах источника), и правило то
+    же: сколько источника уже продано, столько цели уже куплено.
     """
     keys = set(done or ())
+    left = dict(partial or {})
     out = {}
     for lt in (plan or ()):
         if f"{lt['src']}:{lt['step']}" in keys:
             continue
+        _units = float(lt['units'])
+        _done_in_lot = float(left.get(lt['src'], 0) or 0)
+        if _done_in_lot > 0:
+            _take = min(_done_in_lot, _units)
+            _units -= _take
+            left[lt['src']] = _done_in_lot - _take
+        if _units <= 0:
+            continue
         out[lt['dst']] = out.get(lt['dst'], 0.0) + \
-            float(lt['units']) * float(lt['unit_usd']) / float(lt['dprice'])
+            _units * float(lt['unit_usd']) / float(lt['dprice'])
     return out
 
 
@@ -1379,7 +1393,7 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         # (f"{src}:{step}" в st['done']): два разных правила разъехались бы при первой же
         # правке одного из них.
         try:
-            _pv_orders = pv_remainder(plan, st.get('done'))
+            _pv_orders = pv_remainder(plan, st.get('done'), st.get('partial'))
         except Exception:
             _pv_orders = {}
         # ПРИЗНАК АВАРИЙНОСТИ ДОХОДИТ ДО ПРЕДПРОСМОТРА (сорок второй круг, №4): он не

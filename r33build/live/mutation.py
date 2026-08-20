@@ -1703,6 +1703,19 @@ def _transition_mutations():
     """Мутации ПЕРЕХОДНОГО ИСПОЛНИТЕЛЯ. Переход — единственное место, где книга существует
     разорванной, и §8б ограничивает разрыв одним процентом капитала. Ломается ровно то, что
     этот разрыв удерживает."""
+    def pv_remainder_ignores_partial():
+        """Остаток предпросмотра снова не вычитает внутрилотовый прогресс — как было до
+        45-го круга, №3: частично исполненный переход просматривается как покупка ПОЛНОЙ
+        цели поверх уже купленной части, отсюда ложные POSTPONED и MIXED на третьем.
+        Мутации у этого правила не было вовсе, хотя комментарий обещал точку мутации."""
+        import sys as _s3, os as _o3
+        _lv3 = _o3.path.join(_o3.path.dirname(_o3.path.abspath(__file__)), '..')
+        if _lv3 not in _s3.path:
+            _s3.path.insert(0, _lv3)
+        import transition as _TR3
+        orig = _TR3.pv_remainder
+        return orig, (lambda plan, done, partial=None: orig(plan, done)), _TR3, 'pv_remainder'
+
     def orders_counted_locally():
         """Дневная квота снова считается только по файлу прогресса — как было до
         44-го круга, №11: заявки утреннего ребаланса, ролла и предыдущего перехода
@@ -1986,7 +1999,8 @@ def _transition_mutations():
         orig = _Mm._verify_journal_digest
         return orig, (lambda j, body: None), _Mm, '_verify_journal_digest'
 
-    return [('квота дня считается по файлу прогресса', orders_counted_locally),
+    return [('остаток не вычитает внутрилотовый прогресс', pv_remainder_ignores_partial),
+            ('квота дня считается по файлу прогресса', orders_counted_locally),
             ('дата перехода принимается на веру', asof_trusted),
             ('край общего окна не проверяется', gate_no_window),
             ('исполнение компенсации не сверяется', comp_unchecked),
