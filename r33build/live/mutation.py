@@ -797,6 +797,24 @@ def _adapter_mutations():
             return None
         return orig, patched, _FCm      # носитель — модуль замера, не адаптер
 
+    def preview_noplan_unit_threshold():
+        """Предпросмотр без плана снова судит по единице, а не по нормативу О-3-Е — как
+        было до 45-го круга, №2: полностью исполненный resume получает COMPLETE при живом
+        запасе 1,20 против норматива 1,40, и книга уходит в ночь пробитой."""
+        orig = B.IBBroker.preview
+
+        def patched(self, orders=None, emergency=False):
+            if not orders:
+                try:
+                    _c = self.margin_cushion()
+                except Exception:
+                    return False
+                if _c is None:
+                    return False
+                return float(_c) >= 1.0          # ВОТ ОН, прежний порог
+            return orig(self, orders, emergency)
+        return orig, patched
+
     def roll_deadline_fail_open():
         """Неизвестный срок ролла снова отвечает «роллить не пора» — как было до 45-го
         круга, №4: любая ошибка календаря отключает поставочный сторож, сессия идёт дальше
@@ -874,7 +892,9 @@ def _adapter_mutations():
             return True
         return orig, patched
 
-    return [('срок ролла неизвестен — «роллить не пора»', '_roll_deadline_or_stop',
+    return [('предпросмотр без плана судит по единице', 'preview',
+             preview_noplan_unit_threshold),
+            ('срок ролла неизвестен — «роллить не пора»', '_roll_deadline_or_stop',
              roll_deadline_fail_open),
             ('часовой шлюза идёт в маржу', 'UNSET_DOUBLE_MIN', sentinel_passes_as_margin),
             ('запрет переодевания ошибки кода снят', 'CODE_ERRORS', code_error_dressed_again),
