@@ -803,7 +803,7 @@ def _adapter_mutations():
         законный переход уходит в ABORT с маржинальным объяснением."""
         import ib_broker as _Bs
         orig = _Bs.UNSET_DOUBLE_MIN
-        return orig, float("inf"), _Bs, "UNSET_DOUBLE_MIN"
+        return orig, float("inf"), _Bs      # ТРОЙНОЙ кортеж: носитель — модуль
 
     def code_error_dressed_again():
         """Запрет переодевания ошибки кода снят: state.CODE_ERRORS пуст, и широкие
@@ -811,7 +811,7 @@ def _adapter_mutations():
         вердикт — инцидент 19.08 в чистом виде."""
         import state as _STs
         orig = _STs.CODE_ERRORS
-        return orig, (), _STs, "CODE_ERRORS"
+        return orig, (), _STs               # ТРОЙНОЙ кортеж: носитель — модуль state
 
     def preview_why_empty():
         """Причина отказа предпросмотра снова не называется (дефект №14 до правки):
@@ -2758,8 +2758,17 @@ def run_adapter_mutations():
     print(f"\n{'мутация адаптера':<40}{'поймана':>9}  какими утверждениями")
     for label, attr, make in _adapter_mutations():
         got = make()
-        # Носитель по умолчанию — класс адаптера; мутация может назвать свой модуль
-        # (сверка личности живёт в contracts и патчится там, где её ищут вызовы).
+        # КОНТРАКТ КОРТЕЖА ПРОВЕРЯЕТСЯ, А НЕ ПОДРАЗУМЕВАЕТСЯ (20.08.2026, ТРЕТИЙ случай за
+        # сутки). Раннер молча трактовал ЛЮБУЮ длину, кроме 3, как «носитель — класс
+        # адаптера»: мой четырёхэлементный возврат означал setattr на IBBroker вместо модуля,
+        # мутация применялась В ПУСТОТУ, стенд оставался зелёным, и прогон честно писал «НЕ
+        # ПОЙМАНА» — а я трижды искал причину в стенде. Молчаливое умолчание на неверной
+        # форме — это ложное доказательство ровно того класса, что круг и ищет.
+        if len(got) not in (2, 3):
+            raise AssertionError(
+                f'мутация {label!r}: кортеж длины {len(got)} — раннер понимает только '
+                f'(orig, patched) и (orig, patched, holder). Четвёртый элемент (имя '
+                f'атрибута) здесь НЕ читается: имя берётся из списка мутаций.')
         orig, patched = got[0], got[1]
         holder = got[2] if len(got) == 3 else B.IBBroker
         setattr(holder, attr, patched)
