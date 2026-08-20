@@ -1110,17 +1110,32 @@ import daily as DL
 ib = IB()
 try:
     ib.connect('127.0.0.1', 4002, clientId=94, timeout=15)
-    c = IBB.IBBroker(ib).margin_cushion()
+    _br = IBB.IBBroker(ib)
+    c = _br.margin_cushion()
+    _pos_snapshot = _br.net_positions() or {}      # снимаем ДО disconnect (45-й круг, №6)
     ib.disconnect()
 except Exception as ex:
     sys.stdout.write('ADDFUT-VERDICT SKIP %r' % (ex,)); raise SystemExit
 if c is None:
-    sys.stdout.write('ADDFUT-VERDICT SKIP запаса нет (пустая книга или неполная сводка)')
+    # ПУСТАЯ КНИГА — НЕ СЛЕПОТА (СОРОК ПЯТЫЙ КРУГ, №6). margin_cushion() законно отдаёт
+    # None при ОБЕИХ выключенных ногах: сокращать нечего, и запас не определён. Прежде
+    # shell-вахта не отличала это от неполной сводки, трижды увеличивала счётчик слепоты и
+    # ставила ALARM-o3e-blind — а между 08:45 и закрытием Европы тиков заведомо больше трёх,
+    # то есть маршрут Е с НУЛЕВОЙ позицией сам себя останавливал до ручного разбора.
+    # Различает не догадка, а факт: позиции, снятые тем же соединением.
+    _pos_empty = not any(float(v or 0) for v in _pos_snapshot.values())
+    sys.stdout.write('ADDFUT-VERDICT EMPTY книга пуста — сокращать нечего'
+                     if _pos_empty else
+                     'ADDFUT-VERDICT SKIP запаса нет (сводка неполна)')
 elif c < DL.O3E_MIN:
     sys.stdout.write('ADDFUT-VERDICT LOW %.3f' % c)
 else:
     sys.stdout.write('ADDFUT-VERDICT OK %.3f' % c)" 2>&1)
         case "$(verdict "$_cw")" in
+            EMPTY\ *)
+                # ПУСТАЯ КНИГА — ЗАКОННОЕ СОСТОЯНИЕ (45-й круг, №6): счётчик слепоты
+                # обнуляется, тревоги нет, сокращать нечего.
+                : > "$ST/o3e-intraday-fail-$day" 2>/dev/null || true ;;
             LOW\ *)
                 # НОРМАТИВ §8 ТРЕБУЕТ СОКРАЩЕНИЯ В ТУ ЖЕ СЕССИЮ (тридцать первый круг, №1).
                 # Прежде вахта только писала ALARM — и этим же ALARM запирала любой запуск,

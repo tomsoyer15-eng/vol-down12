@@ -75,7 +75,15 @@ def append(path, row):
             rec = {c: ('' if row.get(c) is None else str(row.get(c))) for c in BASE}
             rec['prev_hash'] = prev
             rec['row_hash'] = _digest(prev, rec)
-            new = not path.exists()
+            # ЗАГОЛОВОК РЕШАЕТСЯ ПО СОДЕРЖИМОМУ, А НЕ ПО СУЩЕСТВОВАНИЮ (45-й круг, №7).
+            # `not path.exists()` считало НУЛЕВОЙ файл существующим журналом, и первая
+            # строка ложилась БЕЗ заголовка: дальше read() видит смещённые поля, verify()
+            # рвётся, и §7 заперт — а книга и брокер к этому моменту уже изменены. Нулевой
+            # файл достижим смертью сразу после open(..., 'a') и восстановлением каталога.
+            try:
+                new = path.stat().st_size == 0
+            except OSError:
+                new = True
             with open(path, 'a', newline='', encoding='utf-8') as f:
                 w = csv.DictWriter(f, fieldnames=COLS, extrasaction='raise')
                 if new:
@@ -93,7 +101,20 @@ def read(path):
         return []
     out = []
     with open(path, newline='', encoding='utf-8') as f:
-        for i, r in enumerate(csv.DictReader(f), 2):
+        rd = csv.DictReader(f)
+        # СХЕМА ПРОВЕРЯЕТСЯ И БЕЗ ЕДИНОЙ СТРОКИ (45-й круг, №7). Прежде проверка жила
+        # ВНУТРИ цикла: файл с повреждённым заголовком и без данных возвращал [], а
+        # verify() объявлял такой журнал исправным. Дальше append дописывал в него строки
+        # поверх мусорной шапки. Пустой файл (нулевой длины) — законное состояние: его
+        # заголовком закроет ближайший append.
+        try:
+            _sz = path.stat().st_size
+        except OSError:
+            _sz = 0
+        if _sz and (rd.fieldnames is None or list(rd.fieldnames) != list(COLS)):
+            raise ValueError(f'{path}: заголовок журнала §7 повреждён '
+                             f'({rd.fieldnames!r}) — дописывать в него нельзя')
+        for i, r in enumerate(rd, 2):
             if set(r) != set(COLS) or None in r.values():
                 raise ValueError(f'{path}: повреждённая строка {i}')
             out.append(r)

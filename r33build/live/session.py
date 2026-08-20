@@ -182,7 +182,10 @@ def do_close(ib, route):
     br.realtime_md = (os.environ.get('ADDFUT_REALTIME_MD') == '1')
     bp = _book_path(route)
     cls = DL.BookE if route == 'E' else DL.Book
-    with ST.hold_book_lock():
+    # ЗАМОК — ПО ПУТИ КНИГИ, А НЕ ПО УМОЛЧАНИЮ (45-й круг, №8): при ручном
+    # ADDFUT_BOOK_PATH без ADDFUT_LOCK_DIR замыкание и вахта запирали ~/.addfut, а торговля —
+    # каталог поданной книги: два процесса под РАЗНЫМИ замками писали одну книгу.
+    with ST.hold_book_lock(ST.book_lock_dir(route)):
         book, sess, saved = ST.load(bp, cls)
         if book is None:
             raise Refused('нет сохранённой книги — замыкать нечего')
@@ -372,7 +375,10 @@ def do_o3e_cut(ib, route):
     br.realtime_md = (os.environ.get('ADDFUT_REALTIME_MD') == '1')
     bp = _book_path(route)
     today = FD.exchange_today().strftime('%Y-%m-%d')
-    with ST.hold_book_lock():
+    # ЗАМОК — ПО ПУТИ КНИГИ, А НЕ ПО УМОЛЧАНИЮ (45-й круг, №8): при ручном
+    # ADDFUT_BOOK_PATH без ADDFUT_LOCK_DIR замыкание и вахта запирали ~/.addfut, а торговля —
+    # каталог поданной книги: два процесса под РАЗНЫМИ замками писали одну книгу.
+    with ST.hold_book_lock(ST.book_lock_dir(route)):
         book, sess, saved = ST.load(bp, DL.BookE)
         if book is None:
             raise Refused('нет сохранённой книги — сокращать нечего')

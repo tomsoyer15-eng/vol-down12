@@ -109,6 +109,24 @@ def journal_path(route):
     return d / f'journal-{route}.csv'
 
 
+def book_lock_dir(route=None, book_path=None):
+    """КАТАЛОГ ЗАМКА КНИГИ — ОДИН ДЛЯ ВСЕХ ЕЁ ПИСАТЕЛЕЙ (СОРОК ПЯТЫЙ КРУГ, №8).
+
+    run_session запирал каталог ПОДАННОЙ книги (bp.parent), а do_close и do_o3e_cut звали
+    hold_book_lock() без пути и запирали ~/.addfut. При законном ручном ADDFUT_BOOK_PATH без
+    ADDFUT_LOCK_DIR это РАЗНЫЕ каталоги: торговля держит один flock, замыкание и вахта О-3-Е
+    другой — два процесса читают и сохраняют ОДИН book-файл, каждый под своим замком.
+    Правило простое и одно: замок принадлежит книге, значит выводится из её пути. Тогда чем
+    бы книгу ни открыли — маршрутом или явным путём, — объект замка совпадает.
+    """
+    return Path(book_path or book_path_for(route)).parent
+
+
+def book_path_for(route):
+    """Путь книги маршрута (обёртка book_path для случая, когда route не задан)."""
+    return book_path(route or active_route())
+
+
 def _lock_fd(d):
     """ОБЪЕКТ ЗАМКА — КАТАЛОГ СОСТОЯНИЯ, А НЕ ФАЙЛ В НЁМ (СОРОК ЧЕТВЁРТЫЙ КРУГ, №9).
 
