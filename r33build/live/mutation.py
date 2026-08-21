@@ -592,7 +592,11 @@ def _adapter_mutations():
         лишается TIF — как если бы строку в коде забыли."""
         orig = B.IBBroker.preview
 
-        def patched(self, orders=None, emergency=False):
+        # done_all — четвёртый аргумент боевого preview (разбор /code-review 45-го круга).
+        # Мутант ОБЯЗАН нести ту же сигнатуру: боевой вызывающий подаёт done_all= по
+        # имени, и мутант со старой сигнатурой падал бы TypeError — то есть объявлялся
+        # «пойманным» по поломке обвязки, а не по наблюдению подменённого правила.
+        def patched(self, orders=None, emergency=False, done_all=False):
             _ib = self.ib
             _wif = _ib.whatIfOrder
 
@@ -605,7 +609,7 @@ def _adapter_mutations():
 
             _ib.whatIfOrder = _stripped
             try:
-                return orig(self, orders=orders, emergency=emergency)
+                return orig(self, orders=orders, emergency=emergency, done_all=done_all)
             finally:
                 _ib.whatIfOrder = _wif
 
@@ -615,14 +619,18 @@ def _adapter_mutations():
         """СОРОК ЧЕТВЁРТЫЙ КРУГ: предпросмотр слепо разрешает. Прежде эта мутация не
         ловилась ничем — единственное утверждение о preview требовало только «можно»."""
         orig = B.IBBroker.preview
-        return orig, (lambda self, orders=None, emergency=False: True)
+        return orig, (lambda self, orders=None, emergency=False, done_all=False: True)
 
     def preview_wrong_form():
         """СОРОК ЧЕТВЁРТЫЙ КРУГ: маржа доказывается для DAY-заявки, а в рынок уходит
         GTC+outsideRth. Прежде подмена формы не роняла ничего."""
         orig = B.IBBroker.preview
 
-        def patched(self, orders=None, emergency=False):
+        # done_all — четвёртый аргумент боевого preview (разбор /code-review 45-го круга).
+        # Мутант ОБЯЗАН нести ту же сигнатуру: боевой вызывающий подаёт done_all= по
+        # имени, и мутант со старой сигнатурой падал бы TypeError — то есть объявлялся
+        # «пойманным» по поломке обвязки, а не по наблюдению подменённого правила.
+        def patched(self, orders=None, emergency=False, done_all=False):
             _ib = self.ib
             _w = _ib.whatIfOrder
 
@@ -633,7 +641,7 @@ def _adapter_mutations():
 
             _ib.whatIfOrder = swap
             try:
-                return orig(self, orders=orders, emergency=emergency)
+                return orig(self, orders=orders, emergency=emergency, done_all=done_all)
             finally:
                 _ib.whatIfOrder = _w
 
@@ -644,7 +652,11 @@ def _adapter_mutations():
         произвольного счёта под тем же логином (дефект 37-го круга, №4)."""
         orig = B.IBBroker.preview
 
-        def patched(self, orders=None, emergency=False):
+        # done_all — четвёртый аргумент боевого preview (разбор /code-review 45-го круга).
+        # Мутант ОБЯЗАН нести ту же сигнатуру: боевой вызывающий подаёт done_all= по
+        # имени, и мутант со старой сигнатурой падал бы TypeError — то есть объявлялся
+        # «пойманным» по поломке обвязки, а не по наблюдению подменённого правила.
+        def patched(self, orders=None, emergency=False, done_all=False):
             _ib = self.ib; _w = _ib.whatIfOrder
 
             def f(contract, order):
@@ -653,7 +665,7 @@ def _adapter_mutations():
 
             _ib.whatIfOrder = f
             try:
-                return orig(self, orders=orders, emergency=emergency)
+                return orig(self, orders=orders, emergency=emergency, done_all=done_all)
             finally:
                 _ib.whatIfOrder = _w
 
@@ -664,7 +676,11 @@ def _adapter_mutations():
         уходит на шлюз, ответ пуст, законный переход уходит в ABORT (38-й круг, №5)."""
         orig = B.IBBroker.preview
 
-        def patched(self, orders=None, emergency=False):
+        # done_all — четвёртый аргумент боевого preview (разбор /code-review 45-го круга).
+        # Мутант ОБЯЗАН нести ту же сигнатуру: боевой вызывающий подаёт done_all= по
+        # имени, и мутант со старой сигнатурой падал бы TypeError — то есть объявлялся
+        # «пойманным» по поломке обвязки, а не по наблюдению подменённого правила.
+        def patched(self, orders=None, emergency=False, done_all=False):
             _ib = self.ib; _w = _ib.whatIfOrder
 
             def f(contract, order):
@@ -675,7 +691,7 @@ def _adapter_mutations():
 
             _ib.whatIfOrder = f
             try:
-                return orig(self, orders=orders, emergency=emergency)
+                return orig(self, orders=orders, emergency=emergency, done_all=done_all)
             finally:
                 _ib.whatIfOrder = _w
 
@@ -687,10 +703,14 @@ def _adapter_mutations():
         emergency в наборе адаптера не исполнялась ни разу."""
         orig = B.IBBroker.preview
 
-        def patched(self, orders=None, emergency=False):
+        # done_all — четвёртый аргумент боевого preview (разбор /code-review 45-го круга).
+        # Мутант ОБЯЗАН нести ту же сигнатуру: боевой вызывающий подаёт done_all= по
+        # имени, и мутант со старой сигнатурой падал бы TypeError — то есть объявлялся
+        # «пойманным» по поломке обвязки, а не по наблюдению подменённого правила.
+        def patched(self, orders=None, emergency=False, done_all=False):
             if emergency:
                 return True
-            return orig(self, orders=orders, emergency=emergency)
+            return orig(self, orders=orders, emergency=emergency, done_all=done_all)
 
         return orig, patched
 
@@ -746,7 +766,11 @@ def _adapter_mutations():
         часть требует 800k при NLV 1 млн (запас 1,25x против норматива 1,40)."""
         orig = B.IBBroker.preview
 
-        def patched(self, orders=None, emergency=False):
+        # done_all — четвёртый аргумент боевого preview (разбор /code-review 45-го круга).
+        # Мутант ОБЯЗАН нести ту же сигнатуру: боевой вызывающий подаёт done_all= по
+        # имени, и мутант со старой сигнатурой падал бы TypeError — то есть объявлялся
+        # «пойманным» по поломке обвязки, а не по наблюдению подменённого правила.
+        def patched(self, orders=None, emergency=False, done_all=False):
             if orders:
                 try:
                     import contracts as _CTp
@@ -773,7 +797,7 @@ def _adapter_mutations():
                         return True                      # ВОТ ОН, ранний выход
                 except Exception:
                     return False
-            return orig(self, orders, emergency)
+            return orig(self, orders, emergency, done_all)
         return orig, patched
 
     def measure_margin_no_tif():
@@ -928,13 +952,23 @@ def _adapter_mutations():
         return orig, patched
 
     def diagnose_signs_merged():
-        """Сигнатуры §8 и О-3-Е снова слиты в «ниже порога» — как было до 44-го круга,
-        №14(в): маржинальный инцидент маршрута Е диагност объявляет отказом политики
-        по капиталу и советует ждать решения о пополнении."""
+        """Маржинальный якорь убран, а капитальный расширен до «ниже порога» — как было до
+        44-го круга, №14(в). ЧТО ИМЕННО ЛОМАЕТСЯ, ПОСЛЕ ПОСТРОЧНОГО СОСЕДСТВА (разбор
+        /code-review 45-го круга): тревога маршрута Е с пробитым запасом остаётся БЕЗ
+        причины вовсе — «не классифицирована», — а на телах, где §8 стоит отдельной
+        строкой, получает вместо маржинальной причину политики по капиталу. Прежняя
+        формулировка докстроки описывала только второй исход; проверено прогоном, что
+        первый и есть основной."""
         import diagnose as _DGm
         orig = _DGm.SIGNS
+        # ЯКОРЬ ОПОЗНАЁТСЯ ПО ПРИЧИНЕ, А НЕ ПО ФОРМЕ СИГНАТУРЫ (разбор /code-review 45-го
+        # круга). Отбор шёл через str(_s).startswith("О-3-Е"); после того как маржинальный
+        # якорь стал ФУНКЦИЕЙ (голая подстрока ловила и здоровый замер), str() у него —
+        # "<function ...>", мутация перестала находить своё место и падала бы на assert.
+        # Причина в таблице стабильна, она и есть опознавательный признак.
         _mut = [(("ниже порога" if _s == "ниже порога маршрута" else _s), _c, _t)
-                for _s, _c, _t in orig if not str(_s).startswith("О-3-Е")]
+                for _s, _c, _t in orig
+                if not str(_c).startswith("запас маржи ниже норматива О-3-Е")]
         assert len(_mut) == len(orig) - 1, "мутация диагноста не нашла своего места"
         return orig, _mut, _DGm          # носитель — модуль диагноста, не адаптер
 
