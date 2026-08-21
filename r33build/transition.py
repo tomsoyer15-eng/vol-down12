@@ -866,6 +866,13 @@ def pv_remainder(plan, done, partial=None):
     return out
 
 
+# ОШИБКА КОДА НЕ СТАНОВИТСЯ ПРЕДПОЛЁТНЫМ ВЕРДИКТОМ НИ В ОДНОМ ИЗ ЗДЕШНИХ ПЕРЕХВАТОВ
+# (разбор /code-review 45-го круга). Запрет 45-й круг поставил на ВЫЗЫВАЮЩЕГО
+# (_execute_locked), но переодевание случается ЗДЕСЬ, внутри: до внешнего except
+# доходит уже RuntimeError, и опечатка в календаре приходит к О-5 как «предполёт не
+# пройден». Дороже всего это на аварийном Е->Ф: законный выход блокируется ложным
+# доменным диагнозом. Пропуск поставлен МЕХАНИЧЕСКИ на каждый широкий перехват
+# функции, а не на тот, что вспомнился.
 def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
                         _resume=False):
     """Сухая проверка условий передачи книги ДО первой заявки (двадцать пятый круг, №7).
@@ -903,6 +910,8 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
             _dl = _DLp.roll_deadline(_ser_r, _hol_r)
             if _today_r >= _dl:
                 _due.append(f'{_dn} (срок ролла {_dl:%d.%m.%Y})')
+    except _STce_tr.CODE_ERRORS:
+        raise      # ошибка кода — трассировкой, а не предполётным вердиктом
     except Exception as _exr:
         raise RuntimeError(f'календарь ролла недоступен ({_exr}) — серия цели непроверяема, '
                            f'переход запрещён (О-5)')
@@ -981,6 +990,8 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
         try:
             _pos_p, _oo_p = _snapshot_pair(_broker_p)
             _pos_p = _pos_p or {}
+        except _STce_tr.CODE_ERRORS:
+            raise      # ошибка кода — трассировкой, а не предполётным вердиктом
         except Exception as _exp:
             raise RuntimeError(f'согласованный снимок счёта недоступен в предполёте '
                                f'({_exp}) — книгу источника сверить нечем, переход запрещён')
@@ -1032,6 +1043,8 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
             _keys_p = list(_FDp2.registry().keys())
         except _STce_tr.CODE_ERRORS:
             raise
+        except _STce_tr.CODE_ERRORS:
+            raise      # ошибка кода — трассировкой, а не предполётным вердиктом
         except Exception as _erp:
             raise RuntimeError(
                 f'живой реестр серий не читается ({_erp}) — проверить поставочные серии '
@@ -1072,6 +1085,8 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
             _y, _yd = _FDd.yield_pct(_broker_p.ib, _t_d, expected_prev=_prev_d)
             _dfx_val = float(_FDd.dref_from_yield(float(_y) / 100.0))
             _dfx_ok = bool(_dfx_val)
+        except _STce_tr.CODE_ERRORS:
+            raise      # ошибка кода — трассировкой, а не предполётным вердиктом
         except Exception:
             _dfx_ok = False
             _dfx_val = 0.0
@@ -1134,6 +1149,8 @@ def _gross_dfix():
         if _PREFLIGHT_DFIX.get('value') and \
                 str(_PREFLIGHT_DFIX.get('asof') or '') == str(_FDx.exchange_today()):
             return float(_PREFLIGHT_DFIX['value'])
+    except _STce_tr.CODE_ERRORS:
+        raise          # ошибка кода — трассировкой (разбор /code-review 45-го круга)
     except Exception:
         pass
     try:
@@ -1141,6 +1158,8 @@ def _gross_dfix():
         import daily as _DLg
         _b, _, _ = _STg.load(_STg.book_path('F'), _DLg.Book)
         return float(getattr(_b, 'd_fix', 0.0) or 0.0)
+    except _STce_tr.CODE_ERRORS:
+        raise          # «нечем измерить» — это отсутствие книги, а не опечатка в коде
     except Exception:
         return 0.0
 
