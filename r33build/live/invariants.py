@@ -2366,7 +2366,19 @@ RUN_CASES = ('наблюдение', 'торговля', 'незамкнутая
              'автопилот: причина тревоги не затирается общей',
              'автопилот: возраст сердцебиения строг',
              'автопилот: вердикт вахты читается сквозь шум шлюза',
-             'автопилот: пустая книга Е не считается слепотой')
+             'автопилот: пустая книга Е не считается слепотой',
+             # ПРАВИЛА, ЗАВЕДЁННЫЕ РАЗБОРОМ /code-review 45-го круга: у каждой защиты свой
+             # случай и своя парная мутация — иначе защиту можно выкинуть целиком, и
+             # батарея останется зелёной (так и было у восьми из них).
+             'правила45: допуск бара снимается известным календарём',
+             'правила45: остаток ниже допуска не заявка',
+             'правила45: беспланный предпросмотр',
+             'правила45: замок книги один на всех писателей',
+             'правила45: журнал не дописывается под мусорной шапкой',
+             'правила45: диагност различает капитал и маржу',
+             'правила45: пара реестра и замера сверяется',
+             'правила45: dref кэшируется только закреплённым',
+             'правила45: ошибка кода не переодевается календарём')
 
 
 _ROLLGAP_K = 2
@@ -3664,32 +3676,59 @@ source %(sh)s __стенд__ >/dev/null 2>&1
 unset -f exit
 """ % dict(tmp=tmp, sh=str(AUTOPILOT_SH))
     if kind == 'автопилот: пустая книга Е не считается слепотой':
-        # СОРОК ПЯТЫЙ КРУГ, №6 (P1). margin_cushion() законно отдаёт None при ОБЕИХ
-        # выключенных ногах. Прежде shell-вахта не отличала это от неполной сводки: три
-        # тика — и ALARM-o3e-blind, а тиков между 08:45 и закрытием Европы заведомо больше,
-        # то есть маршрут Е с НУЛЕВОЙ позицией сам себя останавливал до ручного разбора.
-        # Проверяются ТРИ исхода: пустая книга законна, неполная сводка — по-прежнему
-        # слепота, низкий запас — по-прежнему срез. Без второго и третьего годился бы код,
-        # объявляющий законным что угодно.
-        prog6 = _PREFIX + r"""
-echo "ADDFUT-VERDICT EMPTY книга пуста" > "$ST/ответ"
-v=$(verdict "$(cat "$ST/ответ")")
-case "$v" in EMPTY\ *) echo "ПУСТАЯ=законна" ;; SKIP*) echo "ПУСТАЯ=слепота" ;; *) echo "ПУСТАЯ=?" ;; esac
-v2=$(verdict "ADDFUT-VERDICT SKIP запаса нет (сводка неполна)")
-case "$v2" in SKIP*) echo "НЕПОЛНАЯ=слепота" ;; *) echo "НЕПОЛНАЯ=?" ;; esac
-v3=$(verdict "ADDFUT-VERDICT LOW 1.200")
-case "$v3" in LOW\ *) echo "НИЗКИЙ=срез" ;; *) echo "НИЗКИЙ=?" ;; esac
-"""
+        # СОРОК ПЯТЫЙ КРУГ, №6 (P1) + разбор /code-review. margin_cushion() законно отдаёт
+        # None при ОБЕИХ выключенных ногах; прежде shell-вахта не отличала это от неполной
+        # сводки, и маршрут Е с НУЛЕВОЙ позицией сам себя останавливал через три тика.
+        #
+        # СТЕНД ИСПОЛНЯЕТ БОЕВУЮ ВЕТКУ, А НЕ ПЕРЕПИСЫВАЕТ ЕЁ (правило 8а(в), зонд
+        # достижимости). Первая редакция этого стенда кормила литералами одну лишь функцию
+        # verdict() и собственный `case`, то есть тело боевой ветки не исполнялось НИ РАЗУ —
+        # и не заметило, что ветка EMPTY обнуляла o3e-intraday-fail-$day, имя, которого во
+        # всём скрипте больше нет: счётчик слепоты не обнулялся вовсе. Теперь блок `case`
+        # ВЫРЕЗАЕТСЯ ИЗ ФАЙЛА и исполняется как есть; подменены только внешние действия.
+        _sh_txt = AUTOPILOT_SH.read_text(encoding='utf-8')
+        _mark = '_cw=$(o3e_probe 94)'
+        _i0 = _sh_txt.index(_mark)
+        _i1 = _sh_txt.index('        case "$(verdict "$_cw")" in', _i0)
+        _i2 = _sh_txt.index('\n        esac', _i1) + len('\n        esac')
+        _case = _sh_txt[_i1:_i2]
+        out['ветка_вырезана'] = ('EMPTY' in _case and 'o3e-watch-fail' in _case
+                                 and 'session.py --o3e' in _case)
+        _drv = ('%(pre)s\n'
+                'day=2026-08-21\n'
+                'alarm_write() { echo "ALARM $1" >> "$HOME/следы"; return 0; }\n'
+                'log() { echo "LOG $*" >> "$HOME/следы"; }\n'
+                'chicago() { echo 0900; }\n'
+                'trade_till() { echo 1530; }\n'
+                'LIVE=$HOME; LOG=$HOME/лог\n'
+                'PY=$HOME/py-заглушка\n'
+                "printf '%%s\\n' '#!/bin/sh' 'echo книга-СОКРАЩЕНА-в-ту-же-сессию' > \"$PY\"\n"
+                'chmod +x "$PY"\n'
+                'вахта() { local _cw="$1"\n%(case)s\n}\n'
+                'счёт() { counter_read "$ST/o3e-watch-fail-$day"; }\n'
+                'вахта "ADDFUT-VERDICT SKIP запаса нет (сводка неполна)"; echo "СБОЙ1=$(счёт)"\n'
+                'вахта "ADDFUT-VERDICT SKIP запаса нет (сводка неполна)"; echo "СБОЙ2=$(счёт)"\n'
+                'вахта "ADDFUT-VERDICT EMPTY книга пуста — сокращать нечего"; echo "ПОСЛЕ-ПУСТОЙ=$(счёт)"\n'
+                'вахта "ADDFUT-VERDICT SKIP запаса нет (сводка неполна)"; echo "СНОВА=$(счёт)"\n'
+                'вахта "ADDFUT-VERDICT LOW 1.200"\n'
+                'grep -c "ALARM" "$HOME/следы" 2>/dev/null | sed "s/^/ТРЕВОГ=/"\n'
+                'grep -q "книга-СОКРАЩЕНА" "$HOME/лог" && echo "СРЕЗ=да" || echo "СРЕЗ=нет"\n'
+                ) % dict(pre=_PREFIX, case=_case)
         try:
-            r6 = subprocess.run(['bash', '-c', prog6], capture_output=True, text=True,
+            r6 = subprocess.run(['bash', '-c', _drv], capture_output=True, text=True,
                                 cwd=str(ROOT), timeout=120)
             t6 = r6.stdout
-            out['вывод'] = t6.strip()[:300]
-            out['пустая_законна'] = 'ПУСТАЯ=законна' in t6
-            out['неполная_слепота'] = 'НЕПОЛНАЯ=слепота' in t6
-            out['низкий_срез'] = 'НИЗКИЙ=срез' in t6
-            out['ok'] = all([out['пустая_законна'], out['неполная_слепота'],
-                             out['низкий_срез']])
+            out['вывод'] = (t6.strip() + ' | ' + r6.stderr.strip())[:400]
+            # Пустая книга ОБНУЛЯЕТ тот самый счётчик, который наращивает ветка `*)`:
+            # два сбоя дают 2, пустая книга — 0, следующий сбой снова 1, а не 3.
+            out['сбой_считается'] = ('СБОЙ1=1' in t6 and 'СБОЙ2=2' in t6)
+            out['пустая_обнуляет'] = 'ПОСЛЕ-ПУСТОЙ=0' in t6
+            out['счёт_начат_заново'] = 'СНОВА=1' in t6
+            out['низкий_режет'] = 'СРЕЗ=да' in t6
+            out['пустая_не_тревожит'] = 'ТРЕВОГ=1' in t6      # ровно одна — от ветки LOW
+            out['ok'] = all([out['ветка_вырезана'], out['сбой_считается'],
+                             out['пустая_обнуляет'], out['счёт_начат_заново'],
+                             out['низкий_режет'], out['пустая_не_тревожит']])
         except Exception as ex:
             out['raised'] = True
             out['error'] = f'{type(ex).__name__}: {ex}'
@@ -3808,6 +3847,273 @@ echo "ФАЙЛ-КОНЕЦ"
         out['день_не_закрыт'] = 'ОТМЕТКА=нет' in txt
         out['ok'] = bool(out['причина_жива'] and out['ветка_пройдена']
                          and out['день_не_закрыт'])
+    except Exception as ex:
+        out['raised'] = True
+        out['error'] = f'{type(ex).__name__}: {ex}'
+    return out
+
+
+# ------------------------------------------------------------------ правила 45-го круга
+# ПРАВИЛА, ЗАВЕДЁННЫЕ РАЗБОРОМ /code-review, ПРОВЕРЯЮТСЯ ПООТДЕЛЬНОСТИ. Рецензия показала
+# восемь новых защит без единой парной мутации: их можно было выкинуть целиком, и батарея
+# осталась бы зелёной. Каждый случай ниже трогает ПРОИЗВОДСТВЕННУЮ функцию (не копию
+# правила), проверяет ОБА конца (законное проходит, незаконное отвергается) и назван так,
+# чтобы отказ читался без чтения кода. Машинное состояние не трогается: всё под mkdtemp.
+def _rules45_case(kind):
+    import os as _os45
+    import tempfile as _tf45
+    out = dict(case=kind, raised=False, error='', ok=False,
+               placed=0, positions={}, saved=None, provisional=None, lev=None,
+               journal=Path('/nonexistent'))
+    try:
+        if kind == 'правила45: допуск бара снимается известным календарём':
+            # Плоские пять дней действуют, только когда календарь НЕИЗВЕСТЕН ВОВСЕ. Переход
+            # полосы фонда на min_prev вернул отказ маршрута Е на 29.12.2026 (разрыв 6 дней
+            # при допуске 5) — то есть условие смотрело лишь на expected_prev.
+            import pandas as _pd45
+            import feed as _FD45
+            _t = _pd45.Timestamp('2026-12-29')
+            _prev = _FD45.prev_session(_t, _FD45.eu_holidays(2026))
+            _df = _pd45.DataFrame({'date': [_pd45.Timestamp('2026-12-22'),
+                                            _pd45.Timestamp('2026-12-23')],
+                                   'close': [690.0, 700.0]})
+            _old = _FD45._bars
+            class _C45:
+                symbol = 'CSPX'; localSymbol = 'CSPX'
+            def _try(**kw):
+                try:
+                    return _FD45.closes(None, _C45(), _t, **kw)[0], ''
+                except Exception as _e:
+                    return None, f'{type(_e).__name__}: {_e}'
+            try:
+                _FD45._bars = lambda ib, c, days=10: _df
+                out['разрыв_дней'] = int((_t - _prev).days)
+                out['ветка_достижима'] = out['разрыв_дней'] > int(_FD45.MAX_BAR_GAP_D)
+                _px, _e1 = _try(expected_prev=None, min_prev=_prev)
+                out['граница_снимает_допуск'] = (_px == 700.0)
+                _px2, _e2 = _try(expected_prev=None, min_prev=None)
+                out['без_календаря_допуск_держит'] = (_px2 is None and 'STALE_BAR' in _e2)
+                _df2 = _pd45.DataFrame({'date': [_pd45.Timestamp('2026-12-21'),
+                                                 _pd45.Timestamp('2026-12-22')],
+                                        'close': [680.0, 690.0]})
+                _FD45._bars = lambda ib, c, days=10: _df2
+                _px3, _e3 = _try(expected_prev=None, min_prev=_prev)
+                out['старый_бар_отвергнут'] = (_px3 is None and 'СТАРШЕ' in _e3)
+            finally:
+                _FD45._bars = _old
+            out['ok'] = all([out['ветка_достижима'], out['граница_снимает_допуск'],
+                             out['без_календаря_допуск_держит'], out['старый_бар_отвергнут']])
+        elif kind == 'правила45: остаток ниже допуска не заявка':
+            # Точный ноль на разности float оставлял 5,55e-16 юнита, а цели маршрута Е от
+            # округления освобождены: whatIf молчит, три POSTPONED и ABORT на завершённом
+            # переходе. Второй конец обязателен: НАСТОЯЩИЙ остаток обязан дожить до заявки.
+            import transition as _TR45
+            _plan = [dict(src='ESU26', dst='CSPX', step=i, units=u, unit_usd=100.0,
+                          dprice=10.0) for i, u in enumerate([0.1, 0.2, 0.3, 0.4])]
+            _full = _TR45.pv_remainder(_plan, [], {'ESU26': sum(l['units'] for l in _plan)})
+            _part = _TR45.pv_remainder(_plan, [], {'ESU26': 0.6})
+            _none = _TR45.pv_remainder(_plan, [], None)
+            out['пыль_не_доходит'] = (_full == {})
+            out['остаток_доходит'] = (abs(_part.get('CSPX', 0) - 4.0) < 1e-9)
+            out['без_прогресса_весь_план'] = (abs(_none.get('CSPX', 0) - 10.0) < 1e-9)
+            out['ok'] = all([out['пыль_не_доходит'], out['остаток_доходит'],
+                             out['без_прогресса_весь_план']])
+        elif kind == 'правила45: беспланный предпросмотр':
+            # Порог О-3-Е без плана обязан отвергать НЕЗАКОННЫЙ COMPLETE и пропускать два
+            # законных пути: аварийный выход (он маржу освобождает) и завершение уже
+            # исполненного (покупать нечего, отказ дал бы MIXED на целой книге).
+            import ib_broker as _IB45
+            import daily as _DL45
+            def _pv(c, **kw):
+                _b = _IB45.IBBroker.__new__(_IB45.IBBroker)
+                _b.margin_cushion = lambda: c
+                _r = _IB45.IBBroker.preview(_b, **kw)
+                return bool(_r), str(getattr(_b, '_preview_pass_why', '') or '')
+            _low = float(_DL45.O3E_MIN) - 0.2
+            out['норма_проходит'] = _pv(float(_DL45.O3E_MIN) + 0.1)[0] is True
+            out['низкий_отвергнут'] = _pv(_low)[0] is False
+            _e_ok, _e_why = _pv(_low, emergency=True)
+            out['авария_проходит'] = _e_ok is True and 'АВАРИЙНЫЙ' in _e_why
+            _d_ok, _d_why = _pv(_low, done_all=True)
+            out['исполненное_завершается'] = _d_ok is True and 'нечего' in _d_why
+            out['пропуск_назван'] = bool(_e_why) and bool(_d_why)
+            out['ok'] = all([out['норма_проходит'], out['низкий_отвергнут'],
+                             out['авария_проходит'], out['исполненное_завершается'],
+                             out['пропуск_назван']])
+        elif kind == 'правила45: замок книги один на всех писателей':
+            # При ручном ADDFUT_BOOK_PATH без ADDFUT_LOCK_DIR голый hold_book_lock() запирал
+            # ~/.addfut, а сессия — каталог книги: два писателя одного файла под разными
+            # flock. Правило живёт в УМОЛЧАНИИ, поэтому проверяется именно голый вызов.
+            import state as _ST45
+            _bd = _tf45.mkdtemp(prefix='addfut-i45lock-')
+            _keepb = _os45.environ.get('ADDFUT_BOOK_PATH')
+            _keepl = _os45.environ.get('ADDFUT_LOCK_DIR')
+            _seen = []
+            _origfd = _ST45._lock_fd
+            try:
+                _os45.environ['ADDFUT_BOOK_PATH'] = _os45.path.join(_bd, 'book-F.json')
+                _os45.environ.pop('ADDFUT_LOCK_DIR', None)
+                _ST45._lock_fd = lambda d: (_seen.append(str(d)), _origfd(d))[1]
+                with _ST45.hold_book_lock():
+                    pass
+                with _ST45.hold_book_lock(_ST45.book_lock_dir(Path(_os45.environ['ADDFUT_BOOK_PATH']))):
+                    pass
+                out['голый_и_явный_совпали'] = (len(_seen) == 2 and _seen[0] == _seen[1])
+                out['замок_у_книги'] = (_seen and _seen[0] == _bd)
+                # Изоляция стенда сильнее правила: заданный ADDFUT_LOCK_DIR обязан побеждать.
+                _os45.environ['ADDFUT_LOCK_DIR'] = _bd2 = _tf45.mkdtemp(prefix='addfut-i45env-')
+                _seen.clear()
+                with _ST45.hold_book_lock():
+                    pass
+                out['окружение_сильнее'] = (_seen and _seen[0] == _bd2)
+            finally:
+                _ST45._lock_fd = _origfd
+                for _k, _v in (('ADDFUT_BOOK_PATH', _keepb), ('ADDFUT_LOCK_DIR', _keepl)):
+                    if _v is None:
+                        _os45.environ.pop(_k, None)
+                    else:
+                        _os45.environ[_k] = _v
+            out['ok'] = all([out['голый_и_явный_совпали'], out['замок_у_книги'],
+                             out['окружение_сильнее']])
+        elif kind == 'правила45: журнал не дописывается под мусорной шапкой':
+            # Проверка заголовка стояла в read(), а append брал предыдущий хэш своим,
+            # НЕЗАЩИЩЁННЫМ читателем — и дописывал строку под мусорной шапкой, начиная
+            # цепочку заново от GENESIS. Второй конец: исправный журнал обязан принимать.
+            import journal as _J45
+            _d = _tf45.mkdtemp(prefix='addfut-i45j-')
+            _row = {c: 'x' for c in _J45.BASE}
+            def _app(text):
+                _p = Path(_d) / f'journal-{abs(hash(text)) % 10**6}.csv'
+                _p.write_text(text, encoding='utf-8')
+                try:
+                    _J45.append(_p, dict(_row)); return 'ДОПИСАЛ'
+                except ValueError as _e:
+                    return 'ОТКАЗ'
+                except Exception as _e:
+                    return f'{type(_e).__name__}'
+            out['мусорная_шапка_отвергнута'] = _app('мусорная,шапка\n') == 'ОТКАЗ'
+            out['лишний_столбец_отвергнут'] = _app(','.join(_J45.COLS) + ',лишний\n') == 'ОТКАЗ'
+            out['нулевой_принят'] = _app('') == 'ДОПИСАЛ'
+            out['исправный_принят'] = _app(','.join(_J45.COLS) + '\n') == 'ДОПИСАЛ'
+            out['ok'] = all([out['мусорная_шапка_отвергнута'], out['лишний_столбец_отвергнут'],
+                             out['нулевой_принят'], out['исправный_принят']])
+        elif kind == 'правила45: диагност различает капитал и маржу':
+            # ТЕКСТЫ БЕРУТСЯ У ПРОИЗВОДИТЕЛЕЙ. Тело тревоги в бою — ВЕСЬ вывод сессии,
+            # поэтому здоровая строка про запас стояла рядом с отказом по капиталу и
+            # отменяла верный диагноз, а общий якорь «О-3-Е» дублировал частный.
+            import diagnose as _DG45
+            _kap = ('NLV 2,999,999 ниже порога маршрута Ф 3,000,000 (§8) — '
+                    'торговля остановлена')
+            _zdor = ('О-3-Е ВНУТРИДНЕВНАЯ ВАХТА: запас 2.10x не ниже 1.40 — '
+                     'сокращение не требуется')
+            _niz = ('О-3-Е ПОСЛЕ ИСПОЛНЕНИЙ: запас 1.28x ниже 1.40 — книга сокращена '
+                    'по нормативу §8')
+            _ned = 'запас О-3-Е недоступен при существующих позициях'
+            def _causes(body):
+                return [c for sig, c, _t in _DG45.SIGNS
+                        if (sig(body) if callable(sig) else sig in body)]
+            _c1 = _causes('\n'.join([_kap, _zdor]))
+            out['капитал_виден_рядом_со_здоровым'] = any('капитал ниже' in c for c in _c1)
+            out['здоровый_не_даёт_маржи'] = not any('ниже норматива О-3-Е' in c for c in _c1)
+            out['маржа_видна'] = any('ниже норматива О-3-Е' in c for c in _causes(_niz))
+            _c4 = _causes(_ned)
+            out['недоступность_не_дублируется'] = (
+                any('не отдаёт живой запас' in c for c in _c4)
+                and not any('ниже норматива О-3-Е' in c for c in _c4))
+            out['ok'] = all([out['капитал_виден_рядом_со_здоровым'],
+                             out['здоровый_не_даёт_маржи'], out['маржа_видна'],
+                             out['недоступность_не_дублируется']])
+        elif kind == 'правила45: пара реестра и замера сверяется':
+            # Якорь хэшировал оба файла порознь и заверял НЕСОВМЕСТИМУЮ пару. Область
+            # сверки — FUT (замеряет их только first_connect), направления — оба.
+            import csv as _csv45
+            import json as _js45
+            import worm_anchor as _WA45
+            _d = Path(_tf45.mkdtemp(prefix='addfut-i45w-'))
+            def _pair(rows, meta):
+                _r = _d / f'r{abs(hash(str(rows)+str(meta))) % 10**6}.csv'
+                _m = _r.with_suffix('.json')
+                with open(_r, 'w', newline='', encoding='utf-8') as _f:
+                    _w = _csv45.DictWriter(_f, fieldnames=['instrument', 'sec_type', 'con_id'])
+                    _w.writeheader()
+                    for _x in rows:
+                        _w.writerow(_x)
+                _m.write_text(_js45.dumps(meta, ensure_ascii=False), encoding='utf-8')
+                return _WA45._registry_margins_mismatch(str(_r), str(_m))
+            _fut = [dict(instrument='ESU26', sec_type='FUT', con_id='1'),
+                    dict(instrument='ZNU26', sec_type='FUT', con_id='2')]
+            _etf = [dict(instrument='CSPX', sec_type='STK', con_id='9')]
+            _ok = {'_meta': dict(series=['ESU26', 'ZNU26'],
+                                 con_ids={'ESU26': '1', 'ZNU26': '2'})}
+            out['согласованное_молчит'] = (_pair(_fut, _ok) == '')
+            out['фонды_не_мешают'] = (_pair(_fut + _etf, _ok) == '')
+            out['реестр_новее_виден'] = bool(_pair(
+                [dict(instrument='ESZ26', sec_type='FUT', con_id='3')], _ok))
+            out['замер_новее_виден'] = bool(_pair([_fut[0]], _ok))
+            out['con_id_виден'] = bool(_pair(_fut, {'_meta': dict(
+                series=['ESU26', 'ZNU26'], con_ids={'ESU26': '99', 'ZNU26': '2'})}))
+            out['форма_не_роняет'] = ('сверка невозможна' in _pair(_fut, {'_meta': 5})
+                                      or 'форму' in _pair(_fut, {'_meta': 5}))
+            out['ok'] = all([out['согласованное_молчит'], out['фонды_не_мешают'],
+                             out['реестр_новее_виден'], out['замер_новее_виден'],
+                             out['con_id_виден'], out['форма_не_роняет']])
+        elif kind == 'правила45: dref кэшируется только закреплённым':
+            # Кэш сбрасывался ТОЛЬКО в начале gross(), а unit_ref зовут и мимо него: живая
+            # доходность залипала на весь век объекта брокера и выглядела исправной.
+            import ib_broker as _IB45c
+            import feed as _FD45c
+            import pandas as _pd45c
+            _n = {'i': 0}
+            _orig = _FD45c.yield_pct
+            try:
+                def _fake(ib, today, expected_prev=None):
+                    _n['i'] += 1
+                    return (4.0 + 0.5 * _n['i'], None)
+                _FD45c.yield_pct = _fake
+                _b = _IB45c.IBBroker.__new__(_IB45c.IBBroker)
+                _b.ib = None; _b._dref_cache = None
+                _t = _pd45c.Timestamp('2026-08-21'); _p = _pd45c.Timestamp('2026-08-20')
+                _a1 = _b._dref_once(_t, _p); _a2 = _b._dref_once(_t, _p)
+                out['закреплённое_читается_раз'] = (_n['i'] == 1 and _a1 == _a2)
+                _n['i'] = 0; _b._dref_cache = None
+                _l1 = _b._dref_once(_t, None); _l2 = _b._dref_once(_t, None)
+                out['живое_не_залипает'] = (_n['i'] == 2 and _l1 != _l2)
+                out['живое_не_пишет_кэш'] = (_b._dref_cache is None)
+            finally:
+                _FD45c.yield_pct = _orig
+            out['ok'] = all([out['закреплённое_читается_раз'], out['живое_не_залипает'],
+                             out['живое_не_пишет_кэш']])
+        elif kind == 'правила45: ошибка кода не переодевается календарём':
+            # daily.py не ссылался на CODE_ERRORS ни строкой, поэтому парная мутация
+            # «запрет переодевания снят» до него не доставала, а О-5 начинался бы с
+            # поставочного риска вместо трассировки.
+            import daily as _DL45e
+            _orig = _DL45e.roll_deadline
+            try:
+                def _raise(exc):
+                    def _f(*a, **k):
+                        raise exc
+                    return _f
+                _DL45e.roll_deadline = _raise(AttributeError('опечатка'))
+                try:
+                    _DL45e._roll_deadline_or_stop('ZNU26', (), 'срок ролла')
+                    _got = None
+                except Exception as _e:
+                    _got = type(_e)
+                out['ошибка_кода_своим_типом'] = (_got is AttributeError)
+                _DL45e.roll_deadline = _raise(ValueError('нет таблицы праздников'))
+                try:
+                    _DL45e._roll_deadline_or_stop('ZNU26', (), 'срок ролла')
+                    _got2 = None
+                except Exception as _e:
+                    _got2 = type(_e)
+                out['доменная_остановка_названа'] = (_got2 is RuntimeError)
+            finally:
+                _DL45e.roll_deadline = _orig
+            out['ok'] = all([out['ошибка_кода_своим_типом'],
+                             out['доменная_остановка_названа']])
+        else:
+            out['error'] = f'неизвестный случай {kind}'
     except Exception as ex:
         out['raised'] = True
         out['error'] = f'{type(ex).__name__}: {ex}'
@@ -4182,6 +4488,106 @@ def _r45o3e(r):
     стенд проверяет правку, а не совпадение."""
     return (not r['raised'] and r['ok'] is True
             and r.get('прежний_промахивался') is True)
+
+
+
+# --- утверждения к правилам 45-го круга (по одному на защиту, чтобы отказ был назван) ---
+def _r45(kind, key=None):
+    """Каждое правило круга — своё утверждение. Общий сборник дал бы один отказ на девять
+    защит, и мутационный вердикт «поймана» не сказал бы, ЧЕМ именно."""
+    def _mk(r):
+        if r['raised'] or not r['ok']:
+            return False
+        return True if key is None else r.get(key) is True
+    return _mk
+
+
+@rinv('допуск бара снимается ЛЮБОЙ заданной границей, а не только точной',
+      needs=lambda r: r['case'] == 'правила45: допуск бара снимается известным календарём')
+def _r45gap(r):
+    """Разбор /code-review 45-го круга. Плоские пять дней — это правило «календарь
+    неизвестен», а не «expected_prev не задан»: переход полосы фонда на min_prev вернул
+    отказ маршрута Е на 29.12.2026. Проверяются оба конца и достижимость ветки: без
+    разрыва больше допуска стенд доказывал бы пустоту."""
+    return (not r['raised'] and r['ok'] is True and r.get('ветка_достижима') is True
+            and r.get('без_календаря_допуск_держит') is True)
+
+
+@rinv('пыль от вычитания прогресса не превращается в заявку',
+      needs=lambda r: r['case'] == 'правила45: остаток ниже допуска не заявка')
+def _r45dust(r):
+    """Разбор /code-review. Точный ноль на разности float оставлял 5,55e-16 юнита, и
+    завершённый переход получал POSTPONED. Второй конец обязателен: НАСТОЯЩИЙ остаток
+    обязан дожить до заявки, иначе годился бы код, выбрасывающий всё."""
+    return (not r['raised'] and r['ok'] is True and r.get('остаток_доходит') is True)
+
+
+@rinv('беспланный предпросмотр держит норматив, но не запирает аварию и завершение',
+      needs=lambda r: r['case'] == 'правила45: беспланный предпросмотр')
+def _r45pv(r):
+    """Разбор /code-review, угол «от противоположного знака». Порог О-3-Е без плана я
+    поставил безусловным и закрыл им аварийный выход Е->Ф и завершение уже исполненного
+    перехода. Незаконный COMPLETE при этом обязан остаться отвергнутым."""
+    return (not r['raised'] and r['ok'] is True and r.get('низкий_отвергнут') is True
+            and r.get('авария_проходит') is True
+            and r.get('исполненное_завершается') is True)
+
+
+@rinv('замок книги выводится из книги во всех входах, включая голый',
+      needs=lambda r: r['case'] == 'правила45: замок книги один на всех писателей')
+def _r45lock(r):
+    """Разбор /code-review. Правило жило перечислением вызывающих — и переходный
+    исполнитель с якорем WORM остались на ~/.addfut. Теперь оно в умолчании; изоляция
+    стенда переменной окружения обязана оставаться сильнее правила."""
+    return (not r['raised'] and r['ok'] is True and r.get('голый_и_явный_совпали') is True
+            and r.get('окружение_сильнее') is True)
+
+
+@rinv('журнал §7 не принимает дописывание под повреждённой шапкой',
+      needs=lambda r: r['case'] == 'правила45: журнал не дописывается под мусорной шапкой')
+def _r45j(r):
+    """Разбор /code-review. Проверка заголовка стояла у читателя, а пишет append через
+    СВОЙ незащищённый читатель — и начинал цепочку заново от GENESIS поверх мусора."""
+    return (not r['raised'] and r['ok'] is True
+            and r.get('мусорная_шапка_отвергнута') is True
+            and r.get('исправный_принят') is True)
+
+
+@rinv('диагност не подменяет капитальный отказ маржинальным и наоборот',
+      needs=lambda r: r['case'] == 'правила45: диагност различает капитал и маржу')
+def _r45dg(r):
+    """Разбор /code-review. Соседство проверялось по всему телу тревоги, а тело в бою —
+    весь вывод сессии: одна здоровая строка про запас отменяла верный диагноз."""
+    return (not r['raised'] and r['ok'] is True
+            and r.get('капитал_виден_рядом_со_здоровым') is True
+            and r.get('здоровый_не_даёт_маржи') is True)
+
+
+@rinv('якорь не заверяет реестр и замер разных поколений молча',
+      needs=lambda r: r['case'] == 'правила45: пара реестра и замера сверяется')
+def _r45w(r):
+    """Разбор /code-review. Сверка шла в одну сторону и по одному типу инструмента;
+    согласованная пара обязана молчать, иначе маршрут Е получил бы вечное расхождение."""
+    return (not r['raised'] and r['ok'] is True and r.get('согласованное_молчит') is True
+            and r.get('замер_новее_виден') is True and r.get('фонды_не_мешают') is True)
+
+
+@rinv('живая доходность не залипает в кэше между расчётами',
+      needs=lambda r: r['case'] == 'правила45: dref кэшируется только закреплённым')
+def _r45d(r):
+    """Разбор /code-review. Кэш сбрасывался только в gross(), а unit_ref зовут и мимо
+    него: величина часовой давности выглядела бы исправной проверкой."""
+    return (not r['raised'] and r['ok'] is True and r.get('живое_не_залипает') is True
+            and r.get('закреплённое_читается_раз') is True)
+
+
+@rinv('календарный сторож не переодевает ошибку кода в поставочный риск',
+      needs=lambda r: r['case'] == 'правила45: ошибка кода не переодевается календарём')
+def _r45ce(r):
+    """Разбор /code-review. Docstring обещал «ошибка кода падает своим типом», а код ловил
+    Exception целиком; доменная неизвестность обязана при этом остаться остановкой."""
+    return (not r['raised'] and r['ok'] is True and r.get('ошибка_кода_своим_типом') is True
+            and r.get('доменная_остановка_названа') is True)
 
 
 @rinv('возраст сердцебиения читается по содержимому, а touch его не лечит',
@@ -4564,6 +4970,7 @@ def run_run(stop_on_first=False):
                  else _session_lock() if case == 'замок между процессами'
                  else _session_statedir() if case == 'пути состояния: один namespace'
                  else _worm_case(case) if case.startswith('worm:')
+                 else _rules45_case(case) if case.startswith('правила45:')
                  else _autopilot_case(case) if case.startswith('автопилот:')
                  else _session_run(case))
         except Exception as ex:

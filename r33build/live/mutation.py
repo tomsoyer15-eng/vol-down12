@@ -803,17 +803,70 @@ def _adapter_mutations():
         запасе 1,20 против норматива 1,40, и книга уходит в ночь пробитой."""
         orig = B.IBBroker.preview
 
-        def patched(self, orders=None, emergency=False):
+        def patched(self, orders=None, emergency=False, done_all=False):
+            # ПОЛЯ ОТВЕТА ЗАВОДЯТСЯ И У МУТАНТА (разбор /code-review): без _preview_why
+            # стенд падал AttributeError на сценарии normal, то есть «ловил» мутацию
+            # поломкой обвязки, а не наблюдением подменённого порога.
+            self._preview_why = ''
+            self._preview_pass_why = ''
             if not orders:
                 try:
                     _c = self.margin_cushion()
                 except Exception:
+                    self._preview_why = 'запас счёта неизвестен'
                     return False
                 if _c is None:
+                    self._preview_why = 'запас счёта не число (None)'
                     return False
-                return float(_c) >= 1.0          # ВОТ ОН, прежний порог
-            return orig(self, orders, emergency)
+                if float(_c) >= 1.0:             # ВОТ ОН, прежний порог
+                    return True
+                self._preview_why = 'плана нет, запас ниже 1.0'
+                return False
+            return orig(self, orders, emergency, done_all)
         return orig, patched
+
+    def buy_direction_inverted():
+        """Покупка единиц идёт ПРОДАЖЕЙ (разбор /code-review 45-го круга): зеркало уже
+        покрытой инверсии продажи. Денежная граница: вместо входа в цель книга уходит в
+        короткую по цели, а источник остаётся целым — MIXED с двойной экспозицией."""
+        orig = B.IBBroker.buy_units
+
+        def patched(self, *a, **k):
+            return B.IBBroker.sell_units(self, *a, **k)
+        return orig, patched
+
+    def pair_clock_never_advances():
+        """Часы непарной позиции стоят: minutes_since всегда отдаёт ноль — как если бы
+        разрыв ноги только что открылся. Ворота §8б, ограничивающие ДЛИТЕЛЬНОСТЬ непарного
+        состояния, при этом не срабатывают никогда, и книга может стоять разорванной сколь
+        угодно долго. mark_pair мутацию имеет, а его вторая половина — нет."""
+        orig = B.IBBroker.minutes_since
+        return orig, (lambda self, *a, **k: 0.0)
+
+    def dref_cache_sticky():
+        """Кэш дюрационной базы снова липнет и к ЖИВОМУ чтению — как было до разбора
+        /code-review: unit_ref зовут и мимо gross(), где стоит единственный сброс, и
+        доходность часовой давности выглядела бы исправной проверкой."""
+        orig = B.IBBroker._dref_once
+
+        def patched(self, today, expected_prev):
+            _key = (str(today), str(expected_prev))
+            _c = self._dref_cache
+            if _c is not None and _c[0] == _key:
+                return _c[1]
+            _d = orig(self, today, expected_prev)
+            self._dref_cache = (_key, _d)          # ВОТ ОНО: пишем и живое значение
+            return _d
+        return orig, patched
+
+    def preview_drops_carveouts():
+        """Беспланный предпросмотр снова игнорирует аварийность и «всё исполнено» — как
+        было до разбора /code-review: аварийный выход Е->Ф запирается ровно при
+        маржинальном стрессе, а завершённый resume через три POSTPONED уходит в MIXED на
+        НЕразорванной книге."""
+        orig = B.IBBroker.preview
+        return orig, (lambda self, orders=None, emergency=False, done_all=False:
+                      orig(self, orders, False, False))
 
     def roll_deadline_fail_open():
         """Неизвестный срок ролла снова отвечает «роллить не пора» — как было до 45-го
@@ -910,6 +963,10 @@ def _adapter_mutations():
         return orig, patched
 
     return [('продажа единиц идёт покупкой', 'sell_units', units_direction_inverted),
+            ('покупка единиц идёт продажей', 'buy_units', buy_direction_inverted),
+            ('часы непарной позиции стоят', 'minutes_since', pair_clock_never_advances),
+            ('кэш доходности липнет и к живому', '_dref_once', dref_cache_sticky),
+            ('беспланный предпросмотр без исключений', 'preview', preview_drops_carveouts),
             ('отчёты дня всегда пусты', 'todays_executions', executions_empty),
             ('предпросмотр без плана судит по единице', 'preview',
              preview_noplan_unit_threshold),
@@ -1116,12 +1173,23 @@ def _feed_mutations():
         orig = FD._strict_bool
         return orig, (lambda v, where: bool(v)), '_strict_bool'
 
+    def gap_tolerance_ignores_min_prev():
+        """Плоский допуск снова применяется при заданном min_prev — как было после правки
+        №5 45-го круга: полоса единицы фонда детерминированно падает [STALE_BAR] на длинных
+        европейских связках (29.12.2026 — разрыв шесть дней при допуске пять), gross()
+        рвётся ПОСЛЕ первой исполненной пары, и переход уходит в MIXED."""
+        orig = FD._gap_tolerance_applies
+        return orig, (lambda expected_prev, min_prev: expected_prev is None), '_gap_tolerance_applies'
+
     def no_date_check():
         """Даты баров не проверяются вовсе. Сигнатура обязана совпадать с боевой (с
         expected_prev): прежняя мутация роняла штатный сценарий TypeError'ом и объявлялась
         «пойманной» по поломке стенда, а не по принятию устаревшего бара (№28)."""
         orig = FD.closes
-        def patched(ib, contract, today, expected_prev=None):
+        # СИГНАТУРА ДОГОНЯЕТ БОЕВУЮ И ПО min_prev (разбор /code-review 45-го круга): полоса
+        # единицы фонда зовёт closes(min_prev=...), и мутант падал TypeError'ом — то есть
+        # снова объявлялся «пойманным» по поломке стенда, а не по принятию устаревшего бара.
+        def patched(ib, contract, today, expected_prev=None, min_prev=None):
             import math
             import pandas as pd
             df = FD._bars(ib, contract)
@@ -1192,6 +1260,7 @@ def _feed_mutations():
             ('цена ES без приведения к единице', raw_es_price),
             ('состояние ноги через bool()', loose_bool),
             ('даты баров не проверяются', no_date_check),
+            ('плоский допуск игнорирует min_prev', gap_tolerance_ignores_min_prev),
             ('ориентиры без точной сессии', refs_loose_age),
             ('нет строки месяца — берётся последняя', fallback_last_row),
             ('digest живого ряда не обязателен', signal_digest_optional)]
@@ -1521,19 +1590,10 @@ def _run_mutations():
     def alarm_general_overwrites():
         """Общая тревога снова ЗАТИРАЕТ частную — как было до инцидента 19.08.2026:
         ветка run_close «копия не снята» писала в тот же файл через alarm_write, стирая
-        причину отказа снимка и разбор diagnose.py. Мутируется ПРОИЗВОДСТВЕННЫЙ ТЕКСТ:
-        стенду подсовывается копия боевого скрипта с возвращённым дефектом."""
-        import invariants as _I
-        import tempfile as _tf
-        from pathlib import Path as _P
-        orig = _I.AUTOPILOT_SH
-        _src = _P(orig).read_text(encoding='utf-8')
-        _mut = _src.replace('alarm_keep "$ST/ALARM-backup-$day.txt"',
-                            'alarm_write "$ST/ALARM-backup-$day.txt"')
-        assert _mut != _src, 'мутация шелла не нашла своего места — стенд доказывал бы пустоту'
-        _dst = _P(_tf.mkdtemp(prefix='addfut-mut-sh-')) / 'autopilot.sh'
-        _dst.write_text(_mut, encoding='utf-8')
-        return orig, _dst, _I, 'AUTOPILOT_SH'
+        причину отказа снимка и разбор diagnose.py."""
+        return _mutate_autopilot('alarm_keep "$ST/ALARM-backup-$day.txt"',
+                                 'alarm_write "$ST/ALARM-backup-$day.txt"',
+                                 'addfut-mut-sh-', 'общая тревога затирает причину')
 
     def lock_on_file_again():
         """Замок снова берётся на ФАЙЛ, а не на каталог — как было до 44-го круга, №9:
@@ -1562,46 +1622,102 @@ def _run_mutations():
     def verdict_reads_whole_answer():
         """Вердикт вахты снова читается как «весь ответ начинается с LOW» — как было до
         45-го круга, №1: диагностические строки ib_insync встают перед маркером, разбор
-        уходит в `*)`, и предписанный §8 срез в ту же сессию не запускается.
-        Мутируется ПРОИЗВОДСТВЕННЫЙ текст: копия скрипта, где verdict() возвращает ответ
-        целиком."""
-        import invariants as _I45
-        import tempfile as _tf45
-        from pathlib import Path as _P45
-        orig = _I45.AUTOPILOT_SH
-        _src = _P45(orig).read_text(encoding='utf-8')
-        _was = "    printf '%s\\n' \"$1\" | sed -n 's/.*ADDFUT-VERDICT //p' | tail -1"
-        _now = "    printf '%s' \"$1\""
-        _mut = _src.replace(_was, _now)
-        assert _mut != _src, 'мутация вердикта не нашла своего места'
-        _dst = _P45(_tf45.mkdtemp(prefix='addfut-mut-verd-')) / 'autopilot.sh'
-        _dst.write_text(_mut, encoding='utf-8')
-        return orig, _dst, _I45, 'AUTOPILOT_SH'
+        уходит в `*)`, и предписанный §8 срез в ту же сессию не запускается."""
+        return _mutate_autopilot(
+            "    printf '%s\\n' \"$1\" | awk 'match($0, /ADDFUT-VERDICT /)",
+            "    printf '%s' \"$1\"; : 'awk отключён' # awk 'match($0, /ADDFUT-VERDICT /)",
+            'addfut-mut-verd-', 'вердикт читается целиком')
 
     def hb_age_falls_back_to_mtime():
         """Возраст сердцебиения снова откатывается на mtime при негодном содержимом — как
         было до 44-го круга, №12: touch или восстановление каталога из копии делают
-        зависшую отметку «свежей», сторож занятого замка молчит, контур слеп, ролл
-        пропущен. Мутируется производственный текст: копия скрипта с возвращённым
-        откатом, и по ней работает шелловый стенд."""
-        import invariants as _I12
-        import tempfile as _tf12
-        from pathlib import Path as _P12
-        orig = _I12.AUTOPILOT_SH
-        _src = _P12(orig).read_text(encoding="utf-8")
-        _was = ('    if [ "$v" = 0 ]; then\n'
-                '        echo "НЕЧИТАЕМО"\n'
-                '        return 1\n'
-                '    fi')
-        _now = ('    if [ "$v" = 0 ]; then\n'
-                '        echo $(( now - $(stat -c %Y "$f" 2>/dev/null || echo 0) ))\n'
-                '        return 0\n'
-                '    fi')
-        _mut = _src.replace(_was, _now)
-        assert _mut != _src, "мутация сердцебиения не нашла своего места"
-        _dst = _P12(_tf12.mkdtemp(prefix="addfut-mut-hb-")) / "autopilot.sh"
-        _dst.write_text(_mut, encoding="utf-8")
-        return orig, _dst, _I12, "AUTOPILOT_SH"
+        зависшую отметку «свежей», сторож занятого замка молчит, контур слеп."""
+        return _mutate_autopilot(
+            '    if [ "$v" = 0 ]; then\n        echo "НЕЧИТАЕМО"\n        return 1\n    fi',
+            '    if [ "$v" = 0 ]; then\n        echo $(( now - $(stat -c %Y "$f" 2>/dev/null || echo 0) ))\n        return 0\n    fi',
+            'addfut-mut-hb-', 'возраст откатывается на mtime')
+
+    def empty_clears_foreign_counter():
+        """Ветка EMPTY снова обнуляет ЧУЖОЙ файл — исходный дефект правки №6: имени
+        o3e-intraday-fail во всём скрипте больше нет, счётчик слепоты не обнуляется, и
+        последовательность SKIP,SKIP,EMPTY,SKIP по-прежнему даёт три и останавливает
+        контур ровно тем механизмом, ради снятия которого ветка заведена."""
+        return _mutate_autopilot(
+            'EMPTY\\ *|OK\\ *) rm -f "$ST/o3e-watch-fail-$day"',
+            'EMPTY\\ *|OK\\ *) : > "$ST/o3e-intraday-fail-$day"',
+            'addfut-mut-empt-', 'EMPTY чистит чужой счётчик')
+
+    def empty_is_blindness_again():
+        """Пустая книга Е снова считается слепотой: ветка EMPTY убрана из успешного
+        разбора внутридневной вахты."""
+        return _mutate_autopilot(
+            '            EMPTY\\ *|OK\\ *) rm -f "$ST/o3e-watch-fail-$day"',
+            '            OK\\ *) rm -f "$ST/o3e-watch-fail-$day"',
+            'addfut-mut-emp2-', 'пустая книга снова слепота')
+
+    def positions_before_verdict():
+        """Позиции снова снимаются ДО разбора запаса и в общем try — как было в первой
+        редакции правки №6: BrokerError из refresh() выбрасывает уже ИЗМЕРЕННЫЙ LOW,
+        вердикт становится SKIP, и §8 срез в ту же сессию снова не запускается."""
+        return _mutate_autopilot(
+            '    c = _br.margin_cushion()\n    if c is None:',
+            '    c = _br.margin_cushion()\n    _pos_early = _br.net_positions() or {}\n    if c is None:',
+            'addfut-mut-pos-', 'позиции снимаются до вердикта')
+
+    def book_lock_ignores_book():
+        """Замок книги снова берётся на каталог состояния независимо от того, где книга —
+        как было до 45-го круга, №8: при ручном ADDFUT_BOOK_PATH торговля и переходный
+        исполнитель держат РАЗНЫЕ flock над одним файлом."""
+        import state as _STm45
+        orig = _STm45.book_lock_dir
+        return orig, (lambda path=None: _STm45.lock_dir()), _STm45, 'book_lock_dir'
+
+    def journal_append_own_reader():
+        """append снова берёт предыдущий хэш СВОИМ незащищённым читателем — как было до
+        разбора /code-review: на файле с мусорной шапкой read() отказывает, а append
+        дописывает строку под этой шапкой и начинает цепочку заново от GENESIS."""
+        import csv as _csvm
+        import journal as _Jm45
+        orig = _Jm45._last_hash
+
+        def patched(path):
+            if not path.exists():
+                return _Jm45.GENESIS
+            rows = list(_csvm.DictReader(open(path, newline='', encoding='utf-8')))
+            return rows[-1]['row_hash'] if rows else _Jm45.GENESIS
+        return orig, patched, _Jm45, '_last_hash'
+
+    def diagnose_reads_whole_body():
+        """Соседство §8 снова проверяется по ВСЕМУ телу тревоги — как было до разбора
+        /code-review: одна здоровая строка про запас О-3-Е отменяет верный диагноз отказа
+        по капиталу, и оператор получает зеркально противоположную причину."""
+        import diagnose as _DGm45
+        orig = _DGm45._kapital_nizhe_poroga
+
+        def patched(body):
+            b = str(body)
+            if '§8' not in b:
+                return False
+            if 'О-3-Е' in b or 'запас' in b:
+                return False
+            return ('NLV' in b) or ('порог' in b)
+        return orig, patched, _DGm45, '_kapital_nizhe_poroga'
+
+    def worm_pair_always_consistent():
+        """Сверка поколений реестра и замера всегда молчит — как было до 45-го круга, №10:
+        якорь заверяет несовместимую пару, день объявляется закрытым, а расхождение
+        всплывает позже, возможно при срочном переходе."""
+        import worm_anchor as _WAm45
+        orig = _WAm45._registry_margins_mismatch
+        return orig, (lambda reg, mrg: ''), _WAm45, '_registry_margins_mismatch'
+
+    def daily_forgets_code_errors():
+        """Слой daily снова не знает про CODE_ERRORS — как было до разбора /code-review:
+        опечатка в календаре приходит к О-5 доменным «поставочный риск неизвестен», и
+        разбор начинается с календаря вместо трассировки."""
+        import daily as _DLm45
+        orig = _DLm45._code_errors
+        return orig, (lambda: ()), _DLm45, '_code_errors'
 
     def worm_ever_attested_blind():
         """История якорей ничего не помнит — как было до 44-го круга, №13: удалённый замер
@@ -1711,11 +1827,42 @@ def _run_mutations():
             ('история якорей ничего не помнит', worm_ever_attested_blind),
             ('возраст сердцебиения откатывается на mtime', hb_age_falls_back_to_mtime),
             ('вердикт вахты читается целиком', verdict_reads_whole_answer),
+            ('ветка EMPTY чистит чужой счётчик', empty_clears_foreign_counter),
+            ('пустая книга Е снова слепота', empty_is_blindness_again),
+            ('позиции снимаются до вердикта', positions_before_verdict),
+            ('замок книги не зависит от книги', book_lock_ignores_book),
+            ('append журнала со своим читателем', journal_append_own_reader),
+            ('диагност читает тело целиком', diagnose_reads_whole_body),
+            ('пара реестр/замер всегда согласна', worm_pair_always_consistent),
+            ('слой daily не знает про CODE_ERRORS', daily_forgets_code_errors),
             ('замок берётся на файл, а не на каталог', lock_on_file_again),
             ('правило итога сессии ничего не находит', itog_rule_always_clean),
             ('итог перехода только в пустой журнал', handover_itog_only_when_empty),
             ('общая тревога затирает причину', alarm_general_overwrites),
             ('маршрут игнорируется', force_route_f)]
+
+
+def _mutate_autopilot(was, now, prefix, что):
+    """МУТАЦИЯ БОЕВОГО ШЕЛЛА — ОДНИМ ПОМОЩНИКОМ (разбор /code-review 45-го круга).
+
+    Блок «прочитать autopilot.sh, заменить кусок, положить копию в mkdtemp, перенаправить
+    _I.AUTOPILOT_SH» был скопирован трижды, у каждой копии свои одноразовые псевдонимы
+    импортов, и протокол копий уже разъехался. Помощник один: у правила «мутируется
+    ПРОИЗВОДСТВЕННЫЙ текст, а не его пересказ» одна точка.
+
+    Проверка `was` встречается РОВНО ОДИН РАЗ обязательна: замена, не нашедшая места, дала
+    бы мутанта, тождественного оригиналу, и вердикт «поймана» означал бы «нечего ловить».
+    """
+    import invariants as _Imut
+    import tempfile as _tfmut
+    from pathlib import Path as _Pmut
+    orig = _Imut.AUTOPILOT_SH
+    _src = _Pmut(orig).read_text(encoding='utf-8')
+    _n = _src.count(was)
+    assert _n == 1, f'мутация «{что}» нашла своё место {_n} раз(а) вместо одного'
+    _dst = _Pmut(_tfmut.mkdtemp(prefix=prefix)) / 'autopilot.sh'
+    _dst.write_text(_src.replace(was, now), encoding='utf-8')
+    return orig, _dst, _Imut, 'AUTOPILOT_SH'
 
 
 def _transition_mutations():
@@ -1734,6 +1881,26 @@ def _transition_mutations():
         import transition as _TR3
         orig = _TR3.pv_remainder
         return orig, (lambda plan, done, partial=None: orig(plan, done)), _TR3, 'pv_remainder'
+
+    def consume_partial_exact_zero():
+        """Вычитание внутрилотового прогресса снова сравнивает с точным нулём — как было до
+        разбора /code-review: план [0,1; 0,2; 0,3; 0,4] при полностью исполненном источнике
+        оставляет 5,55e-16 юнита, цели маршрута Е от округления освобождены, и whatIf
+        получает заявку на пыль: три POSTPONED и ABORT на ЗАКОННО завершённом переходе."""
+        import sys as _s4, os as _o4
+        _lv4 = _o4.path.join(_o4.path.dirname(_o4.path.abspath(__file__)), '..')
+        if _lv4 not in _s4.path:
+            _s4.path.insert(0, _lv4)
+        import transition as _TR4
+        orig = _TR4.consume_partial
+
+        def patched(units, done_units):
+            units = float(units)
+            take = min(float(done_units or 0.0), units)
+            if take > 0:
+                units -= take
+            return (0.0 if units <= 0 else units), max(0.0, float(done_units or 0.0) - take)
+        return orig, patched, _TR4, 'consume_partial'
 
     def orders_counted_locally():
         """Дневная квота снова считается только по файлу прогресса — как было до
@@ -2019,6 +2186,7 @@ def _transition_mutations():
         return orig, (lambda j, body: None), _Mm, '_verify_journal_digest'
 
     return [('остаток не вычитает внутрилотовый прогресс', pv_remainder_ignores_partial),
+            ('остаток лота сравнивается с точным нулём', consume_partial_exact_zero),
             ('квота дня считается по файлу прогресса', orders_counted_locally),
             ('дата перехода принимается на веру', asof_trusted),
             ('край общего окна не проверяется', gate_no_window),
