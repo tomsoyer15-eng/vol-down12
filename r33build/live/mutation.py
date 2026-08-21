@@ -1207,14 +1207,6 @@ def _feed_mutations():
         orig = FD._strict_bool
         return orig, (lambda v, where: bool(v)), '_strict_bool'
 
-    def gap_tolerance_ignores_min_prev():
-        """Плоский допуск снова применяется при заданном min_prev — как было после правки
-        №5 45-го круга: полоса единицы фонда детерминированно падает [STALE_BAR] на длинных
-        европейских связках (29.12.2026 — разрыв шесть дней при допуске пять), gross()
-        рвётся ПОСЛЕ первой исполненной пары, и переход уходит в MIXED."""
-        orig = FD._gap_tolerance_applies
-        return orig, (lambda expected_prev, min_prev: expected_prev is None), '_gap_tolerance_applies'
-
     def no_date_check():
         """Даты баров не проверяются вовсе. Сигнатура обязана совпадать с боевой (с
         expected_prev): прежняя мутация роняла штатный сценарий TypeError'ом и объявлялась
@@ -1294,7 +1286,6 @@ def _feed_mutations():
             ('цена ES без приведения к единице', raw_es_price),
             ('состояние ноги через bool()', loose_bool),
             ('даты баров не проверяются', no_date_check),
-            ('плоский допуск игнорирует min_prev', gap_tolerance_ignores_min_prev),
             ('ориентиры без точной сессии', refs_loose_age),
             ('нет строки месяца — берётся последняя', fallback_last_row),
             ('digest живого ряда не обязателен', signal_digest_optional)]
@@ -1698,6 +1689,45 @@ def _run_mutations():
             '    c = _br.margin_cushion()\n    _pos_early = _br.net_positions() or {}\n    if c is None:',
             'addfut-mut-pos-', 'позиции снимаются до вердикта')
 
+    def gap_tolerance_ignores_min_prev():
+        """Плоский допуск снова применяется при заданном min_prev — как было после правки
+        №5 45-го круга: полоса единицы фонда детерминированно падает [STALE_BAR] на длинных
+        европейских связках (29.12.2026 — разрыв шесть дней при допуске пять), gross()
+        рвётся ПОСЛЕ первой исполненной пары, и переход уходит в MIXED."""
+        # СУДЬЯ СОВПАДАЕТ С НАБЛЮДАТЕЛЕМ (разбор /code-review 45-го круга). Мутация
+        # стояла в наборе СБОРЩИКА, который судит run_feed, а наблюдает правило стенд
+        # 'правила45: допуск бара' из RUN_CASES: вердикт был «не поймал НИКТО» при
+        # живом и верном стенде. Это тот же класс, что и мутация, пойманная поломкой
+        # обвязки: приговор выносит не тот, кто смотрит.
+        import feed as _FDg45
+        orig = _FDg45._gap_tolerance_applies
+        return (orig, (lambda expected_prev, min_prev: expected_prev is None),
+                _FDg45, '_gap_tolerance_applies')
+
+    def consume_partial_exact_zero():
+        """СУДЬЯ ТОТ ЖЕ, ЧТО И НАБЛЮДАТЕЛЬ: правило наблюдает стенд «правила45: остаток ниже
+        допуска не заявка» из RUN_CASES, поэтому и мутация живёт здесь, а не в наборе
+        перехода — иначе вердикт «не поймал НИКТО» при верном стенде.
+
+        Вычитание внутрилотового прогресса снова сравнивает с точным нулём — как было до
+        разбора /code-review: план [0,1; 0,2; 0,3; 0,4] при полностью исполненном источнике
+        оставляет 5,55e-16 юнита, цели маршрута Е от округления освобождены, и whatIf
+        получает заявку на пыль: три POSTPONED и ABORT на ЗАКОННО завершённом переходе."""
+        import sys as _s4, os as _o4
+        _lv4 = _o4.path.join(_o4.path.dirname(_o4.path.abspath(__file__)), '..')
+        if _lv4 not in _s4.path:
+            _s4.path.insert(0, _lv4)
+        import transition as _TR4
+        orig = _TR4.consume_partial
+
+        def patched(units, done_units):
+            units = float(units)
+            take = min(float(done_units or 0.0), units)
+            if take > 0:
+                units -= take
+            return (0.0 if units <= 0 else units), max(0.0, float(done_units or 0.0) - take)
+        return orig, patched, _TR4, 'consume_partial'
+
     def book_lock_ignores_book():
         """Замок книги снова берётся на каталог состояния независимо от того, где книга —
         как было до 45-го круга, №8: при ручном ADDFUT_BOOK_PATH торговля и переходный
@@ -1726,16 +1756,23 @@ def _run_mutations():
         /code-review: одна здоровая строка про запас О-3-Е отменяет верный диагноз отказа
         по капиталу, и оператор получает зеркально противоположную причину."""
         import diagnose as _DGm45
-        orig = _DGm45._kapital_nizhe_poroga
-
-        def patched(body):
+        # МУТИРУЕТСЯ ТАБЛИЦА, А НЕ ИМЯ ФУНКЦИИ (разбор /code-review 45-го круга). SIGNS
+        # держит сам ОБЪЕКТ предиката, захваченный при импорте: подмена
+        # diagnose._kapital_nizhe_poroga меняла имя, но не то, что реально вызывается, и
+        # мутация била в пустоту при живом стенде. Место ловли — таблица.
+        def _whole_body(body):
             b = str(body)
             if '§8' not in b:
                 return False
             if 'О-3-Е' in b or 'запас' in b:
                 return False
             return ('NLV' in b) or ('порог' in b)
-        return orig, patched, _DGm45, '_kapital_nizhe_poroga'
+        orig = _DGm45.SIGNS
+        _mut = [((_whole_body if _s is _DGm45._kapital_nizhe_poroga else _s), _c, _t)
+                for _s, _c, _t in orig]
+        assert any(_s is _whole_body for _s, _, _ in _mut), \
+            'мутация диагноста не нашла своего места в таблице'
+        return orig, _mut, _DGm45, 'SIGNS'
 
     def worm_pair_always_consistent():
         """Сверка поколений реестра и замера всегда молчит — как было до 45-го круга, №10:
@@ -1864,6 +1901,8 @@ def _run_mutations():
             ('ветка EMPTY чистит чужой счётчик', empty_clears_foreign_counter),
             ('пустая книга Е снова слепота', empty_is_blindness_again),
             ('позиции снимаются до вердикта', positions_before_verdict),
+            ('плоский допуск игнорирует min_prev', gap_tolerance_ignores_min_prev),
+            ('остаток лота сравнивается с точным нулём', consume_partial_exact_zero),
             ('замок книги не зависит от книги', book_lock_ignores_book),
             ('append журнала со своим читателем', journal_append_own_reader),
             ('диагност читает тело целиком', diagnose_reads_whole_body),
@@ -1915,26 +1954,6 @@ def _transition_mutations():
         import transition as _TR3
         orig = _TR3.pv_remainder
         return orig, (lambda plan, done, partial=None: orig(plan, done)), _TR3, 'pv_remainder'
-
-    def consume_partial_exact_zero():
-        """Вычитание внутрилотового прогресса снова сравнивает с точным нулём — как было до
-        разбора /code-review: план [0,1; 0,2; 0,3; 0,4] при полностью исполненном источнике
-        оставляет 5,55e-16 юнита, цели маршрута Е от округления освобождены, и whatIf
-        получает заявку на пыль: три POSTPONED и ABORT на ЗАКОННО завершённом переходе."""
-        import sys as _s4, os as _o4
-        _lv4 = _o4.path.join(_o4.path.dirname(_o4.path.abspath(__file__)), '..')
-        if _lv4 not in _s4.path:
-            _s4.path.insert(0, _lv4)
-        import transition as _TR4
-        orig = _TR4.consume_partial
-
-        def patched(units, done_units):
-            units = float(units)
-            take = min(float(done_units or 0.0), units)
-            if take > 0:
-                units -= take
-            return (0.0 if units <= 0 else units), max(0.0, float(done_units or 0.0) - take)
-        return orig, patched, _TR4, 'consume_partial'
 
     def orders_counted_locally():
         """Дневная квота снова считается только по файлу прогресса — как было до
@@ -2220,7 +2239,6 @@ def _transition_mutations():
         return orig, (lambda j, body: None), _Mm, '_verify_journal_digest'
 
     return [('остаток не вычитает внутрилотовый прогресс', pv_remainder_ignores_partial),
-            ('остаток лота сравнивается с точным нулём', consume_partial_exact_zero),
             ('квота дня считается по файлу прогресса', orders_counted_locally),
             ('дата перехода принимается на веру', asof_trusted),
             ('край общего окна не проверяется', gate_no_window),

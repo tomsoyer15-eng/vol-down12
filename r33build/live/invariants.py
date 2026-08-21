@@ -2431,7 +2431,8 @@ RUN_CASES = ('наблюдение', 'торговля', 'незамкнутая
              'правила45: пара реестра и замера сверяется',
              'правила45: dref кэшируется только закреплённым',
              'правила45: ошибка кода не переодевается календарём',
-             'правила45: предполёт передачи не переодевает ошибку кода')
+             'правила45: предполёт передачи не переодевает ошибку кода',
+             'правила45: проба О-3-Е читает позиции только при нужде')
 
 
 _ROLLGAP_K = 2
@@ -4140,6 +4141,85 @@ def _rules45_case(kind):
                 _FD45c.yield_pct = _orig
             out['ok'] = all([out['закреплённое_читается_раз'], out['живое_не_залипает'],
                              out['живое_не_пишет_кэш']])
+        elif kind == 'правила45: проба О-3-Е читает позиции только при нужде':
+            # ТЕЛО ПРОБЫ ИСПОЛНЯЕТСЯ, А НЕ ПЕРЕСКАЗЫВАЕТСЯ. Стенд ветки `case` кормит
+            # dispatch готовыми вердиктами и потому слеп к тому, КАК вердикт получен: мутация
+            # «позиции снимаются до вердикта» (то есть первая, ошибочная редакция правки №6)
+            # не наблюдалась ничем. Здесь из autopilot.sh вырезается python-тело o3e_probe и
+            # исполняется с подставными модулями: боевой текст, семь состояний.
+            import io as _io45
+            import types as _ty45
+            _sh = AUTOPILOT_SH.read_text(encoding='utf-8')
+            _body = _sh[_sh.index('o3e_probe() {'):_sh.index('\nhb_write() {')]
+            _src = _body[_body.index('"$PY" -c "') + 10:_body.rindex('" 2>&1 )')]
+            _src = _src.replace('clientId=$1', 'clientId=94')
+            out['тело_вырезано'] = ('margin_cushion' in _src and 'net_positions' in _src)
+
+            def _run(cushion, pos, pos_raises=False, cushion_raises=False):
+                _calls = []
+                _ibm = _ty45.ModuleType('ib_insync')
+
+                class _IB:
+                    def connect(self, *a, **k):
+                        pass
+
+                    def disconnect(self):
+                        _calls.append('disconnect')
+                _ibm.IB = _IB
+                _brm = _ty45.ModuleType('ib_broker')
+
+                class _B:
+                    def __init__(self, ib):
+                        pass
+
+                    def margin_cushion(self):
+                        if cushion_raises:
+                            raise RuntimeError('шлюз молчит')
+                        return cushion
+
+                    def net_positions(self):
+                        _calls.append('позиции')
+                        if pos_raises:
+                            raise RuntimeError('позиции не устоялись за 4 чтений')
+                        return pos
+                _brm.IBBroker = _B
+                _dlm = _ty45.ModuleType('daily')
+                _dlm.O3E_MIN = 1.40
+                _keep = {k: _sy.modules.get(k) for k in ('ib_insync', 'ib_broker', 'daily')}
+                _sy.modules.update({'ib_insync': _ibm, 'ib_broker': _brm, 'daily': _dlm})
+                _out, _sy.stdout = _sy.stdout, _io45.StringIO()
+                try:
+                    exec(compile(_src, 'o3e_probe', 'exec'), {'__name__': '__main__'})
+                    _got = _sy.stdout.getvalue()
+                finally:
+                    _sy.stdout = _out
+                    for _k, _v in _keep.items():
+                        if _v is None:
+                            _sy.modules.pop(_k, None)
+                        else:
+                            _sy.modules[_k] = _v
+                return _got.replace('ADDFUT-VERDICT ', ''), _calls
+
+            import sys as _sy
+            _v1, _c1 = _run(1.28, {}, pos_raises=True)
+            # ГЛАВНОЕ: измеренный LOW не смеет пропасть из-за отказа ЧУЖОГО чтения.
+            out['низкий_переживает_отказ_позиций'] = (_v1.startswith('LOW')
+                                                      and 'позиции' not in _c1)
+            _v2, _c2 = _run(2.10, {'CSPX': 10})
+            out['здоровый_не_читает_позиции'] = (_v2.startswith('OK') and 'позиции' not in _c2)
+            _v3, _c3 = _run(None, {'CSPX': 0.0, 'CBU0': 0})
+            out['пустая_книга_названа'] = (_v3.startswith('EMPTY') and 'позиции' in _c3)
+            _v4, _ = _run(None, {'CSPX': 10})
+            out['неполная_сводка_слепота'] = _v4.startswith('SKIP')
+            _v5, _ = _run(None, {}, pos_raises=True)
+            out['отказ_позиций_слепота'] = _v5.startswith('SKIP')
+            _v6, _c6 = _run(None, {}, cushion_raises=True)
+            out['разрыв_соединения_закрывается'] = (_v6.startswith('SKIP')
+                                                    and 'disconnect' in _c6)
+            out['ok'] = all([out['тело_вырезано'], out['низкий_переживает_отказ_позиций'],
+                             out['здоровый_не_читает_позиции'], out['пустая_книга_названа'],
+                             out['неполная_сводка_слепота'], out['отказ_позиций_слепота'],
+                             out['разрыв_соединения_закрывается']])
         elif kind == 'правила45: предполёт передачи не переодевает ошибку кода':
             # Запрет 45-й круг поставил на ВЫЗЫВАЮЩЕГО (_execute_locked), а переодевание
             # случается ВНУТРИ _preflight_handover: до внешнего except доходит уже
@@ -4684,6 +4764,19 @@ def _r45pf(r):
     переодевание живёт внутри предполёта: до внешнего except доходит уже RuntimeError, и
     аварийный выход Е→Ф блокируется ложным доменным диагнозом вместо трассировки."""
     return (not r['raised'] and r['ok'] is True and r.get('ветка_достижима') is True)
+
+
+
+@rinv('измеренный запас не теряется от отказа чтения позиций',
+      needs=lambda r: r['case'] == 'правила45: проба О-3-Е читает позиции только при нужде')
+def _r45probe(r):
+    """Разбор /code-review 45-го круга. Отличая пустую книгу от неполной сводки, я поставил
+    net_positions() в ОБЩИЙ try сразу после замера: BrokerError из refresh() выбрасывал уже
+    ИЗМЕРЕННЫЙ LOW, вердикт становился SKIP, и предписанный §8 срез в ту же сессию снова не
+    запускался — то есть правка №6 воскрешала P0 №1 того же круга. Тело пробы исполняется
+    здесь целиком, семью состояниями: одного «пустая книга законна» мало."""
+    return (not r['raised'] and r['ok'] is True and r.get('тело_вырезано') is True
+            and r.get('низкий_переживает_отказ_позиций') is True)
 
 
 @rinv('возраст сердцебиения читается по содержимому, а touch его не лечит',
