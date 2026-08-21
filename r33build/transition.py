@@ -990,8 +990,12 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
         try:
             _pos_p, _oo_p = _snapshot_pair(_broker_p)
             _pos_p = _pos_p or {}
-        except _STce_tr.CODE_ERRORS:
-            raise      # ошибка кода — трассировкой, а не предполётным вердиктом
+        # AttributeError ЗДЕСЬ — ОТВЕТ, А НЕ ОШИБКА (разбор /code-review 21.08, та же
+        # граница, что и у пробника доходности ниже): сторож выше проверяет только
+        # net_positions, а _snapshot_pair первым зовёт open_orders — файловый или стендовый
+        # брокер вправе его не иметь, и это честное «снимок недоступен».
+        except tuple(_t for _t in _STce_tr.CODE_ERRORS if _t is not AttributeError):
+            raise
         except Exception as _exp:
             raise RuntimeError(f'согласованный снимок счёта недоступен в предполёте '
                                f'({_exp}) — книгу источника сверить нечем, переход запрещён')
@@ -1044,9 +1048,20 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
         except _STce_tr.CODE_ERRORS:
             raise      # ошибка кода — трассировкой, а не предполётным вердиктом
         except Exception as _erp:
-            raise RuntimeError(
-                f'живой реестр серий не читается ({_erp}) — проверить поставочные серии '
-                f'целей плана нечем, передача книги маршруту Ф остановлена') from _erp
+            # УЖЕСТОЧЕНИЕ НЕ СМЕЕТ ЗАПЕРЕТЬ АВАРИЙНЫЙ ВЫХОД (разбор /code-review 21.08,
+            # угол «от противоположного знака»). Реестр не принадлежит пакету («принадлежит
+            # счёту, а не программе», MANIFEST его не несёт), а feed.registry() отказывает и
+            # при АТОМАРНОЙ ЗАМЕНЕ файла первым же first_connect. Плановому переходу такой
+            # отказ законен: проверить серии нечем. Аварийному — нет: книга в это время
+            # сидит в фондах под займом, и запрет выхода из-за нечитаемого справочника
+            # ровно тот запрет лечения по симптому, что чинили круги 41-43.
+            if not emergency:
+                raise RuntimeError(
+                    f'живой реестр серий не читается ({_erp}) — проверить поставочные серии '
+                    f'целей плана нечем, передача книги маршруту Ф остановлена') from _erp
+            _keys_p = []
+            print(f'ВНИМАНИЕ: реестр серий не читается ({_erp}); аварийный выход не '
+                  f'останавливается, поставочные серии целей ПРОВЕРИТЬ ВРУЧНУЮ (О-5)')
         if any(str(k) not in ('ES', 'MES', 'ZN') and
                str(k).startswith(('ES', 'MES', 'ZN')) for k in _keys_p):
             _bare = sorted({str(n) for n in _dst_names if str(n) in ('ES', 'MES', 'ZN')})
@@ -1156,8 +1171,12 @@ def _gross_dfix():
         if _PREFLIGHT_DFIX.get('value') and \
                 str(_PREFLIGHT_DFIX.get('asof') or '') == str(_FDx.exchange_today()):
             return float(_PREFLIGHT_DFIX['value'])
-    except _STce_tr.CODE_ERRORS:
-        raise          # ошибка кода — трассировкой (разбор /code-review 45-го круга)
+    # ImportError ИСКЛЮЧЁН ИЗ ЗАПРЕТА В ЭТИХ ДВУХ БЛОКАХ (разбор /code-review 21.08):
+    # импорты здесь ОТЛОЖЕННЫЕ, и недоступность модуля — это ровно «нечем измерить», то
+    # есть доменный ответ, ради которого функция и возвращает ноль. Прочие ошибки кода
+    # (TypeError, AttributeError, NameError) по-прежнему падают своим типом.
+    except tuple(_t for _t in _STce_tr.CODE_ERRORS if _t is not ImportError):
+        raise
     except Exception:
         pass
     try:
@@ -1165,7 +1184,7 @@ def _gross_dfix():
         import daily as _DLg
         _b, _, _ = _STg.load(_STg.book_path('F'), _DLg.Book)
         return float(getattr(_b, 'd_fix', 0.0) or 0.0)
-    except _STce_tr.CODE_ERRORS:
+    except tuple(_t for _t in _STce_tr.CODE_ERRORS if _t is not ImportError):
         raise          # «нечем измерить» — это отсутствие книги, а не опечатка в коде
     except Exception:
         return 0.0
@@ -1456,7 +1475,19 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         # единого доказательства маржи по заявке. Ровно та семья, которую круг закрывал в
         # соседних местах. Исключение уходит наружу: ошибка кода падает своим типом на
         # CODE_ERRORS ниже, доменная — становится POSTPONED, то есть отказом, а не «пусто».
-        _pv_orders = pv_remainder(plan, st.get('done'), st.get('partial'))
+        # ДОМЕННАЯ ОШИБКА ОСТАТКА — ЭТО POSTPONED, А НЕ MIXED (разбор /code-review 21.08).
+        # Сняв широкий except, я не заметил, что внешний обработчик двумя экранами ниже при
+        # resume пишет _mixed('исход не разобран'): нулевая dprice в лоте или KeyError в
+        # старом файле прогресса стали помечать НЕразорванную книгу как MIXED в нормативном
+        # журнале — то самое УЖЕСТОЧЕНИЕ исхода, о котором предупреждает соседний
+        # комментарий про CODE_ERRORS. Ошибка кода по-прежнему падает своим типом.
+        _pv_why = ''
+        try:
+            _pv_orders = pv_remainder(plan, st.get('done'), st.get('partial'))
+        except _STce_tr.CODE_ERRORS:
+            raise
+        except Exception as _expv:
+            _pv_orders, _pv_why = None, f'остаток плана непроверяем ({_expv})'
         # ПРИЗНАК АВАРИЙНОСТИ ДОХОДИТ ДО ПРЕДПРОСМОТРА (сорок второй круг, №4): он не
         # решает за preview, но вызывающий обязан называть намерение, иначе аварийный
         # выход неотличим от планового ни в коде, ни в разборе.
@@ -1471,8 +1502,17 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         _done_all = bool(plan and not _pv_orders
                          and (st.get('done') or st.get('cancel_fills')
                               or st.get('executed_usd', 0.0) > TOL))
-        _pv = (broker.preview(sorted(_pv_orders.items()), emergency=bool(emergency))
-               if _pv_orders else broker.preview(emergency=bool(emergency), done_all=_done_all))
+        # ПРИЗНАК «РАБОТА КОНЧИЛАСЬ» ИДЁТ В ОБА ВЫЗОВА (разбор /code-review): он был подан
+        # только в беспланной ветке, а resume у самого конца отдаёт ДРОБНЫЙ остаток — тогда
+        # ветка с планом получала заявки, все количества которых округляются в ноль, и
+        # завершать переход было нечем при запасе ниже норматива.
+        if _pv_orders is None:
+            _pv = False
+        else:
+            _pv = (broker.preview(sorted(_pv_orders.items()), emergency=bool(emergency),
+                                  done_all=_done_all)
+                   if _pv_orders
+                   else broker.preview(emergency=bool(emergency), done_all=_done_all))
     except _STce_tr.CODE_ERRORS:
         # ОШИБКА КОДА ПАДАЕТ ГРОМКО И ЗДЕСЬ (рецензия 20.08). Запрет, заведённый в самом
         # preview, тут же снимался ЕГО ЕДИНСТВЕННЫМ боевым вызывающим: широкий except
@@ -1498,7 +1538,8 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         # ПРИЧИНА ОТКАЗА ПРЕДПРОСМОТРА ИДЁТ В ЖУРНАЛ И В СООБЩЕНИЕ (44-й круг, №14):
         # прежде любой отказ — контракт, счёт, реестр, обрыв API — читался как «маржа не
         # прошла», и оператор искал деньги там, где сломан справочник.
-        _why_pv = str(getattr(broker, '_preview_why', '') or 'маржа цели не проходит О-3-Е')
+        _why_pv = _pv_why or str(getattr(broker, '_preview_why', '')
+                                 or 'маржа цели не проходит О-3-Е')
         st['log'].append(('preview_отказ', _why_pv))
         st['postponed'] += 1; _atomic(state_path, st)
         if st['postponed'] >= 3:
@@ -2843,15 +2884,21 @@ def _run_lots(broker, plan, st, state_path, lim, unp, dst_bought, fail, _M=None,
         # ЧАСТИЧНЫЙ ПРОГРЕСС ПРЕРВАННОГО ЛОТА (семнадцатый круг, №1): проданное до обрыва
         # вычитается из остатка первого незавершённого лота этого источника — повтор
         # целиком продавал бы уже исполненную часть и уводил источник в короткую.
+        # ДОПУСК ПЫЛИ ПРИМЕНЯЕТСЯ К КАЖДОМУ ЛОТУ (разбор /code-review 21.08). Общая функция
+        # звалась только при НАЛИЧИИ внутрилотового прогресса, поэтому предпросмотр и
+        # исполнение расходились на хвостовом лоте: plan_lots режет остаток по границе 1e-9,
+        # и лот величиной между 1e-9 и TOL=1e-6 у pv_remainder исчезал, а _run_lots подавал
+        # по нему настоящую заявку — цели маршрута Е от округления освобождены.
         _part = st.get('partial', {}).get(lot['src'], 0)
+        remaining, _left_src = consume_partial(remaining, _part)
         if _part:
-            remaining, st['partial'][lot['src']] = consume_partial(remaining, _part)
-            st['log'].append(('resume_partial', lot['src'], _part - st['partial'][lot['src']]))
+            st['partial'][lot['src']] = _left_src
+            st['log'].append(('resume_partial', lot['src'], _part - _left_src))
             _atomic(state_path, st)
-            if not remaining:
-                st['done'].append(key)
-                _atomic(state_path, st)
-                continue
+        if not remaining:
+            st['done'].append(key)
+            _atomic(state_path, st)
+            continue
         while remaining > 0:
             head = min(lot['dprice'], lot['unit_usd'])/2.0 + 1.0
             # СУММА МОДУЛЕЙ, а не модуль суммы (№25): противоположные разрывы двух ног

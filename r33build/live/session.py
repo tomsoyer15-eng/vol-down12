@@ -79,7 +79,7 @@ def post_o3e_alarm(cushion, book_after, cut=None):
         return True
     if cushion is None:
         return bool(getattr(book_after, 'n_eq', 0) or getattr(book_after, 'n_bd', 0))
-    return cushion < DL.O3E_MIN
+    return not DL.o3e_ok(cushion)
 
 
 def _connect(client_id):
@@ -407,7 +407,7 @@ def do_o3e_cut(ib, route):
         if _pc is None:
             raise Refused('живой запас О-3-Е недоступен при существующей книге — '
                           'сокращение считалось бы по выдуманному числу (О-5)')
-        if float(_pc) >= DL.O3E_MIN:
+        if DL.o3e_ok(_pc):
             print(f'запас О-3-Е {float(_pc):.2f}x не ниже {DL.O3E_MIN} — сокращение не требуется')
             return None
         jp = ST.journal_path(route)
@@ -564,7 +564,7 @@ def do_o3e_cut(ib, route):
         else:
             _ach = (f'запас после среза {float(_pc2):.2f}×'
                     if _pc2 is not None else 'запас после среза НЕИЗВЕСТЕН')
-        _norm_ok = (_pc2 is not None and float(_pc2) >= DL.O3E_MIN)
+        _norm_ok = DL.o3e_ok(_pc2)
         from types import SimpleNamespace as _SNS
         _reason = (f'О-3-Е ВНУТРИДНЕВНАЯ ВАХТА: запас {float(_pc):.2f}× ниже {DL.O3E_MIN} — '
                    f'книга сокращена в ту же сессию {_n0e}/{_n0b} -> {_ne}/{_nb} (§8); '
@@ -821,7 +821,7 @@ def do_trade(ib, route, dry):
             _txt = (f'запас О-3-Е ПОСЛЕ исполнений НЕИЗВЕСТЕН (брокер не вернул '
                     f'требование при живой книге)' if _pc is None else
                     (f'запас О-3-Е ПОСЛЕ исполнений {_pc:.2f}x ниже {DL.O3E_MIN}'
-                     if float(_pc) < DL.O3E_MIN else
+                     if not DL.o3e_ok(_pc) else
                      f'запас О-3-Е ПОСЛЕ исполнений {_pc:.2f}x (порог {DL.O3E_MIN})'))
             # ТЕКСТ НЕ ОБЕЩАЕТ ТОГО, ЧТО САМ ЖЕ ЗАПРЕЩАЕТ (двадцать девятый круг, №4).
             # Прежняя формулировка «сокращение обязано пройти следующей сессией» ложна:

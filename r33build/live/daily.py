@@ -145,11 +145,13 @@ def _code_errors():
     там, где live/ ещё не в sys.path, а падать из-за списка исключений — хуже, чем взять
     консервативный набор по умолчанию.
     """
-    try:
-        import state as _STc
-        return _STc.CODE_ERRORS
-    except Exception:
-        return (TypeError, AttributeError, NameError, ImportError)
+    # БЕЗ ФОЛБЭКА (разбор /code-review 21.08): он был ВТОРОЙ копией того самого списка,
+    # ради единственности которого функция и заведена, и по построению не покрыт ничем —
+    # парная мутация подменяет саму функцию, а `import state` в каталоге live не падает
+    # никогда (daily зовёт его без защиты ещё в двух местах). Копия молча пережила бы
+    # добавление пятого класса в state.CODE_ERRORS.
+    import state as _STc
+    return _STc.CODE_ERRORS
 
 
 def _roll_deadline_or_stop(held, hol, what):
@@ -1127,6 +1129,19 @@ MAINT_E = 0.25                # нормативное поддерживающ�
 O3E_MIN = 1.40                # §6: ниже — сокращение до L=1 в ту же сессию
 
 
+def o3e_ok(cushion):
+    """ЗАПАС НЕ НИЖЕ НОРМАТИВА О-3-Е — ОДНА ТОЧКА ПРАВИЛА НА ВЕСЬ СЛОЙ (разбор /code-review
+    21.08).
+
+    Сравнение с O3E_MIN стояло россыпью: четыре ветки preview, вахта сессии, пост-трейдовый
+    разбор, срез §8 — около десяти мест. Круг вынес его в приватный метод БРОКЕРА, то есть
+    накрыл один файл из трёх и оставил BRIEF рецензенту утверждение «норматив сведён в одну
+    точку», которое было неверным. Правило принадлежит нормативу, значит живёт рядом с ним;
+    у него одна точка мутации, и она достижима из session, daily и ib_broker разом.
+    """
+    return cushion is not None and float(cushion) >= O3E_MIN
+
+
 def o3e_reduce(capital, m, p_e, p_b, n_eq, n_bd, n0_eq, n0_bd, share):
     """Аварийное сокращение О-3-Е до L=1 — ЦЕЛЬ ОТ КАПИТАЛА ПОСЛЕ ФАКТИЧЕСКИХ РАСХОДОВ
     (семнадцатый круг, №16): сокращение само стоит комиссий, и цель от старого капитала
@@ -1296,7 +1311,7 @@ def step_e(book, m, capital, band=None, cap=CAP_LEV, drag=DRAG_E, check_o3e=True
     # Расчётная величина остаётся контрольной прокси, как и сказано в §8а.
     d.cushion = (1.0 / (maint * d.leverage) if d.leverage > 0 else float('inf')) \
         if live_cushion is None else float(live_cushion)
-    if check_o3e and d.cushion < O3E_MIN:
+    if check_o3e and not o3e_ok(d.cushion):
         # §6, О-3-Е: сокращение до L=1 В ТУ ЖЕ СЕССИЮ. Прежде критерий существовал только
         # на бумаге: живого маржинального контура не было вовсе.
         d.reasons.append(f'О-3-Е: запас {d.cushion:.2f}× ниже {O3E_MIN} — сокращение до L=1')
@@ -2394,7 +2409,7 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                 # ставилась (если ставилась) уже ПОСЛЕ сохранения книги и итога §7, а в
                 # сессии без заявок не ставилась вовсе: день завершался штатно при
                 # недоказанном или всё ещё низком запасе.
-                if _live_book and (_pc is None or float(_pc) < O3E_MIN) \
+                if _live_book and not o3e_ok(_pc) \
                         and o3e_alarm_fn is not None:
                     _why = ('запас О-3-Е при живой книге НЕИЗВЕСТЕН (брокер не вернул '
                             'требование)' if _pc is None else
@@ -2405,7 +2420,7 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                     # среза не будет вовсе. Тревога здесь свидетельствует о провале
                     # запаса, а не о сокращённой книге.
                     o3e_alarm_fn(dec.reasons[-1], False)
-                if _pc is not None and _live_book and float(_pc) < O3E_MIN:
+                if _pc is not None and _live_book and not o3e_ok(_pc):
                     _pe, _pb = market.px_eq_prev, market.px_bd_prev
                     _n0e = getattr(dec.book_after, 'n_eq', 0)
                     _n0b = getattr(dec.book_after, 'n_bd', 0)
@@ -2602,7 +2617,7 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                         # измеренным; неизвестность обязана быть видна как неизвестность.
                         dec.cushion = float(_pc_a) if _pc_a is not None else float('nan')
 
-                        if _pc_a is None or float(_pc_a) < O3E_MIN:
+                        if not o3e_ok(_pc_a):
                             _ach += (' — НОРМАТИВ НЕ ДОСТИГНУТ ОДНИМ СРЕЗОМ (цель по '
                                      'модельным ценам, требование живое): ручной разбор')
                         dec.reasons.append(
