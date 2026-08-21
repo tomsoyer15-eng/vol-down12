@@ -101,6 +101,9 @@ class IBBroker:
         self._con = {}
         self._qcache = {}
         self._stable = {}
+        # ОБЪЯВЛЕН ЗДЕСЬ, А НЕ ЗАВОДИТСЯ ПО ХОДУ ДЕЛА: getattr(self, ..., None) прятал
+        # отсутствие жизненного цикла у кэша — см. _dref_once.
+        self._dref_cache = None
         reg = Path(registry or os.environ.get('ADDFUT_REGISTRY')
                    or Path(__file__).resolve().parent / 'instruments_live.csv')
         if not reg.exists():
@@ -634,17 +637,27 @@ class IBBroker:
         Полоса единицы ZN и сама единица считались по ДВУМ независимым запросам TNX внутри
         одного gross(): исправление бара между ними давало полосу одного поколения и плечо
         другого, и ворота CLOSE_CAP=2,00 могли завершить переход по величине, которой не
-        существовало ни в один момент времени. Кэш живёт в пределах вызова: ключ — дата и
-        ожидаемая предыдущая сессия, то есть ровно то, что задаёт поколение бара.
+        существовало ни в один момент времени.
+
+        КЭШИРУЕТСЯ ТОЛЬКО ЗАКРЕПЛЁННОЕ ЗНАЧЕНИЕ (разбор /code-review 45-го круга). Docstring
+        обещал «кэш живёт в пределах вызова», а сброс стоял ОДИН — в начале gross(); unit_ref
+        же вызывают и мимо gross (transition.check_plan_prices, сверка SAME_API, стенды), и
+        там запись жила до конца жизни объекта брокера. При expected_prev=None доходность
+        берётся из ПОСЛЕДНЕГО бара, то есть меняется внутри дня, — липкий кэш выдавал бы
+        часовой давности величину, и выглядело бы это как исправная проверка. Правило: если
+        предыдущая сессия ЗАДАНА, значение принадлежит завершённому бару и внутри дня
+        неизменно — его и держим; если не задана, значение живое и кэшу не подлежит.
         """
         import feed as _FDd
         _key = (str(today), str(expected_prev))
-        _c = getattr(self, '_dref_cache', None)
-        if _c is not None and _c[0] == _key:
+        _pinned = expected_prev is not None
+        _c = self._dref_cache
+        if _pinned and _c is not None and _c[0] == _key:
             return _c[1]
         _y, _ = _FDd.yield_pct(self.ib, today, expected_prev=expected_prev)
         _d = _FDd.dref_from_yield(float(_y) / 100.0)
-        self._dref_cache = (_key, _d)
+        if _pinned:
+            self._dref_cache = (_key, _d)
         return _d
 
     def _venue_prev(self, is_fund, today):
@@ -736,7 +749,7 @@ class IBBroker:
         """
         import feed as _FDg
         import sim_v13 as _Sg
-        self._dref_cache = None            # кэш живёт ровно один расчёт (45-й круг, №11)
+        self._dref_cache = None            # новый расчёт — новое поколение (45-й круг, №11)
         pos = self.net_positions() or {}
         nlv = float(self.net_liquidation())
         if not nlv or nlv != nlv:

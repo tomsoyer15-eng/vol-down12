@@ -6801,7 +6801,20 @@ if __name__ == '__main__':
         orders = DL.book_to_orders(d, b)
         u_e, u_b = DL.units(b, m)
         for name, fn, needs in INVARIANTS:
-            if needs is not None and not needs(b, m, cap0, d, orders, u_e, u_b):
+            # ПРЕДИКАТ ОТБОРА — ПОД ТОЙ ЖЕ ЗАЩИТОЙ, ЧТО И САМ ИНВАРИАНТ (разбор /code-review
+            # 45-го круга). needs() зовут ВНЕ try, а он ходит в тот же движок: после того
+            # как _roll_deadline_or_stop перестал быть fail-open, DL.missed_roll_check внутри
+            # needs получил право БРОСАТЬ. Любая книга с непарсимым тегом серии роняла бы
+            # весь прогон сырым RuntimeError — то есть скрывала бы и все прочие результаты,
+            # ради которых прогон и запущен. Отказ предиката — это отказ, а не тишина.
+            try:
+                _need = needs(b, m, cap0, d, orders, u_e, u_b) if needs is not None else True
+            except Exception as ex:
+                bad.setdefault(f'{name} [предикат отбора падает: {type(ex).__name__}]',
+                               []).append(f'книга {b.n_e}/{b.n_b} es={b.es_held} '
+                                          f'серии {b.ser_a}/{b.ser_b}, {m.date:%d.%m}')
+                continue
+            if not _need:
                 continue
             COVER[name] = COVER.get(name, 0) + 1
             try:

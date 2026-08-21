@@ -136,6 +136,22 @@ def roll_deadline(tag, holidays=()):
     return roll_date(ry, rm, holidays)
 
 
+def _code_errors():
+    """ОШИБКИ КОДА ОДНИМ СПИСКОМ НА ВЕСЬ СЛОЙ (разбор /code-review 45-го круга).
+
+    state.CODE_ERRORS — общий механизм проекта, но daily.py не ссылался на него НИ РАЗУ,
+    поэтому парная мутация code_error_dressed_again (она обнуляет именно этот список)
+    физически не могла наблюдать здешние переодевания. Импорт отложенный: daily грузится и
+    там, где live/ ещё не в sys.path, а падать из-за списка исключений — хуже, чем взять
+    консервативный набор по умолчанию.
+    """
+    try:
+        import state as _STc
+        return _STc.CODE_ERRORS
+    except Exception:
+        return (TypeError, AttributeError, NameError, ImportError)
+
+
 def _roll_deadline_or_stop(held, hol, what):
     """СРОК РОЛЛА НЕИЗВЕСТЕН — ЭТО ОСТАНОВКА, А НЕ «РОЛЛ НЕ НУЖЕН» (СОРОК ПЯТЫЙ КРУГ, №4, P0).
 
@@ -151,6 +167,14 @@ def _roll_deadline_or_stop(held, hol, what):
     """
     try:
         return roll_deadline(held, hol)
+    except _code_errors():
+        # ОШИБКА КОДА ПАДАЕТ СВОИМ ТИПОМ — ЭТО ОБЕЩАЕТ DOCSTRING ВЫШЕ (разбор /code-review
+        # 45-го круга). Обещал, а код ловил Exception целиком: опечатка в roll_deadline
+        # приходила к О-5 как «поставочный риск неизвестен», и разбор начинался с календаря
+        # вместо трассировки. Тот же круг завёл этот запрет в transition и ib_broker —
+        # daily.py не знал о CODE_ERRORS ни одной строкой, поэтому и парная мутация
+        # «запрет переодевания снят» до этого места не доставала.
+        raise
     except Exception as _ex:
         raise RuntimeError(
             f'{what}: срок серии {held!r} непроверяем ({type(_ex).__name__}: {_ex}) — '
@@ -1899,6 +1923,8 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                 import feed as _FDg
                 _prev = _FDg.prev_session(market.date, getattr(market, 'holidays', ()) or ())
                 _prev_s = _prev.strftime('%Y-%m-%d')
+            except _code_errors():
+                raise            # ошибка кода — своим типом (см. _roll_deadline_or_stop)
             except Exception as _exg:
                 raise RuntimeError(
                     f'предыдущая биржевая сессия непроверяема ({type(_exg).__name__}: '

@@ -53,10 +53,22 @@ def _digest(prev, row):
 
 
 def _last_hash(path):
-    if not path.exists():
-        return GENESIS
-    rows = list(csv.DictReader(open(path, newline='', encoding='utf-8')))
+    """ЧИТАТЕЛЬ ЖУРНАЛА ОДИН — ТОТ, В КОТОРОМ ЖИВЁТ ПРОВЕРКА (разбор /code-review 45-го).
+
+    Проверку заголовка круг завёл в read(), а append берёт предыдущий хэш ОТСЮДА — из
+    второго, собственного csv.DictReader, который о ней не знает. Поэтому на файле с
+    мусорной шапкой read() и verify() отказывали, а append спокойно дописывал строку под
+    этой шапкой и начинал цепочку заново от GENESIS: ровно тот вред, ради снятия которого
+    проверка и заводилась. Два читателя одного формата — и защита оказалась у того, кто не
+    пишет. Читатель теперь один; заодно файл закрывается контекстом, а не пересчётом ссылок.
+    """
+    rows = read(path)
     return rows[-1]['row_hash'] if rows else GENESIS
+
+
+def _header_ok(fieldnames):
+    """Заголовок §7 — РОВНО COLS. Одна точка правила и одна точка мутации."""
+    return fieldnames is not None and list(fieldnames) == list(COLS)
 
 
 def append(path, row):
@@ -107,11 +119,10 @@ def read(path):
         # verify() объявлял такой журнал исправным. Дальше append дописывал в него строки
         # поверх мусорной шапки. Пустой файл (нулевой длины) — законное состояние: его
         # заголовком закроет ближайший append.
-        try:
-            _sz = path.stat().st_size
-        except OSError:
-            _sz = 0
-        if _sz and (rd.fieldnames is None or list(rd.fieldnames) != list(COLS)):
+        # РАЗМЕР — У ОТКРЫТОГО ФАЙЛА (fstat), а не у имени: отдельный path.stat() открывал
+        # окно между проверкой и чтением и стоил лишний системный вызов.
+        _sz = os.fstat(f.fileno()).st_size
+        if _sz and not _header_ok(rd.fieldnames):
             raise ValueError(f'{path}: заголовок журнала §7 повреждён '
                              f'({rd.fieldnames!r}) — дописывать в него нельзя')
         for i, r in enumerate(rd, 2):
