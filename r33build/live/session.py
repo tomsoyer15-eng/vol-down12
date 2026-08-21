@@ -185,7 +185,7 @@ def do_close(ib, route):
     # ЗАМОК — ПО ПУТИ КНИГИ, А НЕ ПО УМОЛЧАНИЮ (45-й круг, №8): при ручном
     # ADDFUT_BOOK_PATH без ADDFUT_LOCK_DIR замыкание и вахта запирали ~/.addfut, а торговля —
     # каталог поданной книги: два процесса под РАЗНЫМИ замками писали одну книгу.
-    with ST.hold_book_lock(ST.book_lock_dir(route)):
+    with ST.hold_book_lock(ST.book_lock_dir(bp)):
         book, sess, saved = ST.load(bp, cls)
         if book is None:
             raise Refused('нет сохранённой книги — замыкать нечего')
@@ -378,7 +378,7 @@ def do_o3e_cut(ib, route):
     # ЗАМОК — ПО ПУТИ КНИГИ, А НЕ ПО УМОЛЧАНИЮ (45-й круг, №8): при ручном
     # ADDFUT_BOOK_PATH без ADDFUT_LOCK_DIR замыкание и вахта запирали ~/.addfut, а торговля —
     # каталог поданной книги: два процесса под РАЗНЫМИ замками писали одну книгу.
-    with ST.hold_book_lock(ST.book_lock_dir(route)):
+    with ST.hold_book_lock(ST.book_lock_dir(bp)):
         book, sess, saved = ST.load(bp, DL.BookE)
         if book is None:
             raise Refused('нет сохранённой книги — сокращать нечего')

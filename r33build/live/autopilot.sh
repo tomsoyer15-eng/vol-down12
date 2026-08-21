@@ -227,7 +227,66 @@ verdict() {
     # предписанный §8 срез В ТУ ЖЕ СЕССИЮ не запускался — только счётчик слепоты, тревога
     # через три тика, и сокращение уже пропущено. Метка снимает двусмысленность целиком:
     # ищем ПОСЛЕДНЮЮ строку с меткой, всё прочее — шум для журнала.
-    printf '%s\n' "$1" | sed -n 's/.*ADDFUT-VERDICT //p' | tail -1
+    # ПЕРВАЯ МЕТКА В СТРОКЕ, А НЕ ПОСЛЕДНЯЯ (разбор /code-review 45-го круга). `sed
+    # 's/.*ADDFUT-VERDICT //'` жаден: из строки `SKIP OSError("ADDFUT-VERDICT OK 9.9")`
+    # он выдавал `OK 9.9")`, и ветка `OK\ *)` объявляла счёт здоровым, стирая счётчик
+    # слепоты, — отказ замера превращался в успех ЧУЖИМ ТЕКСТОМ внутри repr исключения.
+    # awk match() берёт ПЕРВОЕ вхождение, поэтому подделать вердикт содержимым нельзя;
+    # правило «последняя СТРОКА с меткой побеждает» сохранено. Заодно один процесс
+    # вместо трёх.
+    printf '%s\n' "$1" | awk 'match($0, /ADDFUT-VERDICT /) { v = substr($0, RSTART + RLENGTH) } END { if (v != "") print v }'
+}
+
+o3e_probe() {
+    # ЕДИНАЯ ПРОБА ЗАПАСА О-3-Е ДЛЯ ВСЕХ ТРЁХ ВАХТ (разбор /code-review 45-го круга).
+    # Проба жила ТРЕМЯ почти одинаковыми копиями: под тревогой, в праздник и внутри дня.
+    # Правку №6 («пустая книга — не слепота») я внёс в одну из них — и две оставшиеся
+    # по-прежнему объявляли законно пустую книгу Е слепотой и через три тика ставили
+    # ALARM-o3e-blind, то есть чинил я ПРИМЕР, а не правило. Копий больше нет: класс
+    # вердикта добавляется в одном месте.
+    #
+    # ПОЗИЦИИ СНИМАЮТСЯ ТОЛЬКО ТОГДА, КОГДА ОНИ НУЖНЫ, И ПОД СВОИМ try. В первой редакции
+    # №6 `net_positions()` стоял в общем try СРАЗУ после замера: refresh() поднимает
+    # BrokerError, если позиции не устоялись за четыре чтения, — и уже ИЗМЕРЕННЫЙ LOW
+    # выбрасывался, вердикт становился SKIP, предписанный §8 срез в ту же сессию снова не
+    # запускался. То есть правка №6 воскрешала P0 №1 того же круга. Позиции нужны РОВНО в
+    # одной ветке (c is None), там они и снимаются; их отказ не может отменить состоявшийся
+    # замер. Плюс каждое чтение позиций — это до 32 с сна внутри бюджета `timeout 90`.
+    # $1 — clientId (у каждой вахты свой, иначе шлюз рвёт чужое соединение).
+    ( cd "$LIVE" && timeout -k 10 90 "$PY" -c "
+import sys
+sys.path.insert(0, '.')
+from ib_insync import IB
+import ib_broker as IBB
+import daily as DL
+ib = IB()
+try:
+    ib.connect('127.0.0.1', 4002, clientId=$1, timeout=15)
+    _br = IBB.IBBroker(ib)
+    c = _br.margin_cushion()
+    if c is None:
+        # ПУСТАЯ КНИГА — НЕ СЛЕПОТА (СОРОК ПЯТЫЙ КРУГ, №6). margin_cushion() законно
+        # отдаёт None при ОБЕИХ выключенных ногах: сокращать нечего, и запас не определён.
+        # Отличает не догадка, а факт — позиции, снятые тем же соединением.
+        try:
+            _pos = _br.net_positions() or {}
+            _v = ('EMPTY книга пуста — сокращать нечего'
+                  if not any(float(x or 0) for x in _pos.values())
+                  else 'SKIP запаса нет (сводка неполна)')
+        except Exception as _ep:
+            _v = 'SKIP позиции не читаются: %r' % (_ep,)
+    elif c < DL.O3E_MIN:
+        _v = 'LOW %.3f' % c
+    else:
+        _v = 'OK %.3f' % c
+except Exception as ex:
+    _v = 'SKIP %r' % (ex,)
+finally:
+    try:
+        ib.disconnect()
+    except Exception:
+        pass
+sys.stdout.write('ADDFUT-VERDICT ' + _v)" 2>&1 )
 }
 
 hb_write() {
@@ -812,23 +871,10 @@ tick() {
         # запрещает ДЕЙСТВИЯ (заявки), а не измерения — то же разделение, что и в
         # неторговый день. Замер не подаёт заявок и не меняет состояние.
         if [ "$(route)" = E ] && [ ! -e "$ST/ALARM-o3e-blind-$_d0.txt" ]; then
-            _cwa=$(cd "$LIVE" && timeout -k 10 90 "$PY" -c "
-import sys
-sys.path.insert(0, '.')
-from ib_insync import IB
-import ib_broker as IBB, daily as DL
-ib = IB()
-try:
-    ib.connect('127.0.0.1', 4002, clientId=96, timeout=15)
-    c = IBB.IBBroker(ib).margin_cushion()
-    ib.disconnect()
-except Exception as ex:
-    sys.stdout.write('ADDFUT-VERDICT SKIP %r' % (ex,)); raise SystemExit
-sys.stdout.write('ADDFUT-VERDICT ' + (('LOW %.3f' % c) if (c is not None and c < DL.O3E_MIN)
-                 else ('OK %.3f' % c if c is not None else 'SKIP запаса нет')))" 2>&1)
+            _cwa=$(o3e_probe 96)
             case "$(verdict "$_cwa")" in
                 LOW\ *) log "ВНИМАНИЕ под тревогой: запас О-3-Е $_cwa ниже порога" ;;
-                OK\ *) rm -f "$ST/o3e-alarm-fail-$_d0" ;;
+                OK\ *|EMPTY\ *) rm -f "$ST/o3e-alarm-fail-$_d0" ;;   # замер состоялся либо книга пуста
                 # СБОЙ ЗАМЕРА ПОД ТРЕВОГОЙ — НЕ «ВСЁ В ПОРЯДКЕ» (двадцать девятый круг,
                 # №15): ветка `*)` глотала SKIP и ошибки молча. Тревога может стоять
                 # сутками, и слепота вахты именно в это время опаснее всего.
@@ -912,27 +958,16 @@ except Exception as ex:
             # 1,40 без единого замера. Торговли в такой день нет (общего окна нет), но
             # НАБЛЮДЕНИЕ за запасом обязано идти: это не заявка, а измерение.
             if [ "$(route)" = E ] && [ ! -e "$ST/ALARM-o3e-blind-$day.txt" ]; then
-                _cw=$(cd "$LIVE" && timeout -k 10 90 "$PY" -c "
-import sys
-sys.path.insert(0, '.')
-from ib_insync import IB
-import ib_broker as IBB, daily as DL
-ib = IB()
-try:
-    ib.connect('127.0.0.1', 4002, clientId=95, timeout=15)
-    c = IBB.IBBroker(ib).margin_cushion()
-    ib.disconnect()
-except Exception as ex:
-    sys.stdout.write('ADDFUT-VERDICT SKIP %r' % (ex,)); raise SystemExit
-sys.stdout.write('ADDFUT-VERDICT ' + (('LOW %.3f' % c) if (c is not None and c < DL.O3E_MIN)
-                 else ('OK %.3f' % c if c is not None else 'SKIP запаса нет')))" 2>&1)
+                _cw=$(o3e_probe 95)
                 case "$(verdict "$_cw")" in
                     LOW\ *)
                         alarm_write "$ST/ALARM-o3e-holiday-$day.txt" \
                             "в НЕторговый день запас О-3-Е упал: $_cw (порог 1.40) — О-5" \
                             || log "КРИТИЧНО: тревога О-3-Е праздничного дня не записана"
                         log "ТРЕВОГА: запас О-3-Е ниже порога в неторговый день ($_cw)" ;;
-                    OK\ *) : ;;
+                    # УСПЕХ ОБНУЛЯЕТ СЧЁТЧИК ПОДРЯД, как и во внутридневной вахте: здесь
+                    # стояло `: ;;`, и «подряд» считалось через дни успешных замеров.
+                    OK\ *|EMPTY\ *) rm -f "$ST/o3e-holiday-fail-$day" ;;
                     # СБОЙ ЗАМЕРА НЕ ЕСТЬ «ЗАПАС В ПОРЯДКЕ» (двадцать седьмой круг, №16):
                     # ветка `*) : ;;` глотала SKIP и ошибки, то есть праздничная вахта была
                     # fail-open — ровно там, где наблюдение и должно работать.
@@ -1100,42 +1135,16 @@ sys.stdout.write('ADDFUT-VERDICT ' + (('LOW %.3f' % c) if (c is not None and c <
     if [ "$(route)" = E ] && traded_today "$day" && [ ! -e "$ST/closed-$day" ] \
        && [ ! -e "$ST/ALARM-o3e-blind-$day.txt" ]; then
         local _cw
-        _cw=$(cd "$LIVE" && timeout -k 10 90 "$PY" -c "
-import sys
-sys.path.insert(0, '.')
-import tz
-from ib_insync import IB
-import ib_broker as IBB
-import daily as DL
-ib = IB()
-try:
-    ib.connect('127.0.0.1', 4002, clientId=94, timeout=15)
-    _br = IBB.IBBroker(ib)
-    c = _br.margin_cushion()
-    _pos_snapshot = _br.net_positions() or {}      # снимаем ДО disconnect (45-й круг, №6)
-    ib.disconnect()
-except Exception as ex:
-    sys.stdout.write('ADDFUT-VERDICT SKIP %r' % (ex,)); raise SystemExit
-if c is None:
-    # ПУСТАЯ КНИГА — НЕ СЛЕПОТА (СОРОК ПЯТЫЙ КРУГ, №6). margin_cushion() законно отдаёт
-    # None при ОБЕИХ выключенных ногах: сокращать нечего, и запас не определён. Прежде
-    # shell-вахта не отличала это от неполной сводки, трижды увеличивала счётчик слепоты и
-    # ставила ALARM-o3e-blind — а между 08:45 и закрытием Европы тиков заведомо больше трёх,
-    # то есть маршрут Е с НУЛЕВОЙ позицией сам себя останавливал до ручного разбора.
-    # Различает не догадка, а факт: позиции, снятые тем же соединением.
-    _pos_empty = not any(float(v or 0) for v in _pos_snapshot.values())
-    sys.stdout.write('ADDFUT-VERDICT EMPTY книга пуста — сокращать нечего'
-                     if _pos_empty else
-                     'ADDFUT-VERDICT SKIP запаса нет (сводка неполна)')
-elif c < DL.O3E_MIN:
-    sys.stdout.write('ADDFUT-VERDICT LOW %.3f' % c)
-else:
-    sys.stdout.write('ADDFUT-VERDICT OK %.3f' % c)" 2>&1)
+        _cw=$(o3e_probe 94)
         case "$(verdict "$_cw")" in
-            EMPTY\ *)
-                # ПУСТАЯ КНИГА — ЗАКОННОЕ СОСТОЯНИЕ (45-й круг, №6): счётчик слепоты
-                # обнуляется, тревоги нет, сокращать нечего.
-                : > "$ST/o3e-intraday-fail-$day" 2>/dev/null || true ;;
+            # ПУСТАЯ КНИГА — ЗАКОННОЕ СОСТОЯНИЕ (45-й круг, №6): счётчик слепоты
+            # обнуляется, тревоги нет, сокращать нечего. ИМЯ СЧЁТЧИКА — ТО ЖЕ, ЧТО У
+            # ВЕТКИ `*)` (разбор /code-review): здесь стояло `: > o3e-intraday-fail-$day`,
+            # имя, которого во всём скрипте больше нет, — счётчик слепоты не обнулялся
+            # вовсе, последовательность SKIP,SKIP,EMPTY,SKIP по-прежнему давала три и
+            # ставила ALARM-o3e-blind, то есть остановку контура, ради снятия которой
+            # ветка и заведена; а в $ST каждый день заводился нечитаемый никем файл.
+            EMPTY\ *|OK\ *) rm -f "$ST/o3e-watch-fail-$day" ;;   # успех обнуляет счётчик подряд
             LOW\ *)
                 # НОРМАТИВ §8 ТРЕБУЕТ СОКРАЩЕНИЯ В ТУ ЖЕ СЕССИЮ (тридцать первый круг, №1).
                 # Прежде вахта только писала ALARM — и этим же ALARM запирала любой запуск,
@@ -1172,7 +1181,6 @@ else:
                     || log "КРИТИЧНО: тревога О-3-Е не записана"
                 (cd "$LIVE" && "$PY" diagnose.py "$ST/ALARM-o3e-intraday-$day.txt" >> "$ST/ALARM-o3e-intraday-$day.txt" 2>&1) || true
                 log "ТРЕВОГА: внутридневной запас О-3-Е ($_cw) ниже порога — $_cut_note; автопилот остановлен" ;;
-            OK\ *) rm -f "$ST/o3e-watch-fail-$day" ;;   # успех обнуляет счётчик подряд
             *) # сбой замера не тревожит каждый тик — раз в день пометка в лог
                _wf="$ST/o3e-watch-fail-$day"
                _n=$(( $(counter_read "$_wf") + 1 ))

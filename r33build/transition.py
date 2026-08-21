@@ -677,7 +677,10 @@ def execute(broker, state_path, capital, legs, signal_id='', from_route='F', to_
     if _live not in _sys.path:
         _sys.path.insert(0, _live)
     import state as _ST
-    _lock = _ST.hold_book_lock()          # единый каталог блокировки, см. state.lock_dir
+    # ЗАМОК БЕЗ АРГУМЕНТА — ЭТО ЗАМОК КНИГИ (см. state.book_lock_dir): умолчание
+    # выводится из пути книги, поэтому переходный исполнитель и ежедневный контур
+    # запирают один объект и при ручном ADDFUT_BOOK_PATH.
+    _lock = _ST.hold_book_lock()
     _lock.__enter__()
     try:
         return _execute_guarded(broker, state_path, capital, legs, signal_id, from_route,
@@ -811,6 +814,30 @@ def _execute_guarded(broker, state_path, capital, legs, signal_id='', from_route
         _ctx.__exit__(None, None, None)
 
 
+def consume_partial(units, done_units):
+    """ВЫЧИТАНИЕ ВНУТРИЛОТОВОГО ПРОГРЕССА — ОДНО ПРАВИЛО НА ДВУХ ПОТРЕБИТЕЛЕЙ.
+
+    Правило считали в двух местах: _run_lots (что ещё продать) и pv_remainder (что ещё
+    просмотреть). Тексты совпадали посимвольно — а docstring самой pv_remainder предупреждал,
+    что «два одинаковых правила в разных местах разъезжаются при первой же правке одного из
+    них». Здесь оно одно, и точка мутации у него одна.
+
+    ОСТАТОК НИЖЕ ДОПУСКА — НЕ ОСТАТОК (разбор /code-review 45-го круга). Сравнение стояло
+    точным нулём (`if _units <= 0`), а units — сумма и разность float: план [0,1; 0,2; 0,3;
+    0,4] при полностью исполненном источнике оставлял 5,55e-16 юнита. Для фьючерсной цели
+    это дробилось int(round()) в ноль, а для CSPX/CBU0, которые от округления освобождены,
+    предпросмотр получал MarketOrder на 5,55e-16 — whatIf молчит, «отложить», три POSTPONED
+    и ABORT на ЗАКОННО завершённом resume. Модуль объявляет TOL=1e-6 ровно для этого.
+
+    Возвращает (остаток лота, непотраченный прогресс источника).
+    """
+    units = float(units)
+    take = min(float(done_units or 0.0), units)
+    if take > 0:
+        units -= take
+    return (0.0 if units <= TOL else units), max(0.0, float(done_units or 0.0) - take)
+
+
 def pv_remainder(plan, done, partial=None):
     """ОСТАТОК ПЛАНА ДЛЯ ПРЕДПРОСМОТРА (44-й круг, №4; внутрилотовый прогресс — 45-й, №3).
 
@@ -831,13 +858,8 @@ def pv_remainder(plan, done, partial=None):
     for lt in (plan or ()):
         if f"{lt['src']}:{lt['step']}" in keys:
             continue
-        _units = float(lt['units'])
-        _done_in_lot = float(left.get(lt['src'], 0) or 0)
-        if _done_in_lot > 0:
-            _take = min(_done_in_lot, _units)
-            _units -= _take
-            left[lt['src']] = _done_in_lot - _take
-        if _units <= 0:
+        _units, left[lt['src']] = consume_partial(lt['units'], left.get(lt['src'], 0))
+        if not _units:
             continue
         out[lt['dst']] = out.get(lt['dst'], 0.0) + \
             _units * float(lt['unit_usd']) / float(lt['dprice'])
@@ -1001,11 +1023,19 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
     # СЕРИЯ И d_fix — В ПРЕДПОЛЁТЕ (двадцать седьмой круг, №7 и №8). Обе проверки жили
     # только в hand_over_book, то есть срабатывали ПОСЛЕ продажи источника и покупки цели.
     if to_route == 'F':
+        # РЕЕСТР НЕЧИТАЕМ — ЭТО ОТКАЗ, А НЕ «РЕЕСТР СЕРИЙ НЕ НЕСЁТ» (разбор /code-review).
+        # `except Exception: _keys_p = []` превращал техническую ошибку в доменное «всё в
+        # порядке» и ОТКЛЮЧАЛ сторожа ниже: книга Ф рождалась без ser_a/ser_b, leg_roll_due
+        # при held is None навсегда отвечал «ролл не нужен», и позиция шла в поставку.
         try:
             import feed as _FDp2
             _keys_p = list(_FDp2.registry().keys())
-        except Exception:
-            _keys_p = []
+        except _STce_tr.CODE_ERRORS:
+            raise
+        except Exception as _erp:
+            raise RuntimeError(
+                f'живой реестр серий не читается ({_erp}) — проверить поставочные серии '
+                f'целей плана нечем, передача книги маршруту Ф остановлена') from _erp
         if any(str(k) not in ('ES', 'MES', 'ZN') and
                str(k).startswith(('ES', 'MES', 'ZN')) for k in _keys_p):
             _bare = sorted({str(n) for n in _dst_names if str(n) in ('ES', 'MES', 'ZN')})
@@ -1392,15 +1422,26 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         # Остаток берётся ТЕМ ЖЕ ключом, которым _run_lots пропускает исполненные лоты
         # (f"{src}:{step}" в st['done']): два разных правила разъехались бы при первой же
         # правке одного из них.
-        try:
-            _pv_orders = pv_remainder(plan, st.get('done'), st.get('partial'))
-        except Exception:
-            _pv_orders = {}
+        # БЕЗ ШИРОКОГО ПЕРЕХВАТА (разбор /code-review 45-го круга). Здесь стояло
+        # `except Exception: _pv_orders = {}` — и любая ошибка внутри pv_remainder (которой
+        # тот же круг добавил новый аргумент и новую арифметику) молча означала «плана
+        # нет». Тогда строкой ниже вызывался БЕСПЛАНОВЫЙ preview: whatIf по фактическим
+        # заявкам не спрашивался вовсе, и целиком неисполненный переход мог пойти без
+        # единого доказательства маржи по заявке. Ровно та семья, которую круг закрывал в
+        # соседних местах. Исключение уходит наружу: ошибка кода падает своим типом на
+        # CODE_ERRORS ниже, доменная — становится POSTPONED, то есть отказом, а не «пусто».
+        _pv_orders = pv_remainder(plan, st.get('done'), st.get('partial'))
         # ПРИЗНАК АВАРИЙНОСТИ ДОХОДИТ ДО ПРЕДПРОСМОТРА (сорок второй круг, №4): он не
         # решает за preview, но вызывающий обязан называть намерение, иначе аварийный
         # выход неотличим от планового ни в коде, ни в разборе.
+        # «ПЛАНА НЕТ, ПОТОМУ ЧТО ВСЁ СДЕЛАНО» — ЭТО ФАКТ ВЫЗЫВАЮЩЕГО, А НЕ ДОГАДКА
+        # ПРЕДПРОСМОТРА (разбор /code-review). Отличить пустой остаток исполненного перехода
+        # от пустого плана несостоявшегося preview не может: у него нет ни st['done'], ни
+        # executed_usd. Поэтому факт называется здесь, а решение принимается там.
+        _done_all = bool(not _pv_orders and (st.get('done') or st.get('cancel_fills')
+                                             or st.get('executed_usd', 0.0) > TOL))
         _pv = (broker.preview(sorted(_pv_orders.items()), emergency=bool(emergency))
-               if _pv_orders else broker.preview(emergency=bool(emergency)))
+               if _pv_orders else broker.preview(emergency=bool(emergency), done_all=_done_all))
     except _STce_tr.CODE_ERRORS:
         # ОШИБКА КОДА ПАДАЕТ ГРОМКО И ЗДЕСЬ (рецензия 20.08). Запрет, заведённый в самом
         # preview, тут же снимался ЕГО ЕДИНСТВЕННЫМ боевым вызывающим: широкий except
@@ -1417,6 +1458,11 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
             raise Incident(f'margin preview оборван ({ex}) при возможно изменённой книге — '
                            f'состояние MIXED, ручная сверка')
         raise Incident(f'margin preview оборван ({ex}) — переход не начат')
+    # ПОСЛАБЛЕНИЕ НЕ МОЛЧИТ: пропуск вопреки запасу обязан остаться в состоянии, иначе
+    # разбор увидит COMPLETE и не увидит, при каком запасе он выдан.
+    _pass_why = str(getattr(broker, '_preview_pass_why', '') or '')
+    if _pv and _pass_why:
+        st['log'].append(('preview_пропуск', _pass_why)); _atomic(state_path, st)
     if not _pv:
         # ПРИЧИНА ОТКАЗА ПРЕДПРОСМОТРА ИДЁТ В ЖУРНАЛ И В СООБЩЕНИЕ (44-й круг, №14):
         # прежде любой отказ — контракт, счёт, реестр, обрыв API — читался как «маржа не
@@ -2768,12 +2814,10 @@ def _run_lots(broker, plan, st, state_path, lim, unp, dst_bought, fail, _M=None,
         # целиком продавал бы уже исполненную часть и уводил источник в короткую.
         _part = st.get('partial', {}).get(lot['src'], 0)
         if _part:
-            _take = min(_part, remaining)
-            remaining -= _take
-            st['partial'][lot['src']] = _part - _take
-            st['log'].append(('resume_partial', lot['src'], _take))
+            remaining, st['partial'][lot['src']] = consume_partial(remaining, _part)
+            st['log'].append(('resume_partial', lot['src'], _part - st['partial'][lot['src']]))
             _atomic(state_path, st)
-            if remaining <= 0:
+            if not remaining:
                 st['done'].append(key)
                 _atomic(state_path, st)
                 continue

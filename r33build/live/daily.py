@@ -1786,7 +1786,7 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
     # через dirpath/book_path во временный каталог: прогон проверок на торговой машине
     # конкурировал с настоящей сессией и переходом, давал тайм-аут книжного замка, тревогу
     # и пропуск ребаланса или ролла. Замок обязан относиться к тому же каталогу, что книга.
-    with ST.hold_book_lock(bp.parent):
+    with ST.hold_book_lock(ST.book_lock_dir(bp)):
         book, sess, saved_route = ST.load(bp, cls)
         if book is None:
             book = cls()
