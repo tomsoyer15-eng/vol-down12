@@ -592,11 +592,12 @@ def _adapter_mutations():
         лишается TIF — как если бы строку в коде забыли."""
         orig = B.IBBroker.preview
 
-        # done_all — четвёртый аргумент боевого preview (разбор /code-review 45-го круга).
-        # Мутант ОБЯЗАН нести ту же сигнатуру: боевой вызывающий подаёт done_all= по
-        # имени, и мутант со старой сигнатурой падал бы TypeError — то есть объявлялся
-        # «пойманным» по поломке обвязки, а не по наблюдению подменённого правила.
-        def patched(self, orders=None, emergency=False, done_all=False):
+        # СИГНАТУРА НЕ ПОВТОРЯЕТСЯ, А ПРОБРАСЫВАЕТСЯ (разбор /code-review 21.08). Шесть
+        # мутантов вручную повторяли боевые аргументы, а preview менял их дважды за четыре
+        # круга: пропущенный аргумент роняет мутанта TypeError'ом, и прогон засчитывает это
+        # как «поймана» — зелёный вердикт, ничего не доказывающий. *a/**k отстать не может.
+        def patched(self, *a, **k):
+            orders = a[0] if a else k.get('orders')
             _ib = self.ib
             _wif = _ib.whatIfOrder
 
@@ -609,7 +610,7 @@ def _adapter_mutations():
 
             _ib.whatIfOrder = _stripped
             try:
-                return orig(self, orders=orders, emergency=emergency, done_all=done_all)
+                return orig(self, *a, **k)
             finally:
                 _ib.whatIfOrder = _wif
 
@@ -619,18 +620,19 @@ def _adapter_mutations():
         """СОРОК ЧЕТВЁРТЫЙ КРУГ: предпросмотр слепо разрешает. Прежде эта мутация не
         ловилась ничем — единственное утверждение о preview требовало только «можно»."""
         orig = B.IBBroker.preview
-        return orig, (lambda self, orders=None, emergency=False, done_all=False: True)
+        return orig, (lambda self, *a, **k: True)
 
     def preview_wrong_form():
         """СОРОК ЧЕТВЁРТЫЙ КРУГ: маржа доказывается для DAY-заявки, а в рынок уходит
         GTC+outsideRth. Прежде подмена формы не роняла ничего."""
         orig = B.IBBroker.preview
 
-        # done_all — четвёртый аргумент боевого preview (разбор /code-review 45-го круга).
-        # Мутант ОБЯЗАН нести ту же сигнатуру: боевой вызывающий подаёт done_all= по
-        # имени, и мутант со старой сигнатурой падал бы TypeError — то есть объявлялся
-        # «пойманным» по поломке обвязки, а не по наблюдению подменённого правила.
-        def patched(self, orders=None, emergency=False, done_all=False):
+        # СИГНАТУРА НЕ ПОВТОРЯЕТСЯ, А ПРОБРАСЫВАЕТСЯ (разбор /code-review 21.08). Шесть
+        # мутантов вручную повторяли боевые аргументы, а preview менял их дважды за четыре
+        # круга: пропущенный аргумент роняет мутанта TypeError'ом, и прогон засчитывает это
+        # как «поймана» — зелёный вердикт, ничего не доказывающий. *a/**k отстать не может.
+        def patched(self, *a, **k):
+            orders = a[0] if a else k.get('orders')
             _ib = self.ib
             _w = _ib.whatIfOrder
 
@@ -641,7 +643,7 @@ def _adapter_mutations():
 
             _ib.whatIfOrder = swap
             try:
-                return orig(self, orders=orders, emergency=emergency, done_all=done_all)
+                return orig(self, *a, **k)
             finally:
                 _ib.whatIfOrder = _w
 
@@ -652,11 +654,12 @@ def _adapter_mutations():
         произвольного счёта под тем же логином (дефект 37-го круга, №4)."""
         orig = B.IBBroker.preview
 
-        # done_all — четвёртый аргумент боевого preview (разбор /code-review 45-го круга).
-        # Мутант ОБЯЗАН нести ту же сигнатуру: боевой вызывающий подаёт done_all= по
-        # имени, и мутант со старой сигнатурой падал бы TypeError — то есть объявлялся
-        # «пойманным» по поломке обвязки, а не по наблюдению подменённого правила.
-        def patched(self, orders=None, emergency=False, done_all=False):
+        # СИГНАТУРА НЕ ПОВТОРЯЕТСЯ, А ПРОБРАСЫВАЕТСЯ (разбор /code-review 21.08). Шесть
+        # мутантов вручную повторяли боевые аргументы, а preview менял их дважды за четыре
+        # круга: пропущенный аргумент роняет мутанта TypeError'ом, и прогон засчитывает это
+        # как «поймана» — зелёный вердикт, ничего не доказывающий. *a/**k отстать не может.
+        def patched(self, *a, **k):
+            orders = a[0] if a else k.get('orders')
             _ib = self.ib; _w = _ib.whatIfOrder
 
             def f(contract, order):
@@ -665,7 +668,7 @@ def _adapter_mutations():
 
             _ib.whatIfOrder = f
             try:
-                return orig(self, orders=orders, emergency=emergency, done_all=done_all)
+                return orig(self, *a, **k)
             finally:
                 _ib.whatIfOrder = _w
 
@@ -676,11 +679,12 @@ def _adapter_mutations():
         уходит на шлюз, ответ пуст, законный переход уходит в ABORT (38-й круг, №5)."""
         orig = B.IBBroker.preview
 
-        # done_all — четвёртый аргумент боевого preview (разбор /code-review 45-го круга).
-        # Мутант ОБЯЗАН нести ту же сигнатуру: боевой вызывающий подаёт done_all= по
-        # имени, и мутант со старой сигнатурой падал бы TypeError — то есть объявлялся
-        # «пойманным» по поломке обвязки, а не по наблюдению подменённого правила.
-        def patched(self, orders=None, emergency=False, done_all=False):
+        # СИГНАТУРА НЕ ПОВТОРЯЕТСЯ, А ПРОБРАСЫВАЕТСЯ (разбор /code-review 21.08). Шесть
+        # мутантов вручную повторяли боевые аргументы, а preview менял их дважды за четыре
+        # круга: пропущенный аргумент роняет мутанта TypeError'ом, и прогон засчитывает это
+        # как «поймана» — зелёный вердикт, ничего не доказывающий. *a/**k отстать не может.
+        def patched(self, *a, **k):
+            orders = a[0] if a else k.get('orders')
             _ib = self.ib; _w = _ib.whatIfOrder
 
             def f(contract, order):
@@ -691,7 +695,7 @@ def _adapter_mutations():
 
             _ib.whatIfOrder = f
             try:
-                return orig(self, orders=orders, emergency=emergency, done_all=done_all)
+                return orig(self, *a, **k)
             finally:
                 _ib.whatIfOrder = _w
 
@@ -703,14 +707,14 @@ def _adapter_mutations():
         emergency в наборе адаптера не исполнялась ни разу."""
         orig = B.IBBroker.preview
 
-        # done_all — четвёртый аргумент боевого preview (разбор /code-review 45-го круга).
-        # Мутант ОБЯЗАН нести ту же сигнатуру: боевой вызывающий подаёт done_all= по
-        # имени, и мутант со старой сигнатурой падал бы TypeError — то есть объявлялся
-        # «пойманным» по поломке обвязки, а не по наблюдению подменённого правила.
-        def patched(self, orders=None, emergency=False, done_all=False):
-            if emergency:
+        # СИГНАТУРА НЕ ПОВТОРЯЕТСЯ, А ПРОБРАСЫВАЕТСЯ (разбор /code-review 21.08). Шесть
+        # мутантов вручную повторяли боевые аргументы, а preview менял их дважды за четыре
+        # круга: пропущенный аргумент роняет мутанта TypeError'ом, и прогон засчитывает это
+        # как «поймана» — зелёный вердикт, ничего не доказывающий. *a/**k отстать не может.
+        def patched(self, *a, **k):
+            if k.get('emergency', a[1] if len(a) > 1 else False):
                 return True
-            return orig(self, orders=orders, emergency=emergency, done_all=done_all)
+            return orig(self, *a, **k)
 
         return orig, patched
 
@@ -766,11 +770,12 @@ def _adapter_mutations():
         часть требует 800k при NLV 1 млн (запас 1,25x против норматива 1,40)."""
         orig = B.IBBroker.preview
 
-        # done_all — четвёртый аргумент боевого preview (разбор /code-review 45-го круга).
-        # Мутант ОБЯЗАН нести ту же сигнатуру: боевой вызывающий подаёт done_all= по
-        # имени, и мутант со старой сигнатурой падал бы TypeError — то есть объявлялся
-        # «пойманным» по поломке обвязки, а не по наблюдению подменённого правила.
-        def patched(self, orders=None, emergency=False, done_all=False):
+        # СИГНАТУРА НЕ ПОВТОРЯЕТСЯ, А ПРОБРАСЫВАЕТСЯ (разбор /code-review 21.08). Шесть
+        # мутантов вручную повторяли боевые аргументы, а preview менял их дважды за четыре
+        # круга: пропущенный аргумент роняет мутанта TypeError'ом, и прогон засчитывает это
+        # как «поймана» — зелёный вердикт, ничего не доказывающий. *a/**k отстать не может.
+        def patched(self, *a, **k):
+            orders = a[0] if a else k.get('orders')
             if orders:
                 try:
                     import contracts as _CTp
@@ -797,7 +802,7 @@ def _adapter_mutations():
                         return True                      # ВОТ ОН, ранний выход
                 except Exception:
                     return False
-            return orig(self, orders, emergency, done_all)
+            return orig(self, *a, **k)
         return orig, patched
 
     def measure_margin_no_tif():
@@ -827,7 +832,10 @@ def _adapter_mutations():
         запасе 1,20 против норматива 1,40, и книга уходит в ночь пробитой."""
         orig = B.IBBroker.preview
 
-        def patched(self, orders=None, emergency=False, done_all=False):
+        def patched(self, *a, **k):
+            orders = a[0] if a else k.get('orders')
+            emergency = k.get('emergency', a[1] if len(a) > 1 else False)
+            done_all = k.get('done_all', a[2] if len(a) > 2 else False)
             # ПОЛЯ ОТВЕТА ЗАВОДЯТСЯ И У МУТАНТА (разбор /code-review): без _preview_why
             # стенд падал AttributeError на сценарии normal, то есть «ловил» мутацию
             # поломкой обвязки, а не наблюдением подменённого порога.
@@ -846,7 +854,7 @@ def _adapter_mutations():
                     return True
                 self._preview_why = 'плана нет, запас ниже 1.0'
                 return False
-            return orig(self, orders, emergency, done_all)
+            return orig(self, *a, **k)
         return orig, patched
 
     def buy_direction_inverted():
@@ -889,8 +897,16 @@ def _adapter_mutations():
         маржинальном стрессе, а завершённый resume через три POSTPONED уходит в MIXED на
         НЕразорванной книге."""
         orig = B.IBBroker.preview
-        return orig, (lambda self, orders=None, emergency=False, done_all=False:
-                      orig(self, orders, False, False))
+
+        def patched(self, *a, **k):
+            # Признаки гасятся ЯВНО, прочие аргументы пробрасываются как есть: мутация
+            # обязана снимать исключения, а не отставать от сигнатуры (разбор /code-review).
+            # Позиционно поданные признаки тоже гасятся: иначе имя и позиция задали бы
+            # аргумент дважды и мутант упал бы TypeError'ом вместо наблюдения.
+            a, k = a[:1], dict(k)
+            k['emergency'] = False; k['done_all'] = False
+            return orig(self, *a, **k)
+        return orig, patched
 
     def roll_deadline_fail_open():
         """Неизвестный срок ролла снова отвечает «роллить не пора» — как было до 45-го

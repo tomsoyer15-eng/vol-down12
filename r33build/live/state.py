@@ -133,7 +133,18 @@ def book_lock_dir(path=None):
     а не в каталоге: ответ от маршрута не зависит ни в одной из двух ветвей.
     """
     if path is not None:
-        return Path(path).parent
+        # ФОРМА АРГУМЕНТА ПРОВЕРЯЕТСЯ (разбор /code-review 21.08). Две правки назад
+        # сигнатура была book_lock_dir(route, book_path), и вызов book_lock_dir('F') был
+        # законным; теперь он молча означал бы «путь книги — это строка F», а Path('F').parent
+        # — ТЕКУЩИЙ КАТАЛОГ: замок ушёл бы туда, куда случайно указывает cwd, и взаимное
+        # исключение исчезло бы без единого сообщения. Путь книги — файл book-*.json, у него
+        # всегда есть каталог.
+        _p = Path(path)
+        if _p.parent in (Path('.'), Path('')):
+            raise ValueError(
+                f'book_lock_dir ждёт ПУТЬ КНИГИ, а получил {path!r} — похоже на маршрут; '
+                f'замок ушёл бы в текущий каталог и перестал бы исключать второго писателя')
+        return _p.parent
     env = os.environ.get('ADDFUT_BOOK_PATH')
     return Path(env).parent if env else lock_dir()
 
