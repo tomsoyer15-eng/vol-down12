@@ -136,5 +136,7 @@ class FakeBroker:
             exp += abs(float(q)) * (b[0] + b[1]) / 2.0
         return exp / self.nlv
 
-    def preview(self, orders=None, emergency=False):
+    def preview(self, orders=None, emergency=False, done_all=False):
+        # done_all — «плана нет, потому что покупать больше нечего»: макет обязан нести
+        # ту же сигнатуру, иначе SAME_API перестанет сверять живой путь с макетным.
         return bool(getattr(self, 'preview_ok', True))

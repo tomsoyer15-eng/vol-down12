@@ -1402,7 +1402,10 @@ def SAME_API():
     # интерфейсу: класс 'STK' против ожидания 'ETF', середина полосы вместо цены, усечение
     # дробей, часы пары, предпросмотр без плана. Ни один метод не ВЫЗЫВАЛСЯ, а у макета их
     # не было вовсе — сравнивать было не с чем. Ниже добавлен прогон обоих.
-    _tr_need = {'preview': 3, 'sell_units': 3, 'buy_units': 3, 'minutes_since': 2,
+    # preview получил четвёртый аргумент done_all (разбор /code-review 45-го круга):
+    # «плана нет, потому что всё исполнено» — факт ВЫЗЫВАЮЩЕГО, у предпросмотра нет
+    # ни st['done'], ни executed_usd, чтобы его вывести.
+    _tr_need = {'preview': 4, 'sell_units': 3, 'buy_units': 3, 'minutes_since': 2,
                 'mark_pair': 2, 'gross': 2, 'unit_ref': 4}
     for _m, _n in sorted(_tr_need.items()):
         _f = getattr(IBBroker, _m, None)
