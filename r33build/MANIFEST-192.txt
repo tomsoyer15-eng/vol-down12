@@ -1,4 +1,4 @@
-# git-base bb7ecc3ba8f8902657c096bb906ecedbe6f136bc (+0 изменённых файлов r33build относительно HEAD на момент выпуска)
+# git-base 022b4413f89ca0067746ab9936b35529c8487fbb (+0 изменённых файлов r33build относительно HEAD на момент выпуска)
 c8e4d5bdc2d4ca1eb3f92691be49379b5c0806e17519da2fe8e41d656480e38c  ADD-FUT-v1_6_0-r33.pdf
 1c90f5ae5841677a6efa0017163c7d50c88fdced547569d8371933f8e8d867a0  ADD-FUT-v1_6_0-r33.txt
 f4fb81a4f5bd5b1e4205411c0da0340ee10d7f7732fb4b432bd41384e99aa9bd  README-192.md
@@ -51,6 +51,6 @@ d514cac5c48c3380459d0e3d4e2ab1999288593c1a99940a57a3bae5b10510c6  selfcheck_v192
 a11ad51f2994cf2e150209b6fb84893054ad9df2dbd2fe829dae10ba9110c900  sim_etf.py
 e079bec09e5f74104bcc5822928e69d727a15fa2e6ee8c0ca8cb7fd60842ef53  sim_v13.py
 9cdfe9b59bfafa14aeab48b5c9f1910c55e507f73c3ac7e38fbc359ef4d9dfff  sim_v164.py
-f30faba953a0489f4c170464dc882387270b2d92706cf523ea6d22e2f67dc9ec  transition.py
+87f8a2df710b69a29d326d40b7535b97668a7f0c6bc1263299d65fb9f2a91fcc  transition.py
 b52d42d3b45ecf1e28999f2f0ff42585791dee45e4dda94bedc45678b6519f2f  live/worm_anchor.py
 b19f0f1d574151556ab3409607c8e5d3ee506d26c0e21c2439334bc7d12bb06e  live/diagnose.py
