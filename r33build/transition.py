@@ -1042,8 +1042,6 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
             import feed as _FDp2
             _keys_p = list(_FDp2.registry().keys())
         except _STce_tr.CODE_ERRORS:
-            raise
-        except _STce_tr.CODE_ERRORS:
             raise      # ошибка кода — трассировкой, а не предполётным вердиктом
         except Exception as _erp:
             raise RuntimeError(
@@ -1085,8 +1083,17 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
             _y, _yd = _FDd.yield_pct(_broker_p.ib, _t_d, expected_prev=_prev_d)
             _dfx_val = float(_FDd.dref_from_yield(float(_y) / 100.0))
             _dfx_ok = bool(_dfx_val)
-        except _STce_tr.CODE_ERRORS:
-            raise      # ошибка кода — трассировкой, а не предполётным вердиктом
+        # ЗДЕСЬ ШИРОКИЙ ПЕРЕХВАТ ЗАКОНЕН, И ЭТО ГРАНИЦА ПРАВИЛА (разбор /code-review 45-го
+        # круга, поймано selfcheck'ом выпуска). Механически поставив пропуск CODE_ERRORS на
+        # КАЖДЫЙ широкий перехват функции, я сломал единственный, который спрашивает не о
+        # мире, а о СЕБЕ: «даёт ли этот брокер свежую доходность». Отсутствие _broker_p.ib —
+        # AttributeError — и есть честный отрицательный ОТВЕТ на этот вопрос (файловый или
+        # стендовый брокер вправе его не иметь; комментарий выше прямо говорит, что hasattr
+        # не доказательство, спрашиваем ФАКТ). Различие, по которому проходит запрет:
+        # переодевание запрещено там, где ошибка кода становится доменным вердиктом и
+        # ОСЛАБЛЯЕТ поведение; здесь отрицательный ответ УЖЕСТОЧАЕТ — ниже стоит отказ
+        # перехода, если нога Б открывается заново. Пробник возможности, отвечающий
+        # отказом, — не переодевание.
         except Exception:
             _dfx_ok = False
             _dfx_val = 0.0
