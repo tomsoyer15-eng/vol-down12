@@ -101,9 +101,16 @@ class IBBroker:
         self._con = {}
         self._qcache = {}
         self._stable = {}
-        # ОБЪЯВЛЕН ЗДЕСЬ, А НЕ ЗАВОДИТСЯ ПО ХОДУ ДЕЛА: getattr(self, ..., None) прятал
-        # отсутствие жизненного цикла у кэша — см. _dref_once.
-        self._dref_cache = None
+        # ПОЛЯ ОБЪЯВЛЕНЫ ЗДЕСЬ, А НЕ ЗАВОДЯТСЯ ПО ХОДУ ДЕЛА. `getattr(self, '_x', None)`
+        # прячет отсутствие жизненного цикла: у _dref_cache так и оказалось — сброс стоял
+        # в одном методе, а писали его из другого. Механический перечень всех getattr по
+        # self (второй проход саморецензии) нашёл ещё три поля того же вида.
+        self._dref_cache = None        # дюрационная база: только ЗАКРЕПЛЁННОЕ значение
+        self._since = None             # часы непарной позиции (mark_pair/minutes_since)
+        self._px_live = False          # признак живой котировки в §7
+        self._release_why = ''         # причина отказа разгрузки по замеру
+        self._preview_why = ''         # причина отказа предпросмотра
+        self._preview_pass_why = ''    # причина пропуска предпросмотра вопреки запасу
         reg = Path(registry or os.environ.get('ADDFUT_REGISTRY')
                    or Path(__file__).resolve().parent / 'instruments_live.csv')
         if not reg.exists():
@@ -516,7 +523,6 @@ class IBBroker:
                 px, _d, _, _ = _FDu.closes(self.ib, _FDu.contract_of(self.ib, name), today,
                                            expected_prev=None,
                                            min_prev=_prev if at_close else None)
-                self._last_close_date = _d
             px = float(px)
             return (px * (1.0 - self.UNIT_BAND_ETF), px * (1.0 + self.UNIT_BAND_ETF))
         if root in ('ES', 'MES'):
@@ -534,7 +540,6 @@ class IBBroker:
             if px is None:
                 px, _d, _, _ = _FDu.closes(self.ib, _FDu.contract_of(self.ib, name), today,
                                            expected_prev=_prev if at_close else None)
-                self._last_close_date = _d
             mult = _Su.ES_MULT / 10.0 if root == 'MES' else _Su.ES_MULT
             # ЦЕНА НОГИ А — САМ SPY, А НЕ ES/10 (СОРОК ЧЕТВЁРТЫЙ КРУГ, №1, P0).
             # Норматив: модельная единица ноги А = ES_MULT x SPY. feed.build_market так и

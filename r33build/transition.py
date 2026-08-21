@@ -1457,8 +1457,13 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         # ПРЕДПРОСМОТРА (разбор /code-review). Отличить пустой остаток исполненного перехода
         # от пустого плана несостоявшегося preview не может: у него нет ни st['done'], ни
         # executed_usd. Поэтому факт называется здесь, а решение принимается там.
-        _done_all = bool(not _pv_orders and (st.get('done') or st.get('cancel_fills')
-                                             or st.get('executed_usd', 0.0) > TOL))
+        # ПЛАН ОБЯЗАН БЫТЬ НЕПУСТЫМ (второй проход саморецензии, угол «от противоположного
+        # знака»). Послабление предназначено для «покупать больше нечего», а при ПУСТОМ
+        # плане с ненулевым executed_usd (исполнение, пойманное отменой) завершать нечего и
+        # доказывать нечем — такой исход разбирает человек, а не порог.
+        _done_all = bool(plan and not _pv_orders
+                         and (st.get('done') or st.get('cancel_fills')
+                              or st.get('executed_usd', 0.0) > TOL))
         _pv = (broker.preview(sorted(_pv_orders.items()), emergency=bool(emergency))
                if _pv_orders else broker.preview(emergency=bool(emergency), done_all=_done_all))
     except _STce_tr.CODE_ERRORS:

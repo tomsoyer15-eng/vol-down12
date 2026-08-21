@@ -3943,38 +3943,34 @@ def _rules45_case(kind):
         elif kind == 'правила45: замок книги один на всех писателей':
             # При ручном ADDFUT_BOOK_PATH без ADDFUT_LOCK_DIR голый hold_book_lock() запирал
             # ~/.addfut, а сессия — каталог книги: два писателя одного файла под разными
-            # flock. Правило живёт в УМОЛЧАНИИ, поэтому проверяется именно голый вызов.
+            # flock. Правило живёт в УМОЛЧАНИИ, поэтому проверяется именно голый вызов —
+            # но через _lock_target, то есть БЕЗ взятия замка и без отметки держателя:
+            # иначе под мутацией стенд сам писал бы в машинный каталог (правило 5).
             import state as _ST45
             _bd = _tf45.mkdtemp(prefix='addfut-i45lock-')
             _keepb = _os45.environ.get('ADDFUT_BOOK_PATH')
             _keepl = _os45.environ.get('ADDFUT_LOCK_DIR')
-            _seen = []
-            _origfd = _ST45._lock_fd
             try:
-                _os45.environ['ADDFUT_BOOK_PATH'] = _os45.path.join(_bd, 'book-F.json')
+                _os45.environ['ADDFUT_BOOK_PATH'] = _bp = _os45.path.join(_bd, 'book-F.json')
                 _os45.environ.pop('ADDFUT_LOCK_DIR', None)
-                _ST45._lock_fd = lambda d: (_seen.append(str(d)), _origfd(d))[1]
-                with _ST45.hold_book_lock():
-                    pass
-                with _ST45.hold_book_lock(_ST45.book_lock_dir(Path(_os45.environ['ADDFUT_BOOK_PATH']))):
-                    pass
-                out['голый_и_явный_совпали'] = (len(_seen) == 2 and _seen[0] == _seen[1])
-                out['замок_у_книги'] = (_seen and _seen[0] == _bd)
+                _naked = str(_ST45._lock_target())                 # переход и WORM
+                _named = str(_ST45._lock_target(_ST45.book_lock_dir(Path(_bp))))
+                out['голый_и_явный_совпали'] = (_naked == _named)
+                out['замок_у_книги'] = (_naked == _bd)
                 # Изоляция стенда сильнее правила: заданный ADDFUT_LOCK_DIR обязан побеждать.
                 _os45.environ['ADDFUT_LOCK_DIR'] = _bd2 = _tf45.mkdtemp(prefix='addfut-i45env-')
-                _seen.clear()
+                out['окружение_сильнее'] = (str(_ST45._lock_target()) == _bd2)
+                # И сам замок обязан работать — берём его во временном каталоге.
                 with _ST45.hold_book_lock():
-                    pass
-                out['окружение_сильнее'] = (_seen and _seen[0] == _bd2)
+                    out['замок_берётся'] = (Path(_bd2) / _ST45.LOCK_NAME).exists()
             finally:
-                _ST45._lock_fd = _origfd
                 for _k, _v in (('ADDFUT_BOOK_PATH', _keepb), ('ADDFUT_LOCK_DIR', _keepl)):
                     if _v is None:
                         _os45.environ.pop(_k, None)
                     else:
                         _os45.environ[_k] = _v
             out['ok'] = all([out['голый_и_явный_совпали'], out['замок_у_книги'],
-                             out['окружение_сильнее']])
+                             out['окружение_сильнее'], out.get('замок_берётся') is True])
         elif kind == 'правила45: журнал не дописывается под мусорной шапкой':
             # Проверка заголовка стояла в read(), а append брал предыдущий хэш своим,
             # НЕЗАЩИЩЁННЫМ читателем — и дописывал строку под мусорной шапкой, начиная
