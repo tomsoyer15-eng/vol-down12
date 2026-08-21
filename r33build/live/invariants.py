@@ -3761,6 +3761,10 @@ unset -f exit
         # ВЫРЕЗАЕТСЯ ИЗ ФАЙЛА и исполняется как есть; подменены только внешние действия.
         _sh_txt = AUTOPILOT_SH.read_text(encoding='utf-8')
         _mark = '_cw=$(o3e_probe 94)'
+        # ВЫРЕЗКА ОБЯЗАНА БЫТЬ ОДНОЗНАЧНОЙ (разбор /code-review 21.08): срез по литералу
+        # без проверки числа вхождений при первой же перестановке в скрипте либо взял бы
+        # ЧУЖОЙ блок, либо упал ValueError — то есть стенд краснел бы не по своей причине.
+        assert _sh_txt.count(_mark) == 1, f'метка {_mark!r} встречается не один раз'
         _i0 = _sh_txt.index(_mark)
         _i1 = _sh_txt.index('        case "$(verdict "$_cw")" in', _i0)
         _i2 = _sh_txt.index('\n        esac', _i1) + len('\n        esac')
@@ -4174,6 +4178,8 @@ def _rules45_case(kind):
             import io as _io45
             import types as _ty45
             _sh = AUTOPILOT_SH.read_text(encoding='utf-8')
+            assert _sh.count('o3e_probe() {') == 1 and _sh.count('\nhb_write() {') == 1, \
+                'границы тела пробы неоднозначны — стенд взял бы чужой текст'
             _body = _sh[_sh.index('o3e_probe() {'):_sh.index('\nhb_write() {')]
             _src = _body[_body.index('"$PY" -c "') + 10:_body.rindex('" 2>&1 )')]
             _src = _src.replace('clientId=$1', 'clientId=94')
