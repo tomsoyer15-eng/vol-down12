@@ -807,29 +807,81 @@ def _a31u(beh):
 
 
 @ainv('предпросмотр БЕЗ плана судит по нормативу О-3-Е, а не по единице',
-      needs=lambda b: b in ('normal', 'thin_cushion'))
+      needs=lambda b: b == 'normal')
 def _a45nopl(beh):
     """СОРОК ПЯТЫЙ КРУГ, №2 (P0). Ветка без плана отказывала лишь ниже 1,0, а порог
     1,0 не значит ничего: норматив О-3-Е требует 1,40. Книга с ЖИВЫМ запасом 1,20 получала
     «да» — и это не гипотеза: при полностью исполненном, но не завершённом resume
     pv_remainder честно отдаёт ПУСТОЙ план, вызывающий зовёт preview без плана, и переход
-    получает COMPLETE при фактическом запасе ниже норматива. Финальный gross() не спасает:
-    он сверяет модельное плечо, а не живое требование маржи.
+    получает COMPLETE при фактическом запасе ниже норматива.
 
-    Случай гоняется на ДВУХ сценариях стаба: здоровый запас обязан пройти, тонкий —
-    получить отказ с честной причиной. Один конец доказывал бы либо «разрешает всегда»,
-    либо «отказывает всегда»."""
+    РАЗЛИЧАЮЩИЙ ЗАПАС СТРОИТСЯ ЗДЕСЬ, А НЕ ЖДЁТСЯ ОТ НАБОРА (разбор /code-review 45-го
+    круга). Прежде стенд смотрел, какой запас дал текущий сценарий, и подстраивал под него
+    ожидание, а `needs` называл 'thin_cushion' — сценарий, которого в ADAPTER_CASES НЕТ.
+    Значит полоса (1,0; 1,40), единственная, где мутация «судить по единице» отличима,
+    не исполнялась ни разу: покрытие показывало единицу (от 'normal'), а наблюдения не
+    было. Мутацию ловил AttributeError на её же обвязке — то есть поломка, а не защита.
+    Теперь оба конца строятся явно, и вместе с ними — два законных исключения 45-го круга.
+    """
     import daily as _DLn
-    br, ib, rows = _adapter(beh)
-    ib._pos = {900001: 1.0}
-    ib._shown = dict(ib._pos)
-    _c = br.margin_cushion()
-    _r = br.preview()
-    if _c is None:
-        return _r is False
-    if float(_c) >= _DLn.O3E_MIN:
-        return _r is True and br._preview_why == ''
-    return _r is False and 'О-3-Е' in br._preview_why
+    _br_t, _ib_t, _ = _adapter('thin_cushion')          # запас 1,20 — ровно в полосе
+    _ib_t._pos = {900001: 1.0}
+    _ib_t._shown = dict(_ib_t._pos)
+    _c_t = _br_t.margin_cushion()
+    if _c_t is None or not (1.0 <= float(_c_t) < _DLn.O3E_MIN):
+        return False            # зонд достижимости: полоса обязана быть достигнута
+    _thin_no = (_br_t.preview() is False and 'О-3-Е' in (_br_t._preview_why or ''))
+    # ДВА ЗАКОННЫХ ИСКЛЮЧЕНИЯ (разбор /code-review): аварийный выход маржу ОСВОБОЖДАЕТ, а
+    # при полностью исполненном плане покупать нечего — отказ дал бы MIXED на целой книге.
+    _emerg = (_br_t.preview(emergency=True) is True
+              and 'АВАРИЙНЫЙ' in (_br_t._preview_pass_why or ''))
+    _done = (_br_t.preview(done_all=True) is True
+             and bool(_br_t._preview_pass_why))
+    _br_h, _ib_h, _ = _adapter('normal')
+    _ib_h._pos = {900001: 1.0}
+    _ib_h._shown = dict(_ib_h._pos)
+    _c_h = _br_h.margin_cushion()
+    if _c_h is None or float(_c_h) < _DLn.O3E_MIN:
+        return False            # здоровый конец обязан быть здоровым, иначе доказано ничто
+    _ok = _br_h.preview() is True and _br_h._preview_why == ''
+    return _thin_no and _emerg and _done and _ok
+
+
+@ainv('живая доходность не кэшируется, закреплённая читается один раз',
+      needs=lambda b: b == 'normal')
+def _a45dref(beh):
+    """Разбор /code-review 45-го круга. Кэш дюрационной базы сбрасывался ТОЛЬКО в начале
+    gross(), а unit_ref зовут и мимо него (check_plan_prices, сверка SAME_API, стенды):
+    величина часовой давности жила до конца жизни объекта брокера и выглядела исправной
+    проверкой. Правило: закреплённое предыдущей сессией значение внутри дня неизменно и
+    кэшируется, живое (expected_prev=None) — не кэшируется никогда.
+
+    Судья тот же, что и у мутации: набор адаптера. Стенд в RUN_CASES мутацию адаптера не
+    ловит — run_adapter_mutations судит только run_adapter."""
+    import feed as _FDa
+    import pandas as _pda
+    br, ib, _ = _adapter(beh)
+    _n = {'i': 0}
+    _orig = _FDa.yield_pct
+    try:
+        def _fake(ib_, today, expected_prev=None):
+            _n['i'] += 1
+            return (4.0 + 0.5 * _n['i'], None)
+        _FDa.yield_pct = _fake
+        _t = _pda.Timestamp('2026-08-21')
+        _p = _pda.Timestamp('2026-08-20')
+        br._dref_cache = None
+        _a1 = br._dref_once(_t, _p)
+        _a2 = br._dref_once(_t, _p)
+        _pinned = (_n['i'] == 1 and _a1 == _a2)
+        _n['i'] = 0
+        br._dref_cache = None
+        _l1 = br._dref_once(_t, None)
+        _l2 = br._dref_once(_t, None)
+        _live = (_n['i'] == 2 and _l1 != _l2 and br._dref_cache is None)
+    finally:
+        _FDa.yield_pct = _orig
+    return _pinned and _live
 
 
 @ainv('неизвестный срок ролла ОСТАНАВЛИВАЕТ, а не отвечает «роллить не пора»',
