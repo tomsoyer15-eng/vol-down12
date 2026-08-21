@@ -106,7 +106,7 @@ class IBBroker:
         # в одном методе, а писали его из другого. Механический перечень всех getattr по
         # self (второй проход саморецензии) нашёл ещё три поля того же вида.
         self._dref_cache = None        # дюрационная база: только ЗАКРЕПЛЁННОЕ значение
-        self._since = None             # часы непарной позиции (mark_pair/minutes_since)
+        self._since = {}               # часы непарной позиции (mark_pair/minutes_since)
         self._px_live = False          # признак живой котировки в §7
         self._release_why = ''         # причина отказа разгрузки по замеру
         self._preview_why = ''         # причина отказа предпросмотра
@@ -448,7 +448,7 @@ class IBBroker:
                 comm += float(cr.commission or 0)
         rec = dict(order_id=tr.order.orderId, instrument=instrument, qty=qty, filled=filled,
                    px_order=px_order, px_fill=px_fill,
-                   px_order_live=bool(getattr(self, '_px_live', False)),   # №23
+                   px_order_live=bool(self._px_live),                      # №23
                    commission=(comm if comm_ok else ''),
                    status=tr.orderStatus.status)
         if abs(filled - qty) > 1e-9:
@@ -492,6 +492,14 @@ class IBBroker:
         # eu_holidays уже держит весь маршрут Е в feed.py — правило одно, источник один.
         _is_fund = str(cls) == 'ETF' or name in _CTu.ETF_EXPECT
         _prev = self._venue_prev(_is_fund, today) if at_close else None
+        # НИЖНЯЯ ГРАНИЦА НУЖНА И БЕЗ at_close (разбор /code-review 21.08). Правка №5 45-го
+        # круга сняла плоский пятидневный допуск в feed.closes через min_prev — но подала
+        # его ТОЛЬКО на замыкающей ветке. При at_close=False (check_plan_prices) обе границы
+        # оставались None, и допуск снова включался: на 29.12.2026 европейская связка в
+        # шесть дней роняла [STALE_BAR] уже при ПРОВЕРКЕ ПЛАНА перехода, то есть на той же
+        # дате, ради которой правка и делалась. Граница «бар не старше последней ОБЩЕЙ
+        # сессии» верна в обоих режимах: at_close лишь требует ЗАКРЫТИЯ вместо котировки.
+        _floor = self._venue_prev(_is_fund, today)
         # ФОНД ОПОЗНАЁТСЯ ПО ИМЕНИ, А НЕ ПО КЛАССУ ОТВЕТА БИРЖИ (тридцать седьмой круг, №2).
         # Здесь стояло только `cls == 'ETF'`, а живой реестр отдаёт для CSPX/CBU0 secType
         # 'STK' (грабли §7: у биржи фонды — акции). gross() передаёт класс ИЗ реестра,
@@ -520,9 +528,8 @@ class IBBroker:
                 # используют здесь min_prev; полоса единицы осталась единственным местом со
                 # строгим равенством. Смысл границы: бар не смеет быть СТАРШЕ общей сессии,
                 # а свежее — законно.
-                px, _d, _, _ = _FDu.closes(self.ib, _FDu.contract_of(self.ib, name), today,
-                                           expected_prev=None,
-                                           min_prev=_prev if at_close else None)
+                px, _, _, _ = _FDu.closes(self.ib, _FDu.contract_of(self.ib, name), today,
+                                          expected_prev=None, min_prev=_floor)
             px = float(px)
             return (px * (1.0 - self.UNIT_BAND_ETF), px * (1.0 + self.UNIT_BAND_ETF))
         if root in ('ES', 'MES'):
@@ -709,7 +716,7 @@ class IBBroker:
         # тайм-аут мог сработать сразу после первой заявки новой. Пара начинается здесь,
         # значит и отсчёт начинается здесь: присваиваем, а не подставляем по умолчанию.
         import time as _t
-        _m = getattr(self, '_since', None)
+        _m = self._since
         if _m is None:
             _m = self._since = {}
         _m[str(key)] = _t.monotonic()
@@ -722,7 +729,7 @@ class IBBroker:
         это не «ноль минут», а неизмеримость: тайм-аут — денежная защита, и её молчаливое
         отключение опаснее лишнего отказа."""
         import time as _t
-        _m = getattr(self, '_since', None)
+        _m = self._since
         if _m is None or str(key) not in _m:
             raise BrokerError(f'часы пары {key} не пущены (mark_pair) — тайм-аут 15 минут '
                               f'неизмерим, исполнение вслепую запрещено')
@@ -1112,7 +1119,7 @@ class IBBroker:
                 # КОНКРЕТНАЯ ПРИЧИНА ПОМОЩНИКА СИЛЬНЕЕ ОБЩЕЙ (рецензия 20.08): «замер не
                 # читается» и «маржа не проходит» — разные состояния, и первое лечится
                 # first_connect, а не деньгами.
-                return _no(getattr(self, '_release_why', '')
+                return _no(self._release_why
                            or f'разгрузка замером НЕ подтверждена, а текущий запас '
                               f'{float(_c):.2f}x ниже норматива О-3-Е {_DLp.O3E_MIN}')
             if float(_c) < 1.0:

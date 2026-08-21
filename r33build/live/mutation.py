@@ -966,10 +966,18 @@ def _adapter_mutations():
         # якорь стал ФУНКЦИЕЙ (голая подстрока ловила и здоровый замер), str() у него —
         # "<function ...>", мутация перестала находить своё место и падала бы на assert.
         # Причина в таблице стабильна, она и есть опознавательный признак.
-        _mut = [(("ниже порога" if _s == "ниже порога маршрута" else _s), _c, _t)
+        # ОБЕ ПОЛОВИНЫ ДЕЙСТВУЮТ (разбор /code-review 21.08). Вторая — «капитальный якорь
+        # расширен до «ниже порога»» — сравнивала со строкой «ниже порога маршрута», а
+        # такого якоря в таблице нет с тех пор, как капитальный признак стал ФУНКЦИЕЙ:
+        # мутация обещала два эффекта и давала один, а assert считал только удаление.
+        def _shirokiy(body):
+            return 'ниже порога' in str(body)
+        _mut = [((_shirokiy if _s is _DGm._kapital_nizhe_poroga else _s), _c, _t)
                 for _s, _c, _t in orig
                 if not str(_c).startswith("запас маржи ниже норматива О-3-Е")]
         assert len(_mut) == len(orig) - 1, "мутация диагноста не нашла своего места"
+        assert any(_s is _shirokiy for _s, _, _ in _mut), \
+            "капитальный якорь не расширен — половина мутации мертва"
         return orig, _mut, _DGm          # носитель — модуль диагноста, не адаптер
 
     def venue_prev_cme_for_all():
@@ -1728,6 +1736,44 @@ def _run_mutations():
             return (0.0 if units <= 0 else units), max(0.0, float(done_units or 0.0) - take)
         return orig, patched, _TR4, 'consume_partial'
 
+    def journal_header_unchecked():
+        """Заголовок §7 больше не сверяется с COLS — как было до разбора /code-review:
+        append дописывает строку под мусорной шапкой и начинает цепочку от GENESIS, а
+        read/verify после этого отвергают журнал навсегда."""
+        import journal as _Jh
+        orig = _Jh._header_ok
+        return orig, (lambda fieldnames: fieldnames is not None), _Jh, '_header_ok'
+
+    def o3e_norm_by_unit():
+        """Норматив О-3-Е снова читается как «лишь бы не ниже единицы» — как было до 45-го
+        круга, №2: книга с ЖИВЫМ запасом 1,20 при нормативе 1,40 получает «да» во ВСЕХ
+        ветках сразу (предпросмотр, вахта сессии, пост-трейдовый разбор, срез §8)."""
+        import daily as _DLn
+        orig = _DLn.o3e_ok
+        return orig, (lambda cushion: cushion is not None and float(cushion) >= 1.0), \
+            _DLn, 'o3e_ok'
+
+    def o3e_signature_by_substring():
+        """Маржинальный якорь диагноста снова голая подстрока «О-3-Е» — как было до разбора
+        /code-review: тревога СЛЕПОТЫ вахты, «запас неизвестен» и здоровый замер после
+        успешного среза читаются как пробой, и оператору называют противоположную причину."""
+        import diagnose as _DGz
+        orig = _DGz.SIGNS
+        _mut = [((lambda body: 'О-3-Е' in str(body))
+                 if _s is _DGz._zapas_nizhe_o3e else _s, _c, _t) for _s, _c, _t in orig]
+        assert any(_s is not _o for (_s, _, _), (_o, _, _) in zip(_mut, orig)), \
+            'мутация якоря О-3-Е не нашла своего места'
+        return orig, _mut, _DGz, 'SIGNS'
+
+    def code_errors_dressed_in_run():
+        """Запрет переодевания ошибки кода снят В НАБОРЕ ЗАПУСКА (разбор /code-review 21.08).
+        Такая же мутация есть у адаптера, но судит её run_adapter, где нет ни одного из
+        новых мест ловли: пропуски в transition._preflight_handover и в daily наблюдают
+        стенды RUN_CASES, значит и мутация обязана судиться ими."""
+        import state as _STm45
+        orig = _STm45.CODE_ERRORS
+        return orig, (), _STm45, 'CODE_ERRORS'
+
     def book_lock_ignores_book():
         """Замок книги снова берётся на каталог состояния независимо от того, где книга —
         как было до 45-го круга, №8: при ручном ADDFUT_BOOK_PATH торговля и переходный
@@ -1903,6 +1949,10 @@ def _run_mutations():
             ('позиции снимаются до вердикта', positions_before_verdict),
             ('плоский допуск игнорирует min_prev', gap_tolerance_ignores_min_prev),
             ('остаток лота сравнивается с точным нулём', consume_partial_exact_zero),
+            ('заголовок журнала не сверяется', journal_header_unchecked),
+            ('норматив О-3-Е читается как единица', o3e_norm_by_unit),
+            ('якорь О-3-Е снова голая подстрока', o3e_signature_by_substring),
+            ('запрет переодевания снят (набор запуска)', code_errors_dressed_in_run),
             ('замок книги не зависит от книги', book_lock_ignores_book),
             ('append журнала со своим читателем', journal_append_own_reader),
             ('диагност читает тело целиком', diagnose_reads_whole_body),

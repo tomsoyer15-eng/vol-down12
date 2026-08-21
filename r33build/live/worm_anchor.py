@@ -172,10 +172,16 @@ def _registry_margins_mismatch(reg, mrg):
     _acc = str(_meta.get('account') or '')
     _want = str(os.environ.get('ADDFUT_ACCOUNT') or '').strip()
     if not _want:
-        try:
-            _want = (_STce.lock_dir() / 'account.txt').read_text(encoding='utf-8').strip()
-        except (OSError, ValueError, AttributeError, TypeError) as _exa:
-            return f'пин счёта нечитаем ({type(_exa).__name__}: {_exa}) — сверка невозможна'
+        _pin_p = _STce.lock_dir() / 'account.txt'
+        # ОТСУТСТВИЕ ФАЙЛА — НЕ РАСХОЖДЕНИЕ, А НЕИЗВЕСТНОСТЬ ПИНА. Пин может задаваться
+        # переменной окружения (так делает автопилот), и требовать файл значило бы объявить
+        # несовместимой любую пару там, где счёт просто не пинован файлом. Отказ читать
+        # СУЩЕСТВУЮЩИЙ файл — другое дело: это порча, и молчать о ней нельзя.
+        if _pin_p.exists():
+            try:
+                _want = _pin_p.read_text(encoding='utf-8').strip()
+            except (OSError, ValueError, AttributeError, TypeError) as _exa:
+                return f'пин счёта нечитаем ({type(_exa).__name__}: {_exa}) — сверка невозможна'
     # СЧЁТ ЗАМЕРА ОБЯЗАТЕЛЕН, КОГДА ПИН ИЗВЕСТЕН (разбор /code-review). Условие `if _acc and
     # _want` было fail-open: замер БЕЗ поля account заверялся молча, тогда как
     # transition._live_margins ровно этот случай считает фатальным («счёт замера пуст при

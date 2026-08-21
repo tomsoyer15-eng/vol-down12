@@ -505,7 +505,10 @@ class _B:
     # unit_ref ОБЯЗАТЕЛЕН (двадцать девятый круг, №3): цены плана сверяются с рынком.
     def unit_ref(s, i, cls):
         p = s._px(i); return (p * 0.5, p * 2.0)
-    def preview(s, orders=None, emergency=False): return s.p
+    # done_all — четвёртый аргумент боевого preview (разбор /code-review 21.08):
+    # исполнитель подаёт его по имени, и заглушка со старой сигнатурой роняла бы
+    # выпуск TypeError'ом ВМЕСТО вердикта — ошибка кода в списке CODE_ERRORS.
+    def preview(s, orders=None, emergency=False, done_all=False): return s.p
     def sell_units(s, i, u):
         s.n += 1; f = (u - 0.5 if s.f and u > 0 else u)
         s.calls.append(('sell', i, u)); s.np[i] = s.np.get(i, 0) - int(f)
@@ -705,7 +708,7 @@ M.append_event(JX, '2026-08-10', 'TRANSITION_OPEN', 'E|s1|' + _tid6)
 _sp(asof='2026-08-10', tid=_tid6, postponed=0, done=[], executed_usd=1.0, order_ids=[],
                snapshot={'ZN': 1, 'CBU0': 0}, log=[], opened=True)
 class _BPrevRaise(_B):
-    def preview(s, orders=None, emergency=False): raise RuntimeError('margin preview оборван связью')
+    def preview(s, orders=None, emergency=False, done_all=False): raise RuntimeError('margin preview оборван связью')
 inc = False
 try: T.execute(_BPrevRaise(netpos={'ZN': 1, 'CBU0': 0}, oo=['oY']), SP, 1e6, L1,
                signal_id='s1', resume=True, **KW)
