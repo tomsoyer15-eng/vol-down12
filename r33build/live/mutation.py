@@ -2004,6 +2004,24 @@ def _run_mutations():
             ('маршрут игнорируется', force_route_f)]
 
 
+# ВОРОТА 2 (правило 8в): «СТЕНД, КОТОРОГО НЕ УБИВАЕТ НИ ОДНА МУТАЦИЯ, — НЕ СТЕНД».
+# Обратная таблица уже была, но ТОЛЬКО для набора INVARIANTS — и потому проверка SAME_API
+# про аварийный выход смогла стать неопровержимой незамеченной: её семья в отчёт не
+# попадала. Копим убийц по ВСЕМ семьям одним помощником: данные уже вычисляются, их надо
+# лишь не выбрасывать.
+KILLERS = {}
+
+
+def _note_killers(family, label, bad):
+    """Запомнить, какие утверждения покраснели от мутации label в семье family."""
+    _f = KILLERS.setdefault(family, {})
+    for _b in (bad or ()):
+        # имена приходят и с хвостом «[исключение: …]» — берём собственно утверждение
+        _name = str(_b).split(' [')[0]
+        _f.setdefault(_name, set()).add(label)
+    return bad
+
+
 def _mutate_autopilot(was, now, prefix, что):
     """МУТАЦИЯ БОЕВОГО ШЕЛЛА — ОДНИМ ПОМОЩНИКОМ (разбор /code-review 45-го круга).
 
@@ -2797,6 +2815,7 @@ def run_j7_mutations():
         finally:
             setattr(J, attr, orig)
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
+        _note_killers('j7', label, bad)
         if not bad:
             miss.append(label)
     return miss
@@ -2817,6 +2836,7 @@ def run_signal_mutations():
         finally:
             setattr(SU, attr, orig)
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
+        _note_killers('signal', label, bad)
         if not bad:
             miss.append(label)
     return miss
@@ -2837,6 +2857,7 @@ def run_roll_mutations():
         finally:
             setattr(holder, attr, orig)
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
+        _note_killers('roll', label, bad)
         if not bad:
             miss.append(label)
     return miss
@@ -2875,6 +2896,7 @@ def run_transition_mutations():
         finally:
             setattr(_holder, attr, orig)
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
+        _note_killers('transition', label, bad)
         if not bad:
             miss.append(label)
     return miss
@@ -2903,6 +2925,7 @@ def run_run_mutations():
             finally:
                 setattr(holder, attr, orig)
             print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
+            _note_killers('run', label, bad)
             if not bad:
                 miss.append(label)
             continue
@@ -2920,6 +2943,7 @@ def run_run_mutations():
         finally:
             setattr(holder, attr, orig)
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
+        _note_killers('run', label, bad)
         if not bad:
             miss.append(label)
     return miss
@@ -2947,6 +2971,7 @@ def run_feed_mutations():
         finally:
             setattr(holder, attr, orig)
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
+        _note_killers('feed', label, bad)
         if not bad:
             miss.append(label)
     return miss
@@ -2993,6 +3018,7 @@ def run_session_mutations():
         finally:
             setattr(DL, attr, orig)
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:58]}')
+        _note_killers('session', label, bad)
         if not bad:
             miss.append(label)
     return miss
@@ -3022,6 +3048,7 @@ def run_intent_mutations():
         finally:
             setattr(_holder, _attr, orig)
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:60]}')
+        _note_killers('intent', label, bad)
         if not bad:
             miss.append(label)
     return miss
@@ -3092,6 +3119,7 @@ def run_pack_mutations():
         finally:
             setattr(DLm, attr, orig)
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
+        _note_killers('pack', label, bad)
         if not bad:
             miss.append(label)
     return miss
@@ -3142,6 +3170,7 @@ def run_refusal_mutations():
         finally:
             DLm.step = orig
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
+        _note_killers('refusal', label, bad)
         if not bad:
             miss.append(label)
     return miss
@@ -3177,6 +3206,7 @@ def run_adapter_mutations():
             setattr(holder, attr, orig)
         killers = ', '.join(sorted(bad))[:70]
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {killers}')
+        _note_killers('adapter', label, bad)
         if not bad:
             miss.append(label)
     return miss
@@ -3229,4 +3259,17 @@ if __name__ == '__main__':
         print(f"\nМУТАЦИИ АДАПТЕРА, КОТОРЫХ НЕ ПОЙМАЛ НИКТО ({len(miss_a)}):")
         for m_ in miss_a:
             print(f'   {m_}')
+    # ВОРОТА 2: ОБРАТНЫЙ ВОПРОС ПО ОСТАЛЬНЫМ СЕМЬЯМ (правило 8в). «Поймана ли каждая
+    # мутация» спрашивалось всегда; «убито ли каждое утверждение» — только у INVARIANTS.
+    # Утверждение без единого убийцы либо тождество, либо замолчало: 22.08 так молча
+    # ослепла проверка SAME_API про аварийный выход, и её слепота скрыла P0 в воротах
+    # маржи. Досрочный выход (stop_on_first) может маскировать часть убийц, поэтому пока
+    # это ПЕРЕЧЕНЬ КАНДИДАТОВ, а не отказ выпуска: цифру надо сначала измерить.
+    for _fam, _reg in (('run', getattr(I, 'RUN', [])),
+                       ('adapter', getattr(I, 'ADAPTER', []))):
+        _seen = KILLERS.get(_fam, {})
+        _weak = [n for n, _f, _nd in _reg if not _seen.get(n)]
+        print(f"\nУТВЕРЖДЕНИЯ СЕМЬИ «{_fam}» БЕЗ ЕДИНОГО УБИЙЦЫ: {len(_weak)} из {len(_reg)}")
+        for w in _weak:
+            print(f'   {w}')
     sys.exit(1 if (missed or miss_a) else 0)
