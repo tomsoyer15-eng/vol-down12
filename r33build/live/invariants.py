@@ -862,15 +862,25 @@ def _a45nopl(beh):
     _keep_rel = _IBn.IBBroker._release_by_measure
     _IBn.IBBroker._release_by_measure = lambda self, orders: False
     try:
+        # Ветка разгрузки достигается ОТРИЦАТЕЛЬНЫМ приращением whatIf (whatif_values
+        # стаба), а не знаком количества: стаб на любую заявку отвечает +10% номинала.
+        _ib_h.whatif_values = [-50.0]
         _rel_ok = _br_h.preview([('CSPX', -5.0)]) is True
+        # ...а ТОНКИЙ запас при нечитаемом замере — отвергает: вторая сторона той же
+        # ветки `_o3e_ok` в разгрузке (ворота 1).
+        _ib_t.whatif_values = [-50.0]
+        _rel_no = _br_t.preview([('CSPX', -5.0)]) is False
     finally:
         _IBn.IBBroker._release_by_measure = _keep_rel
+        for _ibx in (_ib_h, _ib_t):
+            if hasattr(_ibx, 'whatif_values'):
+                del _ibx.whatif_values
 
     if _c_h is None or float(_c_h) < _DLn.O3E_MIN:
         return False            # здоровый конец обязан быть здоровым, иначе доказано ничто
     _ok = _br_h.preview() is True and _br_h._preview_why == ''
     return (_thin_no and _emerg and _done and _dust_no and _dust_em
-            and _dust_ok and _rel_ok and _ok)
+            and _dust_ok and _rel_ok and _rel_no and _ok)
 
 
 def _dref_probe(br):
@@ -4174,6 +4184,9 @@ def _rules45_case(kind):
                            f'запас О-3-Е 1.20x ниже 1.4 — книга сокращена')
             out['дубль_кода_не_двоит'] = (
                 sum(1 for c in _c10 if 'ниже норматива О-3-Е' in c) == 1)
+            # Метка с ПУСТЫМ хвостом (обрыв записи на середине строки) — не причина и
+            # не падение: вторая сторона условного выражения в _codes.
+            out['пустой_хвост_метки_молчит'] = (_causes(_m) == [])
             _c4 = _causes(_ned)
             out['недоступность_не_дублируется'] = (
                 any('не отдаёт живой запас' in c for c in _c4)
@@ -4184,7 +4197,8 @@ def _rules45_case(kind):
                              out['код_сильнее_прозы'],
                              out['код_различает_неизмеренное'],
                              out['исход_заявки_по_заявке'],
-                             out['дубль_кода_не_двоит']])
+                             out['дубль_кода_не_двоит'],
+                             out['пустой_хвост_метки_молчит']])
         elif kind == 'правила45: пара реестра и замера сверяется':
             # Якорь хэшировал оба файла порознь и заверял НЕСОВМЕСТИМУЮ пару. Область
             # сверки — FUT (замеряет их только first_connect), направления — оба.

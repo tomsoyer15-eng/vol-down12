@@ -69,6 +69,49 @@ def executable(path):
     return _out
 
 
+def stmt_spans(path):
+    """Диапазоны многострочных предложений файла: (первая строка -> все строки).
+
+    LINE-событие приходит на ОДНУ строку предложения, а co_lines перечисляет их все:
+    первая строка `_pv = (broker.preview(...)` числилась «не исполнялось», хотя выражение
+    исполняется каждой сессией батареи. Правило: строка исполнена, если исполнена любая
+    строка того же предложения. Огрубляет ровно на границе предложения — не больше.
+    """
+    import ast
+    try:
+        _tree = ast.parse(Path(path).read_text(encoding='utf-8'))
+    except (OSError, SyntaxError):
+        return []
+    _out = []
+    for _n in ast.walk(_tree):
+        if isinstance(_n, ast.stmt) and getattr(_n, 'end_lineno', None) \
+                and _n.end_lineno > _n.lineno:
+            _out.append((set(range(_n.lineno, _n.end_lineno + 1))))
+    return _out
+
+
+def catchall_lines(path):
+    """Строки `except Exception:`/`except:` — у их ветвления НЕТ второй стороны.
+
+    BRANCH-событие на строке except означает «совпал тип / пробуем следующий», а
+    перехват-всех не может не совпасть, когда до него дошли: однобокость здесь —
+    свойство конструкции, а не пробел прогона. Первое чистое измерение оставило ровно
+    одну такую строку — и это была она.
+    """
+    import ast
+    try:
+        _tree = ast.parse(Path(path).read_text(encoding='utf-8'))
+    except (OSError, SyntaxError):
+        return set()
+    _out = set()
+    for _n in ast.walk(_tree):
+        if isinstance(_n, ast.ExceptHandler):
+            _t = _n.type
+            if _t is None or (isinstance(_t, ast.Name) and _t.id == 'Exception'):
+                _out.add(_n.lineno)
+    return _out
+
+
 def measure(target):
     """Прогнать target() под наблюдением. Возвращает (исполненные, односторонние)."""
     mon = sys.monitoring
@@ -114,7 +157,10 @@ def main():
     # прогон; требовать от батареи покрытия его тела значит выдавать сорок ложных обвинений
     # и научить читателя пропускать список. Его собственная непокрытость видна иначе — по
     # вердикту «мутаций, которых не поймал никто».
-    diff = {f: l for f, l in diff.items() if not f.endswith('mutation.py')}
+    # Вне области: mutation.py исполняет собственный прогон, а не батарея; сам инструмент
+    # меряет себя частично (report-ветки идут после снятия монитора) — self-шум.
+    diff = {f: l for f, l in diff.items()
+            if not f.endswith('mutation.py') and not f.endswith('branch_cover.py')}
     diff = {f: (l & executable(f)) for f, l in diff.items()}
     diff = {f: l for f, l in diff.items() if l}
     if not diff:
@@ -122,7 +168,6 @@ def main():
         return 0
     sys.path.insert(0, str(LIVE))
     sys.path.insert(0, str(ROOT / 'r33build'))
-    import invariants as I
 
     # ГОНЯЕМ ТЕ ЖЕ СЕМЬИ, ЧТО И БАТАРЕЯ. Имена взяты грепом `^def run_` из invariants.py,
     # а не по памяти: пропущенная семья превратила бы «не исполнялось» в ложное обвинение.
@@ -130,17 +175,30 @@ def main():
              'run_roll', 'run_refusal', 'run_pack', 'run_signal', 'run_j7', 'run_sessions')
 
     def _run():
+        # Импорт — ВНУТРИ окна наблюдения: код уровня модуля (декораторы, регистрации,
+        # санация окружения) исполняется при импорте, и вне окна он ложно числился бы
+        # «не исполнялось» — первое измерение дало так десяток ложных обвинений.
+        import invariants as I
         for _f in _FAMS:
             getattr(I, _f)()
 
     seen, one_sided = measure(_run)
-    bad_lines, bad_branch = [], []
+    bad_lines, bad_branch, infra = [], [], []
     for f, lines in sorted(diff.items()):
-        _ex = seen.get(f, set())
+        _ex = set(seen.get(f, set()))
+        for _span in stmt_spans(f):
+            if _ex & _span:
+                _ex |= _span
+        _test_infra = f.endswith('invariants.py')
         for ln in sorted(lines):
             if ln not in _ex:
-                bad_lines.append(f'{Path(f).relative_to(ROOT)}:{ln}')
-            elif (f, ln) in one_sided:
+                (_test_infra and infra or bad_lines).append(
+                    f'{Path(f).relative_to(ROOT)}:{ln}')
+            elif (f, ln) in one_sided and not _test_infra \
+                    and ln not in catchall_lines(f):
+                # Однобокость тестовой обвязки — шум по построению: отказные ветки зондов
+                # исполняются только при красной батарее, restore-ветки — при заданной
+                # переменной. Для боевого кода однобокость остаётся отказом.
                 bad_branch.append(f'{Path(f).relative_to(ROOT)}:{ln}')
     _n = sum(len(v) for v in diff.values())
     print(f'изменённых строк питона: {_n}; батарея исполнила: {_n - len(bad_lines)}')
@@ -151,6 +209,10 @@ def main():
     if bad_branch:
         print(f'\nВЗЯТЫ ТОЛЬКО В ОДНУ СТОРОНУ ({len(bad_branch)}):')
         for b in bad_branch:
+            print(f'   {b}')
+    if infra:
+        print(f'\nТЕСТОВАЯ ОБВЯЗКА, НЕ ИСПОЛНЯЛАСЬ (справочно, {len(infra)}):')
+        for b in infra:
             print(f'   {b}')
     return 1 if (bad_lines or bad_branch) else 0
 
