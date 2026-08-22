@@ -145,8 +145,21 @@ def book_lock_dir(path=None):
                 f'book_lock_dir ждёт ПУТЬ КНИГИ, а получил {path!r} — похоже на маршрут; '
                 f'замок ушёл бы в текущий каталог и перестал бы исключать второго писателя')
         return _p.parent
+    # ТА ЖЕ ПРОВЕРКА ФОРМЫ И ЗДЕСЬ (разбор /code-review 22.08). Вчера я поставил её только
+    # в ветку явного пути, а ветка ADDFUT_BOOK_PATH молча отдавала Path('.') для имени без
+    # каталога — и это ветка ПО УМОЛЧАНИЮ, та самая, в которую круг перенёс всё правило.
+    # Итог был бы хуже прежнего: сессия падала бы с ValueError, а замыкание, вахта и
+    # переходный исполнитель брали бы flock в случайном текущем каталоге. Проверка одна на
+    # обе ветки — иначе это снова «починен пример».
     env = os.environ.get('ADDFUT_BOOK_PATH')
-    return Path(env).parent if env else lock_dir()
+    if not env:
+        return lock_dir()
+    _pe = Path(env)
+    if _pe.parent == Path('.') and not str(env).startswith('.'):
+        raise ValueError(
+            f'ADDFUT_BOOK_PATH={env!r} задан без каталога — замок книги ушёл бы в текущий '
+            f'каталог и перестал бы исключать второго писателя; задать полный путь')
+    return _pe.parent
 
 
 def _lock_fd(d):
