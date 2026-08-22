@@ -874,7 +874,7 @@ def pv_remainder(plan, done, partial=None):
 # доменным диагнозом. Пропуск поставлен МЕХАНИЧЕСКИ на каждый широкий перехват
 # функции, а не на тот, что вспомнился.
 def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
-                        _resume=False):
+                        _resume=False, emergency=False):
     """Сухая проверка условий передачи книги ДО первой заявки (двадцать пятый круг, №7).
 
     Повторяет те барьеры hand_over_book, которые не зависят от результата торговли:
@@ -1055,13 +1055,26 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
             # отказ законен: проверить серии нечем. Аварийному — нет: книга в это время
             # сидит в фондах под займом, и запрет выхода из-за нечитаемого справочника
             # ровно тот запрет лечения по симптому, что чинили круги 41-43.
+            # СТОРОЖ НЕ ВЫКЛЮЧАЕТСЯ, А СУДИТ КОНСЕРВАТИВНО (разбор /code-review 22.08).
+            # Вчерашняя редакция ставила аварийному выходу `_keys_p = []` — то есть ровно
+            # тот `except Exception: _keys_p = []`, про который комментарий выше говорит,
+            # что он ОТКЛЮЧАЕТ проверку: книга Ф рождалась без ser_a/ser_b, leg_roll_due
+            # при held is None навсегда отвечал «ролл не нужен», и нога шла в поставку —
+            # молча, потому что stdout не читает ни `status`, ни диагност. Реестр нечитаем
+            # — значит неизвестно, несёт ли он серии; но ГОЛАЯ цель ('ES', 'MES', 'ZN')
+            # опасна и без реестра, и её мы отвергаем даже при аварии. План с явными
+            # сериями при аварии проходит: там книга родится роллируемой.
             if not emergency:
                 raise RuntimeError(
                     f'живой реестр серий не читается ({_erp}) — проверить поставочные серии '
                     f'целей плана нечем, передача книги маршруту Ф остановлена') from _erp
+            _bare_e = sorted({str(n) for n in _dst_names if str(n) in ('ES', 'MES', 'ZN')})
+            if _bare_e:
+                raise RuntimeError(
+                    f'живой реестр серий не читается ({_erp}), а цели плана {_bare_e} '
+                    f'заданы БЕЗ поставочной серии — книга Ф вышла бы без ser_a/ser_b и не '
+                    f'роллировалась; аварийный выход задать явными сериями') from _erp
             _keys_p = []
-            print(f'ВНИМАНИЕ: реестр серий не читается ({_erp}); аварийный выход не '
-                  f'останавливается, поставочные серии целей ПРОВЕРИТЬ ВРУЧНУЮ (О-5)')
         if any(str(k) not in ('ES', 'MES', 'ZN') and
                str(k).startswith(('ES', 'MES', 'ZN')) for k in _keys_p):
             _bare = sorted({str(n) for n in _dst_names if str(n) in ('ES', 'MES', 'ZN')})
@@ -1509,8 +1522,13 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         if _pv_orders is None:
             _pv = False
         else:
-            _pv = (broker.preview(sorted(_pv_orders.items()), emergency=bool(emergency),
-                                  done_all=_done_all)
+            # done_all НЕ ПОДАЁТСЯ В ВЕТКУ С ПЛАНОМ (разбор /code-review 22.08): он
+            # вычислен как `not _pv_orders and ...`, а эта ветка выбирается при НЕПУСТОМ
+            # _pv_orders — то есть там он тождественно ложен, и вчерашняя правка «подать в
+            # оба вызова» не могла сработать ни разу. Случай, ради которого она делалась
+            # (остаток целиком в пыли), закрыт иначе: consume_partial срезает пыль по TOL,
+            # и остаток выходит ПУСТЫМ, то есть попадает в беспланную ветку.
+            _pv = (broker.preview(sorted(_pv_orders.items()), emergency=bool(emergency))
                    if _pv_orders
                    else broker.preview(emergency=bool(emergency), done_all=_done_all))
     except _STce_tr.CODE_ERRORS:
@@ -1658,7 +1676,7 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
     try:
         _preflight_handover(from_route, to_route,
                             _dst_names=[spec['dst'][0] for spec in legs.values()],
-                            _broker_p=broker, _resume=resume)
+                            _broker_p=broker, emergency=bool(emergency), _resume=resume)
     except _STce_tr.CODE_ERRORS:
         # ПЯТЫЙ ШИРОКИЙ ПЕРЕХВАТ (45-й круг, №9). Ошибка кода в предполёте становилась
         # доменным «предполет не пройден» — и дороже всего это на АВАРИЙНОМ выходе Е→Ф:
