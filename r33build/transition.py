@@ -700,7 +700,9 @@ def _execute_guarded(broker, state_path, capital, legs, signal_id='', from_route
     # них оставлял в истории запись об аварийном обходе порога, которого не было. Сначала
     # убеждаемся, что переход вообще возможен, и только потом фиксируем обход.
     if to_route == 'F' and float(capital) < MIN_NLV_F and not emergency:
-        raise Incident(f'переход в Ф запрещён: NLV {float(capital):,.0f} ниже порога '
+        import diagnose as _DGc2
+        raise Incident(f'{_DGc2.CAUSE_MARK} КАПИТАЛ-НИЖЕ-ПОРОГА\n'
+                       f'переход в Ф запрещён: NLV {float(capital):,.0f} ниже порога '
                        f'{MIN_NLV_F:,.0f} (§8); требуется решение заказчика. Аварийный '
                        f'вывод из Е выполняется тем же вызовом с emergency=True и '
                        f'записывается в журнал отдельным событием')

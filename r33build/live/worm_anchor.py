@@ -365,7 +365,9 @@ def _anchor_body(day):
         print(f'ВНИМАНИЕ: реестр и замер маржи описывают РАЗНЫЕ поколения: {_pair}; '
               f'перегенерировать first_connect (О-5)')
         try:
+            import diagnose as _DGw
             (st / f'WARN-registry-margins-{day}.txt').write_text(
+                f'{_DGw.CAUSE_MARK} ПАРА-ПОКОЛЕНИЙ\n'
                 f'реестр и замер маржи описывают РАЗНЫЕ поколения: {_pair}\n'
                 f'перегенерировать first_connect; до этого переход между маршрутами может '
                 f'быть отвергнут, а лишние серии замера не отвергаются вовсе\n',

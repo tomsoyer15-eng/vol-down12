@@ -838,17 +838,23 @@ def _a45nopl(beh):
     _emerg = _br_t.preview(emergency=True) is False
     _done = (_br_t.preview(done_all=True) is True
              and bool(_br_t._preview_pass_why))
-    _dust_no = _br_t.preview([('ESU26', 0.4)]) is False
-    _dust_em = (_br_t.preview([('ESU26', 0.4)], emergency=True) is True
-                and 'АВАРИЙНЫЙ' in (_br_t._preview_pass_why or ''))
     _br_h, _ib_h, _ = _adapter('normal')
     _ib_h._pos = {900001: 1.0}
     _ib_h._shown = dict(_ib_h._pos)
     _c_h = _br_h.margin_cushion()
+    # ПЛАН, ЧЬИ КОЛИЧЕСТВА ОКРУГЛИЛИСЬ В НОЛЬ, — НЕЗАКОНЧЕННАЯ ПОКУПКА, А НЕ ЗАКОНЧЕННАЯ
+    # РАБОТА (разбор /code-review 22.08). Вчера я пускал здесь аварийность; она не заменяет
+    # доказательства, и её законная дверь — независимый замер (_release_by_measure) в ветке
+    # разгрузки. Оба конца: без норматива не проходит НИКТО, с нормативом — проходят все.
+    _dust_no = _br_t.preview([('ESU26', 0.4)]) is False
+    _dust_em = _br_t.preview([('ESU26', 0.4)], emergency=True) is False
+    _dust_ok = _br_h.preview([('ESU26', 0.4)]) is True
+
     if _c_h is None or float(_c_h) < _DLn.O3E_MIN:
         return False            # здоровый конец обязан быть здоровым, иначе доказано ничто
     _ok = _br_h.preview() is True and _br_h._preview_why == ''
-    return _thin_no and _emerg and _done and _dust_no and _dust_em and _ok
+    return (_thin_no and _emerg and _done and _dust_no and _dust_em
+            and _dust_ok and _ok)
 
 
 def _dref_probe(br):
@@ -4035,14 +4041,15 @@ def _rules45_case(kind):
             _brt, _ibt, _ = _adapter('thin_cushion')
             _ibt._pos = {900001: 1.0}; _ibt._shown = dict(_ibt._pos)
             _dust = [('ESU26', 0.4)]
+            # Аварийность НЕ заменяет доказательства покупки цели: план из неисполнимых
+            # заявок — незаконченная работа, и она судится нормативом (разбор 22.08).
             out['пыль_без_аварии_отвергнута'] = _brt.preview(_dust) is False
-            out['пыль_с_аварией_проходит'] = (
-                _brt.preview(_dust, emergency=True) is True
-                and 'АВАРИЙНЫЙ' in (_brt._preview_pass_why or ''))
+            out['пыль_с_аварией_тоже_отвергнута'] = _brt.preview(_dust, emergency=True) is False
             out['ok'] = all([out['норма_проходит'], out['низкий_отвергнут'],
                              out['авария_не_отмычка'], out['авария_не_отмычка_и_на_дне'],
                              out['исполненное_завершается'], out['пропуск_назван'],
-                             out['пыль_без_аварии_отвергнута'], out['пыль_с_аварией_проходит']])
+                             out['пыль_без_аварии_отвергнута'],
+                             out['пыль_с_аварией_тоже_отвергнута']])
         elif kind == 'правила45: замок книги один на всех писателей':
             # При ручном ADDFUT_BOOK_PATH без ADDFUT_LOCK_DIR голый hold_book_lock() запирал
             # ~/.addfut, а сессия — каталог книги: два писателя одного файла под разными
@@ -4727,7 +4734,7 @@ def _r45pv(r):
     перехода. Незаконный COMPLETE при этом обязан остаться отвергнутым."""
     return (not r['raised'] and r['ok'] is True and r.get('низкий_отвергнут') is True
             and r.get('авария_не_отмычка') is True
-            and r.get('пыль_с_аварией_проходит') is True
+            and r.get('пыль_с_аварией_тоже_отвергнута') is True
             and r.get('исполненное_завершается') is True)
 
 

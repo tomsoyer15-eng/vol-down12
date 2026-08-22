@@ -412,6 +412,10 @@ def guards(capital, u_e, u_b, band, route='F', paper=False):
                         f'{capital:,.0f}; механический пол соблюдён')
             globals().setdefault('_PAPER_NOTES', []).append(out_note)
         else:
+            # КОД ПРИЧИНЫ — ОТ ПРОИЗВОДИТЕЛЯ (ворота 3, правило 8в): «§8 рядом с NLV» есть
+            # и в штатной бумажной строке, где порог НЕ применён, — угадывать нечего.
+            import diagnose as _DGc
+            out.append(f'{_DGc.CAUSE_MARK} КАПИТАЛ-НИЖЕ-ПОРОГА')
             out.append(f'NLV {capital:,.0f} ниже порога маршрута Ф {MIN_NLV_F:,.0f} (§8)')
     for nm, u in (('А', u_e), ('Б', u_b)):
         if u / 2 > band * capital:
