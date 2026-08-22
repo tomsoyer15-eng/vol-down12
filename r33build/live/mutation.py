@@ -1790,6 +1790,27 @@ def _run_mutations():
         orig = _STm45.CODE_ERRORS
         return orig, (), _STm45, 'CODE_ERRORS'
 
+    def diagnose_ignores_cause_codes():
+        """Диагност снова угадывает причину по прозе, игнорируя код производителя — как
+        было до ворот 3: перечень слов отстаёт от текстов, и оператор получает НЕ ТУ
+        причину на самом дорогом событии дня (заглавные буквы, приклеенный хвост, чужой
+        якорь «исход заявки»)."""
+        import diagnose as _DGk
+        orig = _DGk._codes
+        return orig, (lambda body: []), _DGk, '_codes'
+
+    def worm_account_fail_open():
+        """Замер БЕЗ поля account снова заверяется молча — как было до разбора 21.08:
+        условие `if _acc and _want` пропускало пару, принадлежность которой не установима,
+        тогда как transition._live_margins ровно этот случай считает фатальным."""
+        import worm_anchor as _WAa
+        orig = _WAa._registry_margins_mismatch
+
+        def patched(reg, mrg):
+            _r = orig(reg, mrg)
+            return '' if 'не называет счёта' in str(_r) else _r
+        return orig, patched, _WAa, '_registry_margins_mismatch'
+
     def book_lock_ignores_book():
         """Замок книги снова берётся на каталог состояния независимо от того, где книга —
         как было до 45-го круга, №8: при ручном ADDFUT_BOOK_PATH торговля и переходный
@@ -1965,6 +1986,8 @@ def _run_mutations():
             ('позиции снимаются до вердикта', positions_before_verdict),
             ('плоский допуск игнорирует min_prev', gap_tolerance_ignores_min_prev),
             ('остаток лота сравнивается с точным нулём', consume_partial_exact_zero),
+            ('диагност игнорирует коды причин', diagnose_ignores_cause_codes),
+            ('замер без счёта заверяется молча', worm_account_fail_open),
             ('заголовок журнала не сверяется', journal_header_unchecked),
             ('норматив О-3-Е читается как единица', o3e_norm_by_unit),
             ('якорь О-3-Е снова голая подстрока', o3e_signature_by_substring),
