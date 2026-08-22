@@ -4098,12 +4098,17 @@ def _rules45_case(kind):
                 # ОТНОСИТЕЛЬНОЕ ИМЯ БЕЗ КАТАЛОГА ОТВЕРГАЕТСЯ В ОБЕИХ ВЕТКАХ (разбор
                 # 22.08, ворота 1): молчаливый Path('.').parent увёл бы замок в текущий
                 # каталог, и два писателя одной книги разошлись бы по разным flock.
-                _os45.environ['ADDFUT_BOOK_PATH'] = 'book-F.json'
-                try:
-                    _ST45.book_lock_dir()
-                    out['относительный_путь_отвергнут'] = False
-                except ValueError:
-                    out['относительный_путь_отвергнут'] = True
+                # ВСЕ ТРИ ШЕЛЛ-ФОРМЫ ОТНОСИТЕЛЬНОГО ПУТИ (разбор /code-review): голое имя,
+                # './имя' (льгота по точке пропускала ровно её) и подкаталог 'sub/имя'.
+                _rel_bad = []
+                for _relp in ('book-F.json', './book-F.json', 'sub/book-F.json'):
+                    _os45.environ['ADDFUT_BOOK_PATH'] = _relp
+                    try:
+                        _ST45.book_lock_dir()
+                        _rel_bad.append(_relp)
+                    except ValueError:
+                        pass
+                out['относительный_путь_отвергнут'] = not _rel_bad
                 _os45.environ['ADDFUT_BOOK_PATH'] = _bp
                 # Изоляция стенда сильнее правила: заданный ADDFUT_LOCK_DIR обязан побеждать.
                 _os45.environ['ADDFUT_LOCK_DIR'] = _bd2 = _tf45.mkdtemp(prefix='addfut-i45env-')
@@ -4283,6 +4288,14 @@ def _rules45_case(kind):
             _keep_env = {k: _os45.environ.get(k) for k in
                          ('ADDFUT_LOCK_DIR', 'ADDFUT_BOOK_PATH', 'ADDFUT_DFIX_TEST')}
             _keep_reg = _FD46.registry
+            # КАЛЕНДАРЬ ЗАМОРОЖЕН (разбор /code-review 22.08, угол «от живого состояния»).
+            # Стенд зашивал ESU26 против ЖИВОГО exchange_today, а календарный сторож ролла
+            # стоит в предполёте ПЕРВЫМ: с 26.08.2026 (roll_deadline('U26'), через четыре
+            # дня после правки) случай краснел бы навсегда, грязня базлайн всех мутаций
+            # запуска. Дата фиксирована ДО срока ролла и согласована с last_session книги.
+            import pandas as _pd46
+            _keep_today = _FD46.exchange_today
+            _FD46.exchange_today = lambda: _pd46.Timestamp('2026-08-22')
             try:
                 _os45.environ['ADDFUT_LOCK_DIR'] = _bd
                 _os45.environ.pop('ADDFUT_BOOK_PATH', None)
@@ -4306,9 +4319,13 @@ def _rules45_case(kind):
                 out['плановый_остановлен'] = 'реестр серий не читается' in _r1
                 _r2 = _pf(_dst_names=('ES', 'ZN'), emergency=True)
                 out['голая_цель_отвергнута_и_при_аварии'] = 'БЕЗ поставочной серии' in _r2
+                # ЯКОРЬ ПОЛОЖИТЕЛЬНЫЙ (разбор /code-review): «нет подстроки про реестр»
+                # зелено при ЛЮБОМ постороннем отказе — уже сегодня _r3 падал не «проходя»,
+                # а ниже по функции. Достижимость доказывает СЛЕДУЮЩИЙ известный сторож:
+                # дошли до d_fix — значит, сторож реестра пройден.
                 _r3 = _pf(_dst_names=('ESU26', 'ZNU26'), emergency=True)
                 out['авария_с_сериями_проходит_сторожа'] = (
-                    'реестр серий не читается' not in _r3)
+                    'реестр серий не читается' not in _r3 and 'd_fix' in _r3)
                 # ПОЛИТИКА ПУБЛИКАЦИИ — через её собственные точки (извлечены воротами 1).
                 out['нечитаемый_реестр_консервативен'] = (
                     _TR46._registry_keys_or_none() is None
@@ -4342,9 +4359,13 @@ def _rules45_case(kind):
                     _r5 = 'прошёл'
                 except Exception as _e:
                     _r5 = str(_e)
-                out['авария_обходит_порог'] = 'КАПИТАЛ-НИЖЕ-ПОРОГА' not in _r5
+                # Положительный якорь и здесь: обход порога доказан достижением СЛЕДУЮЩЕГО
+                # известного отказа (обязательные аргументы), а не отсутствием подстроки.
+                out['авария_обходит_порог'] = ('КАПИТАЛ-НИЖЕ-ПОРОГА' not in _r5
+                                               and 'обязательн' in _r5)
             finally:
                 _FD46.registry = _keep_reg
+                _FD46.exchange_today = _keep_today
                 for _k, _v in _keep_env.items():
                     if _v is None:
                         _os45.environ.pop(_k, None)

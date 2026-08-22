@@ -69,47 +69,36 @@ def executable(path):
     return _out
 
 
-def stmt_spans(path):
-    """Диапазоны многострочных предложений файла: (первая строка -> все строки).
+def file_facts(path):
+    """Один AST-разбор файла: (диапазоны ПРОСТЫХ многострочных предложений, строки
+    перехватов-всех).
 
-    LINE-событие приходит на ОДНУ строку предложения, а co_lines перечисляет их все:
-    первая строка `_pv = (broker.preview(...)` числилась «не исполнялось», хотя выражение
-    исполняется каждой сессией батареи. Правило: строка исполнена, если исполнена любая
-    строка того же предложения. Огрубляет ровно на границе предложения — не больше.
+    ПРОСТЫХ — решающее слово (разбор /code-review 22.08, доказано шестью углами разом).
+    Первая редакция брала ВСЕ ast.stmt, а у составных (def, if, try, for, with) диапазон —
+    всё тело: строка `def` исполняется импортом, и спан FunctionDef «зачитывал» функцию
+    целиком — 2970 из 3126 строк transition.py от одних def-строк, то есть ворота мерили
+    «модуль импортирован», а не «ветка исполнена». Простое предложение — то, у которого нет
+    собственного тела: у него совпадение любой строки действительно означает исполнение.
+
+    Второй разбор на файл (catchall_lines) слит сюда же: он звался ВНУТРИ построчного
+    цикла — полный парс файла на каждую однобокую строку.
     """
     import ast
     try:
         _tree = ast.parse(Path(path).read_text(encoding='utf-8'))
     except (OSError, SyntaxError):
-        return []
-    _out = []
+        return [], set()
+    _spans, _catch = [], set()
     for _n in ast.walk(_tree):
-        if isinstance(_n, ast.stmt) and getattr(_n, 'end_lineno', None) \
-                and _n.end_lineno > _n.lineno:
-            _out.append((set(range(_n.lineno, _n.end_lineno + 1))))
-    return _out
-
-
-def catchall_lines(path):
-    """Строки `except Exception:`/`except:` — у их ветвления НЕТ второй стороны.
-
-    BRANCH-событие на строке except означает «совпал тип / пробуем следующий», а
-    перехват-всех не может не совпасть, когда до него дошли: однобокость здесь —
-    свойство конструкции, а не пробел прогона. Первое чистое измерение оставило ровно
-    одну такую строку — и это была она.
-    """
-    import ast
-    try:
-        _tree = ast.parse(Path(path).read_text(encoding='utf-8'))
-    except (OSError, SyntaxError):
-        return set()
-    _out = set()
-    for _n in ast.walk(_tree):
+        if isinstance(_n, ast.stmt) and not hasattr(_n, 'body') \
+                and getattr(_n, 'end_lineno', None) and _n.end_lineno > _n.lineno:
+            _spans.append(set(range(_n.lineno, _n.end_lineno + 1)))
         if isinstance(_n, ast.ExceptHandler):
             _t = _n.type
             if _t is None or (isinstance(_t, ast.Name) and _t.id == 'Exception'):
-                _out.add(_n.lineno)
-    return _out
+                # У перехвата-всех нет второй стороны: «не совпал» невозможен.
+                _catch.add(_n.lineno)
+    return _spans, _catch
 
 
 def measure(target):
@@ -183,23 +172,26 @@ def main():
             getattr(I, _f)()
 
     seen, one_sided = measure(_run)
-    bad_lines, bad_branch, infra = [], [], []
+    bad_lines, bad_branch, infra, infra_branch = [], [], [], []
     for f, lines in sorted(diff.items()):
         _ex = set(seen.get(f, set()))
-        for _span in stmt_spans(f):
+        _spans, _catch = file_facts(f)
+        for _span in _spans:
             if _ex & _span:
                 _ex |= _span
         _test_infra = f.endswith('invariants.py')
         for ln in sorted(lines):
+            _name = f'{Path(f).relative_to(ROOT)}:{ln}'
             if ln not in _ex:
-                (_test_infra and infra or bad_lines).append(
-                    f'{Path(f).relative_to(ROOT)}:{ln}')
-            elif (f, ln) in one_sided and not _test_infra \
-                    and ln not in catchall_lines(f):
-                # Однобокость тестовой обвязки — шум по построению: отказные ветки зондов
-                # исполняются только при красной батарее, restore-ветки — при заданной
-                # переменной. Для боевого кода однобокость остаётся отказом.
-                bad_branch.append(f'{Path(f).relative_to(ROOT)}:{ln}')
+                # ЯВНЫЙ if/else (разбор /code-review 22.08): идиома `X and A or B` при
+                # ПУСТОМ списке A всегда выбирала B — канал «справочно» был мёртв навсегда,
+                # а строки обвязки падали бы в боевой отказ. Тот самый «тождественно
+                # ложный по построению» класс — в инструменте, построенном его ловить.
+                (infra if _test_infra else bad_lines).append(_name)
+            elif (f, ln) in one_sided and ln not in _catch:
+                # Однобокость обвязки — не отказ (отказные ветки зондов исполняются только
+                # при красной батарее), но и не молчание: справочный список, как у строк.
+                (infra_branch if _test_infra else bad_branch).append(_name)
     _n = sum(len(v) for v in diff.values())
     print(f'изменённых строк питона: {_n}; батарея исполнила: {_n - len(bad_lines)}')
     if bad_lines:
@@ -210,10 +202,11 @@ def main():
         print(f'\nВЗЯТЫ ТОЛЬКО В ОДНУ СТОРОНУ ({len(bad_branch)}):')
         for b in bad_branch:
             print(f'   {b}')
-    if infra:
-        print(f'\nТЕСТОВАЯ ОБВЯЗКА, НЕ ИСПОЛНЯЛАСЬ (справочно, {len(infra)}):')
-        for b in infra:
-            print(f'   {b}')
+    for _tag, _lst in (('НЕ ИСПОЛНЯЛАСЬ', infra), ('ОДНОБОКА', infra_branch)):
+        if _lst:
+            print(f'\nТЕСТОВАЯ ОБВЯЗКА, {_tag} (справочно, {len(_lst)}):')
+            for b in _lst:
+                print(f'   {b}')
     return 1 if (bad_lines or bad_branch) else 0
 
 
