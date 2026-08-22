@@ -855,12 +855,22 @@ def _a45nopl(beh):
     _dust_no = _br_t.preview([('ESU26', 0.4)]) is False
     _dust_em = _br_t.preview([('ESU26', 0.4)], emergency=True) is False
     _dust_ok = _br_h.preview([('ESU26', 0.4)]) is True
+    # ЗДОРОВЫЙ ЗАПАС ПРОПУСКАЕТ РАЗГРУЗКУ И ПРИ НЕЧИТАЕМОМ ЗАМЕРЕ (ворота 1: ветка
+    # `_o3e_ok` в разгрузке исполнялась только в отказ). SAME_API держит красный конец —
+    # тонкий запас без замера; здесь зелёный: норматив здоров, замер не нужен.
+    import ib_broker as _IBn
+    _keep_rel = _IBn.IBBroker._release_by_measure
+    _IBn.IBBroker._release_by_measure = lambda self, orders: False
+    try:
+        _rel_ok = _br_h.preview([('CSPX', -5.0)]) is True
+    finally:
+        _IBn.IBBroker._release_by_measure = _keep_rel
 
     if _c_h is None or float(_c_h) < _DLn.O3E_MIN:
         return False            # здоровый конец обязан быть здоровым, иначе доказано ничто
     _ok = _br_h.preview() is True and _br_h._preview_why == ''
     return (_thin_no and _emerg and _done and _dust_no and _dust_em
-            and _dust_ok and _ok)
+            and _dust_ok and _rel_ok and _ok)
 
 
 def _dref_probe(br):
@@ -2428,6 +2438,7 @@ RUN_CASES = (
              'правила45: ошибка кода не переодевается календарём',
              'правила45: предполёт передачи не переодевает ошибку кода',
              'правила45: проба О-3-Е читает позиции только при нужде',
+             'правила45: сторож серий и порог капитала перехода',
 'наблюдение', 'торговля', 'незамкнутая предыдущая',
              'посторонняя позиция', 'замыкание', 'замыкание рано', 'маршрут Е',
              'замыкание повторное', 'замыкание за чужую дату', 'три сессии подряд',
@@ -2457,6 +2468,7 @@ RUN_CASES = (
              'worm: подмена содержимого при коммите ловится',
              'worm: архив разных поколений помечается',
              'worm: ШТАТНЫЙ снимок проходит целиком',
+             'worm: расхождение пары заверяется, а не роняет замыкание',
              'worm: ВТОРОЙ снимок боевым вызовом',
              'worm: утрата заверенного замера',
              'автопилот: причина тревоги не затирается общей',
@@ -4073,6 +4085,16 @@ def _rules45_case(kind):
                 _named = str(_ST45._lock_target(_ST45.book_lock_dir(Path(_bp))))
                 out['голый_и_явный_совпали'] = (_naked == _named)
                 out['замок_у_книги'] = (_naked == _bd)
+                # ОТНОСИТЕЛЬНОЕ ИМЯ БЕЗ КАТАЛОГА ОТВЕРГАЕТСЯ В ОБЕИХ ВЕТКАХ (разбор
+                # 22.08, ворота 1): молчаливый Path('.').parent увёл бы замок в текущий
+                # каталог, и два писателя одной книги разошлись бы по разным flock.
+                _os45.environ['ADDFUT_BOOK_PATH'] = 'book-F.json'
+                try:
+                    _ST45.book_lock_dir()
+                    out['относительный_путь_отвергнут'] = False
+                except ValueError:
+                    out['относительный_путь_отвергнут'] = True
+                _os45.environ['ADDFUT_BOOK_PATH'] = _bp
                 # Изоляция стенда сильнее правила: заданный ADDFUT_LOCK_DIR обязан побеждать.
                 _os45.environ['ADDFUT_LOCK_DIR'] = _bd2 = _tf45.mkdtemp(prefix='addfut-i45env-')
                 out['окружение_сильнее'] = (str(_ST45._lock_target()) == _bd2)
@@ -4086,6 +4108,7 @@ def _rules45_case(kind):
                     else:
                         _os45.environ[_k] = _v
             out['ok'] = all([out['голый_и_явный_совпали'], out['замок_у_книги'],
+                             out['относительный_путь_отвергнут'],
                              out['окружение_сильнее'], out.get('замок_берётся') is True])
         elif kind == 'правила45: журнал не дописывается под мусорной шапкой':
             # Проверка заголовка стояла в read(), а append брал предыдущий хэш своим,
@@ -4143,6 +4166,14 @@ def _rules45_case(kind):
             out['код_различает_неизмеренное'] = (
                 any('НЕ измерен' in c for c in _c6)
                 and not any('ниже норматива' in c for c in _c6))
+            # ЯКОРЬ «ИСХОД ЗАЯВКИ» ТРЕБУЕТ ЗАЯВКИ В СТРОКЕ; ДУБЛЬ КОДА НЕ ДВОИТ ПРИЧИНУ,
+            # ЧУЖОЙ КОД НЕ РОНЯЕТ (разбор 22.08, ворота 1 — обе стороны фильтра _codes).
+            _c9 = _causes('исход заявки НЕИЗВЕСТЕН: подача оборвана, permId не получен')
+            out['исход_заявки_по_заявке'] = any('исход заявки' in c for c in _c9)
+            _c10 = _causes(f'{_m} O3E-ПРОБИТ\n{_m} O3E-ПРОБИТ\n{_m} НЕ-КОД\n'
+                           f'запас О-3-Е 1.20x ниже 1.4 — книга сокращена')
+            out['дубль_кода_не_двоит'] = (
+                sum(1 for c in _c10 if 'ниже норматива О-3-Е' in c) == 1)
             _c4 = _causes(_ned)
             out['недоступность_не_дублируется'] = (
                 any('не отдаёт живой запас' in c for c in _c4)
@@ -4151,7 +4182,9 @@ def _rules45_case(kind):
                              out['здоровый_не_даёт_маржи'], out['маржа_видна'],
                              out['недоступность_не_дублируется'],
                              out['код_сильнее_прозы'],
-                             out['код_различает_неизмеренное']])
+                             out['код_различает_неизмеренное'],
+                             out['исход_заявки_по_заявке'],
+                             out['дубль_кода_не_двоит']])
         elif kind == 'правила45: пара реестра и замера сверяется':
             # Якорь хэшировал оба файла порознь и заверял НЕСОВМЕСТИМУЮ пару. Область
             # сверки — FUT (замеряет их только first_connect), направления — оба.
@@ -4218,6 +4251,99 @@ def _rules45_case(kind):
              out['живое_не_пишет_кэш']) = _dref_probe(_b)
             out['ok'] = all([out['закреплённое_читается_раз'], out['живое_не_залипает'],
                              out['живое_не_пишет_кэш']])
+        elif kind == 'правила45: сторож серий и порог капитала перехода':
+            # ВОРОТА 1 (правило 8в): первое измерение показало, что три ветки, заведённые
+            # разбором 22.08, не исполняются батареей НИ РАЗУ — аварийная ветка реестра в
+            # предполёте, консервативная политика публикации и порог NLV перехода в Ф.
+            # Незапущенный сторож — это класс, с которого ворота и начались.
+            import sys as _sy46
+            _lv46 = str(ROOT)
+            if _lv46 not in _sy46.path:
+                _sy46.path.insert(0, _lv46)
+            import dataclasses as _dc46
+            import daily as _DL46
+            import feed as _FD46
+            import state as _ST46
+            import transition as _TR46
+            _bd = _tf45.mkdtemp(prefix='addfut-i46reg-')
+            _keep_env = {k: _os45.environ.get(k) for k in
+                         ('ADDFUT_LOCK_DIR', 'ADDFUT_BOOK_PATH', 'ADDFUT_DFIX_TEST')}
+            _keep_reg = _FD46.registry
+            try:
+                _os45.environ['ADDFUT_LOCK_DIR'] = _bd
+                _os45.environ.pop('ADDFUT_BOOK_PATH', None)
+                _os45.environ['ADDFUT_DFIX_TEST'] = '1'
+                (Path(_bd) / 'route.txt').write_text('E', encoding='utf-8')
+                _b = _dc46.replace(_DL46.BookE(), last_session='2026-08-21',
+                                   close_provisional=False)
+                _ST46.save(_ST46.book_path('E'), _b, 'E', 1)
+
+                def _boom(*a, **k):
+                    raise _FD46.FeedError('нет реестра (стенд)')
+                _FD46.registry = _boom
+
+                def _pf(**kw):
+                    try:
+                        _TR46._preflight_handover('E', 'F', **kw)
+                        return 'прошёл'
+                    except Exception as _e:
+                        return str(_e)
+                _r1 = _pf(_dst_names=('ESU26', 'ZNU26'))
+                out['плановый_остановлен'] = 'реестр серий не читается' in _r1
+                _r2 = _pf(_dst_names=('ES', 'ZN'), emergency=True)
+                out['голая_цель_отвергнута_и_при_аварии'] = 'БЕЗ поставочной серии' in _r2
+                _r3 = _pf(_dst_names=('ESU26', 'ZNU26'), emergency=True)
+                out['авария_с_сериями_проходит_сторожа'] = (
+                    'реестр серий не читается' not in _r3)
+                # ПОЛИТИКА ПУБЛИКАЦИИ — через её собственные точки (извлечены воротами 1).
+                out['нечитаемый_реестр_консервативен'] = (
+                    _TR46._registry_keys_or_none() is None
+                    and _TR46._series_required(None) is True)
+                _FD46.registry = lambda *a, **k: (_ for _ in ()).throw(
+                    TypeError('опечатка (стенд)'))
+                try:
+                    _TR46._registry_keys_or_none()
+                    out['ошибка_кода_не_глотается'] = False
+                except TypeError:
+                    out['ошибка_кода_не_глотается'] = True
+                except Exception:
+                    out['ошибка_кода_не_глотается'] = False
+                out['серии_реестра_требуют'] = (
+                    _TR46._series_required(['ESU26', 'ZNU26']) is True
+                    and _TR46._series_required(['ES', 'ZN']) is False)
+                # ПОРОГ КАПИТАЛА ПЕРЕХОДА В Ф: батарея живёт на бумажных капиталах выше
+                # порога, и ветка не исполнялась никогда. Оба конца: без аварии — Incident
+                # с кодом причины; с аварией порог обходится (падение дальше — ДРУГОЕ).
+                _FD46.registry = _keep_reg
+                try:
+                    _TR46.execute(None, str(Path(_bd) / 'tr.json'), 2_900_000, {},
+                                  'sig-стенд', 'E', to_route='F')
+                    _r4 = 'прошёл'
+                except Exception as _e:
+                    _r4 = str(_e)
+                out['порог_капитала_держит'] = 'КАПИТАЛ-НИЖЕ-ПОРОГА' in _r4
+                try:
+                    _TR46.execute(None, str(Path(_bd) / 'tr.json'), 2_900_000, {},
+                                  'sig-стенд', 'E', to_route='F', emergency=True)
+                    _r5 = 'прошёл'
+                except Exception as _e:
+                    _r5 = str(_e)
+                out['авария_обходит_порог'] = 'КАПИТАЛ-НИЖЕ-ПОРОГА' not in _r5
+            finally:
+                _FD46.registry = _keep_reg
+                for _k, _v in _keep_env.items():
+                    if _v is None:
+                        _os45.environ.pop(_k, None)
+                    else:
+                        _os45.environ[_k] = _v
+            out['ok'] = all([out['плановый_остановлен'],
+                             out['голая_цель_отвергнута_и_при_аварии'],
+                             out['авария_с_сериями_проходит_сторожа'],
+                             out['нечитаемый_реестр_консервативен'],
+                             out['ошибка_кода_не_глотается'],
+                             out['серии_реестра_требуют'],
+                             out['порог_капитала_держит'],
+                             out['авария_обходит_порог']])
         elif kind == 'правила45: проба О-3-Е читает позиции только при нужде':
             # ТЕЛО ПРОБЫ ИСПОЛНЯЕТСЯ, А НЕ ПЕРЕСКАЗЫВАЕТСЯ. Стенд ветки `case` кормит
             # dispatch готовыми вердиктами и потому слеп к тому, КАК вердикт получен: мутация
@@ -4445,6 +4571,45 @@ def _worm_case(kind):
         _sig13 = Path(tmp) / 'signals_live.csv'
         (Path(tmp) / 'signals_live.csv.sha256').write_text(
             _hl13.sha256(_sig13.read_bytes()).hexdigest() + '\n', encoding='utf-8')
+        if kind == 'worm: расхождение пары заверяется, а не роняет замыкание':
+            # РАЗБОР 22.08, ворота 1: ветка WARN в _anchor_body не исполнялась ни разу —
+            # живая пара согласована, и рабочий режим ослабленного запрета был не испытан
+            # вовсе (угол «траектория, а не снимок»). Проверяются ТРИ обещания правки:
+            # снимок ПРОХОДИТ (расхождение больше не останавливает замыкание), расхождение
+            # ЗАВЕРЕНО в теле якоря (задним числом не переписать), и оператору оставлен
+            # WARN-файл с кодом причины.
+            bdir = Path(tmp) / 'backups'
+            rdp = Path(tempfile.mkdtemp(prefix='addfut-git-pair-'))
+            subprocess.run(['git', 'init', '-q', str(rdp)], check=True, capture_output=True)
+            for _k, _v in (('user.email', 'stend@local'), ('user.name', 'stend')):
+                subprocess.run(['git', '-C', str(rdp), 'config', _k, _v],
+                               check=True, capture_output=True)
+            (rdp / 'anchors').mkdir()
+            keep_root, keep_anch = WA.ROOT, WA.ANCHORS
+            keep_mm = WA._registry_margins_mismatch
+            WA.ROOT, WA.ANCHORS = rdp, rdp / 'anchors'
+            WA._registry_margins_mismatch = lambda reg, mrg: 'тест-расхождение поколений'
+            try:
+                WA.snap('2026-08-14', bdir)
+                _rab = sorted(x.name for x in bdir.glob('addfut-*.tgz'))
+                _anch = sorted(x.name for x in (rdp / 'anchors').glob('worm-*.txt'))
+                _txt = ((rdp / 'anchors' / _anch[0]).read_text(encoding='utf-8')
+                        if _anch else '')
+                _warn = Path(tmp) / 'WARN-registry-margins-2026-08-14.txt'
+                out['снимок_прошёл'] = bool(_rab) and bool(_anch)
+                out['расхождение_в_якоре'] = (
+                    'пара реестр/замер: тест-расхождение поколений' in _txt)
+                out['warn_с_кодом'] = (_warn.exists() and
+                                       'ПАРА-ПОКОЛЕНИЙ' in _warn.read_text(encoding='utf-8'))
+                out['ok'] = all([out['снимок_прошёл'], out['расхождение_в_якоре'],
+                                 out['warn_с_кодом']])
+            except Exception as ex:
+                out['raised'] = True
+                out['error'] = f'{type(ex).__name__}: {ex}'
+            finally:
+                WA.ROOT, WA.ANCHORS = keep_root, keep_anch
+                WA._registry_margins_mismatch = keep_mm
+            return out
         if kind == 'worm: ШТАТНЫЙ снимок проходит целиком':
             # ТРИДЦАТЫЙ КРУГ, №11. Успешный производственный путь snap() не исполнял НИ
             # ОДИН стенд: единственный вызов проверял ОТКАЗ. Поэтому правка, из-за которой
@@ -4861,6 +5026,29 @@ def _r45probe(r):
     здесь целиком, семью состояниями: одного «пустая книга законна» мало."""
     return (not r['raised'] and r['ok'] is True and r.get('тело_вырезано') is True
             and r.get('низкий_переживает_отказ_позиций') is True)
+
+
+
+@rinv('нечитаемый реестр не выключает сторожа серий и не запирает аварию',
+      needs=lambda r: r['case'] == 'правила45: сторож серий и порог капитала перехода')
+def _r46reg(r):
+    """Ворота 1 (правило 8в). Три ветки разбора 22.08 не исполнялись батареей ни разу:
+    аварийная ветка реестра в предполёте, консервативная политика публикации, порог NLV
+    перехода в Ф. Все три — с обоими концами."""
+    return (not r['raised'] and r['ok'] is True
+            and r.get('ошибка_кода_не_глотается') is True
+            and r.get('порог_капитала_держит') is True)
+
+
+
+@rinv('расхождение поколений заверяется в якоре и не останавливает замыкание',
+      needs=lambda r: r['case'] == 'worm: расхождение пары заверяется, а не роняет замыкание')
+def _r46pair(r):
+    """Разбор 22.08. Ослабленный запрет (WARN вместо RuntimeError) не исполнялся ни разу:
+    живая пара согласована. Три обещания сразу: снимок проходит, расхождение в теле якоря,
+    WARN-файл с кодом причины оставлен оператору."""
+    return (not r['raised'] and r['ok'] is True
+            and r.get('расхождение_в_якоре') is True)
 
 
 @rinv('возраст сердцебиения читается по содержимому, а touch его не лечит',

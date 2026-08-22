@@ -1811,6 +1811,31 @@ def _run_mutations():
             return '' if 'не называет счёта' in str(_r) else _r
         return orig, patched, _WAa, '_registry_margins_mismatch'
 
+    def series_required_off():
+        """Сторож серий публикации снова выключается — _series_required отвечает «не
+        требуется» при любом реестре: книга Ф публикуется с пустыми ser_a/ser_b, ролл
+        никогда не наступает, нога идёт в поставку. Точка одна — ворота 1 её и извлекли."""
+        import sys as _s5, os as _o5
+        _lv5 = _o5.path.join(_o5.path.dirname(_o5.path.abspath(__file__)), '..')
+        if _lv5 not in _s5.path:
+            _s5.path.insert(0, _lv5)
+        import transition as _TR5
+        orig = _TR5._series_required
+        return orig, (lambda reg_keys: False), _TR5, '_series_required'
+
+    def registry_read_swallows_code_errors():
+        """Чтение реестра публикации снова глотает ошибки кода — TypeError становится
+        «реестр нечитаем, консервативно» вместо трассировки: опечатка чинится деньгами."""
+        import transition as _TR6
+        orig = _TR6._registry_keys_or_none
+
+        def patched():
+            try:
+                return orig()
+            except Exception:
+                return None
+        return orig, patched, _TR6, '_registry_keys_or_none'
+
     def book_lock_ignores_book():
         """Замок книги снова берётся на каталог состояния независимо от того, где книга —
         как было до 45-го круга, №8: при ручном ADDFUT_BOOK_PATH торговля и переходный
@@ -1986,6 +2011,8 @@ def _run_mutations():
             ('позиции снимаются до вердикта', positions_before_verdict),
             ('плоский допуск игнорирует min_prev', gap_tolerance_ignores_min_prev),
             ('остаток лота сравнивается с точным нулём', consume_partial_exact_zero),
+            ('сторож серий публикации выключен', series_required_off),
+            ('чтение реестра глотает ошибки кода', registry_read_swallows_code_errors),
             ('диагност игнорирует коды причин', diagnose_ignores_cause_codes),
             ('замер без счёта заверяется молча', worm_account_fail_open),
             ('заголовок журнала не сверяется', journal_header_unchecked),
@@ -2021,6 +2048,11 @@ def _note_killers(family, label, bad):
         _f.setdefault(_name, set()).add(label)
     return bad
 
+
+# ЧЕСТНОЕ ИЗМЕРЕНИЕ ВОРОТ 2 (правило 8в): ADDFUT_MUT_FULL=1 снимает досрочный выход в
+# судействе RUN — тогда таблица «кого убила каждая мутация» полна, а не обрезана первым
+# несогласием. Обычный прогон остаётся быстрым: вердикт «поймана» от полноты не зависит.
+import os as _os_mf
 
 def _mutate_autopilot(was, now, prefix, что):
     """МУТАЦИЯ БОЕВОГО ШЕЛЛА — ОДНИМ ПОМОЩНИКОМ (разбор /code-review 45-го круга).
@@ -2921,7 +2953,7 @@ def run_run_mutations():
                 # ДОСРОЧНЫЙ ВЫХОД (рецензия 20.08): «поймана» доказывает ПЕРВОЕ несогласное
                 # утверждение; вердикт «не поймал НИКТО» по-прежнему требует полного
                 # прогона — при пустом bad выход не срабатывает по построению.
-                _, bad = I.run_run(stop_on_first=True)
+                _, bad = I.run_run(stop_on_first=(_os_mf.environ.get('ADDFUT_MUT_FULL') != '1'))
             finally:
                 setattr(holder, attr, orig)
             print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
@@ -2939,7 +2971,7 @@ def run_run_mutations():
             holder = SS if hasattr(SS, attr) else FD
         setattr(holder, attr, patched)
         try:
-            _, bad = I.run_run(stop_on_first=True)      # то же (рецензия 20.08)
+            _, bad = I.run_run(stop_on_first=(_os_mf.environ.get('ADDFUT_MUT_FULL') != '1'))      # то же (рецензия 20.08)
         finally:
             setattr(holder, attr, orig)
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')

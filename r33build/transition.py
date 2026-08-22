@@ -2442,6 +2442,39 @@ def open_session_in_journal(jp, day, sess_no, from_route, to_route, was_used):
              f'{from_route}->{to_route})'))
 
 
+def _registry_keys_or_none():
+    """Имена живого реестра ЛИБО None — «реестр нечитаем», доменная неизвестность.
+
+    Одна точка чтения реестра для ПУБЛИКАЦИИ книги (hand_over_book). Ошибка кода падает
+    своим типом; доменный отказ не глотается молча и не останавливает публикацию (деньги
+    уже двинулись) — он становится None, и решение принимает _series_required,
+    консервативно. Вынесено из тела hand_over_book по воротам 1 (правило 8в): ветка в ста
+    сорока строках от входа была недостижима стендом, то есть ненаблюдаема.
+    """
+    try:
+        import feed as _FDs
+        return list(_FDs.registry().keys())
+    except _STce_tr.CODE_ERRORS:
+        raise
+    except Exception as _ers:
+        print(f'ВНИМАНИЕ: живой реестр серий не читается ({_ers}); требование серии '
+              f'считается действующим (консервативно)')
+        return None
+
+
+def _series_required(reg_keys):
+    """Требуется ли поставочная серия в позициях публикуемой книги Ф.
+
+    None = реестр неизвестен — консервативно ДА: опасен ровно один исход, голые имена в
+    позициях, и лучше отвергнуть их зря, чем выпустить книгу без ser_a/ser_b, которая не
+    роллируется и идёт в поставку.
+    """
+    if reg_keys is None:
+        return True
+    return any(str(k) not in ('ES', 'MES', 'ZN') and str(k).startswith(('ES', 'MES', 'ZN'))
+               for k in reg_keys)
+
+
 def hand_over_book(broker, from_route, to_route, positions=None):
     """Передать книгу ежедневному контуру после перевода маршрута.
 
@@ -2581,18 +2614,7 @@ def hand_over_book(broker, from_route, to_route, positions=None):
         # Опасен ровно один исход — ГОЛЫЕ имена в позициях; его сторож ниже и ловит, а при
         # неизвестном реестре считаем, что серия требуется. Позиции с сериями публикуются
         # как обычно: там книга родится роллируемой, и останавливать нечего.
-        try:
-            import feed as _FDs
-            _reg_keys = list(_FDs.registry().keys())
-        except _STce_tr.CODE_ERRORS:
-            raise
-        except Exception as _ers:
-            _reg_keys = None
-            print(f'ВНИМАНИЕ: живой реестр серий не читается ({_ers}); требование серии '
-                  f'считается действующим (консервативно)')
-        _reg_has_series = True if _reg_keys is None else any(
-            str(k) not in ('ES', 'MES', 'ZN') and str(k).startswith(('ES', 'MES', 'ZN'))
-            for k in _reg_keys)
+        _reg_has_series = _series_required(_registry_keys_or_none())
         def _ser_of(k):                    # ТА ЖЕ логика, что у state.book_from_broker
             k = str(k)
             if k.startswith('MES'): return k[3:]
