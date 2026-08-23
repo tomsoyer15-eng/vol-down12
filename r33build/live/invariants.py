@@ -83,6 +83,11 @@ ROOT = Path(__file__).resolve().parent.parent
 # _adapter: «проверки, опиравшиеся на рабочий каталог, падали на распакованном архиве».
 # Настоящий файл лежит рядом с этим модулем и есть в манифесте.
 AUTOPILOT_SH = ROOT / 'live' / 'autopilot.sh'
+# Ворота покрытия — инструмент РЕПОЗИТОРИЯ, пакет его не несёт (MANIFEST — только r33build):
+# случай самопроверки и его судья регистрируются ТОЛЬКО рядом с инструментом, иначе батарея
+# распакованного пакета падала бы FileNotFoundError, а вакуумная регистрация без случая
+# роняла бы её «нулевым покрытием» (разбор /code-review 23.08 — блокер каждого выпуска).
+BRANCH_COVER = ROOT.parent / 'tools' / 'branch_cover.py'
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / 'live'))
 import pandas as pd
 import sim_v13 as S
@@ -2450,7 +2455,6 @@ RUN_CASES = (
              'правила45: проба О-3-Е читает позиции только при нужде',
              'правила45: сторож серий и порог капитала перехода',
              'правила45: оркестратор перехода исполняется батареей',
-             'правила45: ворота покрытия наблюдают сами себя',
 'наблюдение', 'торговля', 'незамкнутая предыдущая',
              'посторонняя позиция', 'замыкание', 'замыкание рано', 'маршрут Е',
              'замыкание повторное', 'замыкание за чужую дату', 'три сессии подряд',
@@ -2489,6 +2493,10 @@ RUN_CASES = (
              'автопилот: пустая книга Е не считается слепотой',
 )
 
+
+# Регистрация — только в репозитории (см. BRANCH_COVER выше).
+if BRANCH_COVER.exists():
+    RUN_CASES = RUN_CASES + ('правила45: ворота покрытия наблюдают сами себя',)
 
 _ROLLGAP_K = 2
 
@@ -4288,8 +4296,7 @@ def _rules45_case(kind):
             # модуль с ЗАВЕДОМО неисполненной веткой обязан остаться незачтённым, а
             # многострочное простое предложение — склеиться.
             import importlib.util as _ilu46
-            _bcp = ROOT.parent / 'tools' / 'branch_cover.py'
-            _spec = _ilu46.spec_from_file_location('bc46', str(_bcp))
+            _spec = _ilu46.spec_from_file_location('bc46', str(BRANCH_COVER))
             _bc = _ilu46.module_from_spec(_spec)
             _spec.loader.exec_module(_bc)
             _d = Path(_tf45.mkdtemp(prefix='addfut-i46bc-'))
@@ -4329,6 +4336,15 @@ def _rules45_case(kind):
             _keep_env = {k: _os45.environ.get(k) for k in
                          ('ADDFUT_LOCK_DIR', 'ADDFUT_BOOK_PATH', 'ADDFUT_ASOF_OVERRIDE',
                           'ADDFUT_MARGINS', 'ADDFUT_REGISTRY')}
+            # СЛУЖЕБНЫЙ КАТАЛОГ МР — ВРЕМЕННЫЙ, КАК У СОСЕДНЕГО СЛУЧАЯ (правило 5; разбор
+            # /code-review 23.08, находка с ЖИВЫМ повреждением). Первая редакция звала
+            # test_configure БЕЗ set_state_dir_for_tests — и ПЕРЕЗАПИСЫВАЛА боевой
+            # deploy-файл ~/.add-fut указателем на временную фикстуру, брала боевой замок
+            # стратегии и поднимала эпоху: пин МР на машине оказался мусорным (и WORM
+            # заверял мусор). Машинное состояние перепиновано вручную на настоящий журнал;
+            # здесь — изоляция, чтобы класс не воспроизводился.
+            _keep_mrdir = _M47._STATE['dir']
+            _M47.set_state_dir_for_tests(str(_bd / 'mr-install'))
             try:
                 _os45.environ['ADDFUT_LOCK_DIR'] = str(_bd)
                 _os45.environ.pop('ADDFUT_BOOK_PATH', None)
@@ -4468,6 +4484,7 @@ def _rules45_case(kind):
                 out['отказ_откладывает'] = (_r2.get('status') == 'POSTPONED'
                                             and _r2.get('postponed') == 1)
             finally:
+                _M47.set_state_dir_for_tests(_keep_mrdir)
                 for _k, _v in _keep_env.items():
                     if _v is None:
                         _os45.environ.pop(_k, None)
@@ -5342,13 +5359,16 @@ def _r47orch(r):
 
 
 
-@rinv('ворота покрытия не зачитывают неисполненное и склеивают многострочное',
-      needs=lambda r: r['case'] == 'правила45: ворота покрытия наблюдают сами себя')
-def _r46gate(r):
-    """Правило 4 для фильтров ворот: их fail-open (затопление спанов от строки def)
-    держался сутки и произвёл ложное «279/279» в BRIEF рецензенту."""
-    return (not r['raised'] and r['ok'] is True
-            and r.get('тела_не_затапливаются') is True)
+if BRANCH_COVER.exists():
+    @rinv('ворота покрытия не зачитывают неисполненное и склеивают многострочное',
+          needs=lambda r: r['case'] == 'правила45: ворота покрытия наблюдают сами себя')
+    def _r46gate(r):
+        """Правило 4 для фильтров ворот: их fail-open (затопление спанов от строки def)
+        держался сутки и произвёл ложное «279/279» в BRIEF рецензенту. Вне репозитория
+        (в распакованном пакете) ни случая, ни судьи нет — инструмент и его наблюдатель
+        путешествуют вместе."""
+        return (not r['raised'] and r['ok'] is True
+                and r.get('тела_не_затапливаются') is True)
 
 
 @rinv('возраст сердцебиения читается по содержимому, а touch его не лечит',
