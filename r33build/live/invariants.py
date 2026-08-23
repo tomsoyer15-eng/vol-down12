@@ -2449,6 +2449,7 @@ RUN_CASES = (
              'правила45: предполёт передачи не переодевает ошибку кода',
              'правила45: проба О-3-Е читает позиции только при нужде',
              'правила45: сторож серий и порог капитала перехода',
+             'правила45: оркестратор перехода исполняется батареей',
 'наблюдение', 'торговля', 'незамкнутая предыдущая',
              'посторонняя позиция', 'замыкание', 'замыкание рано', 'маршрут Е',
              'замыкание повторное', 'замыкание за чужую дату', 'три сессии подряд',
@@ -4278,6 +4279,170 @@ def _rules45_case(kind):
              out['живое_не_пишет_кэш']) = _dref_probe(_b)
             out['ok'] = all([out['закреплённое_читается_раз'], out['живое_не_залипает'],
                              out['живое_не_пишет_кэш']])
+        elif kind == 'правила45: оркестратор перехода исполняется батареей':
+            # СЛОЙ 5 РЕЕСТРА, ОТКРЫВАЮЩАЯ РАБОТА (честные ворота 1, 22.08). Стенды перехода
+            # гоняли _run_lots/pv_remainder НАПРЯМУЮ, а сам _execute_locked — вызовы
+            # предполёта и предпросмотра, счётчик POSTPONED, статус COMPLETE — батарея не
+            # исполняла ВООБЩЕ: он был покрыт только selfcheck-ом выпуска. Значит стык
+            # «оркестратор -> preview/предполёт» (в нём этот круг уже находил NameError и
+            # тождественно ложный флаг) жил без стенда. Обвязка портирована из selfcheck:
+            # книги согласованы с позициями стаба, журнал МР несёт сигнал и одобрение.
+            import daily as _DL47
+            import journal as _J47
+            import mr_engine as _M47
+            import state as _ST47
+            import transition as _TR47
+            _bd = Path(_tf45.mkdtemp(prefix='addfut-i47orch-'))
+            _keep_env = {k: _os45.environ.get(k) for k in
+                         ('ADDFUT_LOCK_DIR', 'ADDFUT_BOOK_PATH', 'ADDFUT_ASOF_OVERRIDE',
+                          'ADDFUT_MARGINS', 'ADDFUT_REGISTRY')}
+            try:
+                _os45.environ['ADDFUT_LOCK_DIR'] = str(_bd)
+                _os45.environ.pop('ADDFUT_BOOK_PATH', None)
+                # Фиксированная дата фикстур против живой биржи — та же явная калитка, что
+                # у selfcheck (ADDFUT_ASOF_OVERRIDE=1): иначе стенд зависел бы от даты
+                # запуска — угол «от живого календаря», уже стрелявший в этом круге.
+                _os45.environ['ADDFUT_ASOF_OVERRIDE'] = '1'
+                (_bd / 'route.txt').write_text('F', encoding='utf-8')
+                # Пин счёта — файлом в каталоге состояния, как в бою (шапка модуля счёт из
+                # окружения снимает; стаб называет себя DUTEST01).
+                (_bd / 'account.txt').write_text('DUTEST01', encoding='utf-8')
+                # Замер маржи — фикстура под шаблонный реестр и счёт DUTEST01, как у
+                # selfcheck: живой margins_live.json рядом с кодом принадлежит DUR833748
+                # и здесь был бы ЧУЖИМ, а отсутствие замера исполнитель отвергает.
+                import csv as _csv47
+                import datetime as _dt47
+                import json as _js47
+                _reg47 = str(ROOT / 'instruments.csv')
+                _cids = {r['instrument']: r['con_id']
+                         for r in _csv47.DictReader(open(_reg47, encoding='utf-8'))
+                         if r['instrument'] in ('ES', 'MES', 'ZN')}
+                (_bd / 'margins_fix.json').write_text(_js47.dumps({
+                    'ES': {'init': 34910.0, 'maint': 25059.0},
+                    'MES': {'init': 3491.0, 'maint': 2506.0},
+                    'ZN': {'init': 2157.0, 'maint': 1876.0},
+                    '_meta': {'date': _dt47.datetime.now(_dt47.timezone.utc)
+                              .strftime('%Y-%m-%d'),
+                              'account': 'DUTEST01',
+                              'series': ['ES', 'MES', 'ZN'],
+                              'con_ids': _cids}}, ensure_ascii=False), encoding='utf-8')
+                _os45.environ['ADDFUT_MARGINS'] = str(_bd / 'margins_fix.json')
+                _os45.environ['ADDFUT_REGISTRY'] = _reg47
+                # Книга Ф согласована с позициями стаба {'ZN': 1} — как _seed_books_from.
+                _ST47.save(_ST47.book_path('F'),
+                           _DL47.Book(d_fix=7.9, n_e=0, n_b=1, unit_is_mes=True,
+                                      prev_st_eq=True, prev_st_bd=True, ser_a='U26',
+                                      ser_b='U26', es_held=0,
+                                      last_session='2026-08-08',
+                                      close_provisional=False), 'F', 1)
+                _J47.append(_bd / 'journal-F.csv', dict(
+                    date='2026-08-08', leg='', instrument='ИТОГ', qty=0, px_order='-',
+                    px_fill='', commission='', reason='', nav='1000000',
+                    leverage='1.99', note='итог сессии 1: строк 0'))
+                _jx, _sx, _sp47 = _bd / 'jx.csv', _bd / 'sx.csv', _bd / 'tr.json'
+                _jx.write_text('asof,event,detail\n'
+                               '2026-08-10,SWITCH_SIGNAL,E|s1\n'
+                               '2026-08-10,OWNER_APPROVE,E|s1\n', encoding='utf-8')
+                _M47.test_configure(str(_jx))
+                _M47.grant_granularity(str(_jx), str(_sx), '2026-08-10', 's1', 98565.0)
+
+                class _Br:
+                    """Минимальный порт стаба selfcheck: тот же контракт, те же числа."""
+
+                    def __init__(_b, ok=True):
+                        _b.p, _b.np, _b.n = ok, {'ZN': 1, 'CBU0': 0}, 0
+                        _b.calls = []
+                        _b.account = 'DUTEST01'
+
+                    def _px(_b, i):
+                        return 98560.0 if str(i).startswith('ZN') else 5.0
+
+                    def net_liquidation(_b):
+                        return 1e6
+
+                    def todays_executions(_b):
+                        return [c for c in _b.calls if c[0] in ('sell', 'buy')]
+
+                    def unit_ref(_b, i, cls):
+                        _p = _b._px(i)
+                        return (_p * 0.5, _p * 2.0)
+
+                    def preview(_b, orders=None, emergency=False, done_all=False):
+                        _b.calls.append(('preview', bool(orders), emergency, done_all))
+                        return _b.p
+
+                    def sell_units(_b, i, u):
+                        _b.n += 1
+                        _b.calls.append(('sell', i, u))
+                        _b.np[i] = _b.np.get(i, 0) - int(u)
+                        return (f's{_b.n}', u)
+
+                    def buy_units(_b, i, u):
+                        _b.n += 1
+                        _b.calls.append(('buy', i, u))
+                        _b.np[i] = _b.np.get(i, 0) + u
+                        return (f'b{_b.n}', u)
+
+                    def cancel_order(_b, o):
+                        return True
+
+                    def open_orders(_b):
+                        return []
+
+                    def net_positions(_b):
+                        return dict(_b.np)
+
+                    def minutes_since(_b, k):
+                        return 0
+
+                    def gross(_b, d_fix=None):
+                        return 1.99
+
+                _L = {'BOND': dict(src=[('ZN', 1, 98560.0)], dst=('CBU0', 5.0, 'ETF'))}
+                # Реестр — поставленный шаблон пакета, как у selfcheck (умолчание
+                # 'instruments.csv' относительно cwd — а батарея живёт в live/).
+                _кв = dict(signal_id='s1', journal=str(_jx), mr_state=str(_sx),
+                           asof='2026-08-10', registry=str(ROOT / 'instruments.csv'))
+                _b1 = _Br(ok=True)
+                _r1 = _TR47.execute(_b1, str(_sp47), 1e6, _L, **_кв)
+                out['завершается'] = (_r1.get('status') == 'COMPLETE')
+                out['предпросмотр_звался_с_планом'] = any(
+                    c[0] == 'preview' and c[1] for c in _b1.calls)
+                out['продажа_и_покупка_состоялись'] = (
+                    any(c[0] == 'sell' for c in _b1.calls)
+                    and any(c[0] == 'buy' for c in _b1.calls))
+                # Отказ предпросмотра -> POSTPONED, а не инцидент и не COMPLETE.
+                # ПОЛНЫЙ СБРОС МЕЖДУ СЦЕНАРИЯМИ, как _cl()+_sig() у selfcheck: COMPLETE
+                # сценария A записал переход в журнал МР (маршрут стал Е), переписал
+                # route.txt и опубликовал книгу Е — без сброса сценарий B отвергался бы
+                # «from_route не совпадает с маршрутом журнала».
+                for _f in (_sp47, _sx):
+                    if _f.exists():
+                        _f.unlink()
+                _jx.write_text('asof,event,detail\n'
+                               '2026-08-10,SWITCH_SIGNAL,E|s1\n'
+                               '2026-08-10,OWNER_APPROVE,E|s1\n', encoding='utf-8')
+                _M47.test_configure(str(_jx))
+                _M47.grant_granularity(str(_jx), str(_sx), '2026-08-10', 's1', 98565.0)
+                (_bd / 'route.txt').write_text('F', encoding='utf-8')
+                _ST47.save(_ST47.book_path('F'),
+                           _DL47.Book(d_fix=7.9, n_e=0, n_b=1, unit_is_mes=True,
+                                      prev_st_eq=True, prev_st_bd=True, ser_a='U26',
+                                      ser_b='U26', es_held=0,
+                                      last_session='2026-08-08',
+                                      close_provisional=False), 'F', 1)
+                _r2 = _TR47.execute(_Br(ok=False), str(_sp47), 1e6, _L, **_кв)
+                out['отказ_откладывает'] = (_r2.get('status') == 'POSTPONED'
+                                            and _r2.get('postponed') == 1)
+            finally:
+                for _k, _v in _keep_env.items():
+                    if _v is None:
+                        _os45.environ.pop(_k, None)
+                    else:
+                        _os45.environ[_k] = _v
+            out['ok'] = all([out['завершается'], out['предпросмотр_звался_с_планом'],
+                             out['продажа_и_покупка_состоялись'],
+                             out['отказ_откладывает']])
         elif kind == 'правила45: сторож серий и порог капитала перехода':
             # ВОРОТА 1 (правило 8в): первое измерение показало, что три ветки, заведённые
             # разбором 22.08, не исполняются батареей НИ РАЗУ — аварийная ветка реестра в
@@ -4348,6 +4513,24 @@ def _rules45_case(kind):
                 out['серии_реестра_требуют'] = (
                     _TR46._series_required(['ESU26', 'ZNU26']) is True
                     and _TR46._series_required(['ES', 'ZN']) is False)
+                # ЖИВАЯ ВЕТКА «реестр несёт серии, а цели голые» (честные ворота: батарея
+                # гоняла её только с нечитаемым и шаблонным реестрами — обе стороны False).
+                import ib_stub as _IBS46
+                _keep_regenv = _os45.environ.get('ADDFUT_REGISTRY')
+                _FD46.registry = _keep_reg
+                try:
+                    _os45.environ['ADDFUT_REGISTRY'] = str(
+                        _IBS46.fixture_registry(_bd))
+                    _r6 = _pf(_dst_names=('ES', 'ZN'))
+                    out['голая_цель_при_живом_реестре'] = 'БЕЗ поставочной серии' in _r6
+                    _r7 = _pf(_dst_names=('ESU26', 'ZNU26'))
+                    out['серийная_цель_проходит'] = ('БЕЗ поставочной серии' not in _r7
+                                                     and 'd_fix' in _r7)
+                finally:
+                    if _keep_regenv is None:
+                        _os45.environ.pop('ADDFUT_REGISTRY', None)
+                    else:
+                        _os45.environ['ADDFUT_REGISTRY'] = _keep_regenv
                 # ПОРОГ КАПИТАЛА ПЕРЕХОДА В Ф: батарея живёт на бумажных капиталах выше
                 # порога, и ветка не исполнялась никогда. Оба конца: без аварии — Incident
                 # с кодом причины; с аварией порог обходится (падение дальше — ДРУГОЕ).
@@ -4383,6 +4566,8 @@ def _rules45_case(kind):
                              out['нечитаемый_реестр_консервативен'],
                              out['ошибка_кода_не_глотается'],
                              out['серии_реестра_требуют'],
+                             out['голая_цель_при_живом_реестре'],
+                             out['серийная_цель_проходит'],
                              out['порог_капитала_держит'],
                              out['авария_обходит_порог']])
         elif kind == 'правила45: проба О-3-Е читает позиции только при нужде':
@@ -5105,6 +5290,19 @@ def _r46pair(r):
     WARN-файл с кодом причины оставлен оператору."""
     return (not r['raised'] and r['ok'] is True
             and r.get('расхождение_в_якоре') is True)
+
+
+
+@rinv('оркестратор перехода завершает, откладывает и зовёт предпросмотр с планом',
+      needs=lambda r: r['case'] == 'правила45: оркестратор перехода исполняется батареей')
+def _r47orch(r):
+    """Слой 5: _execute_locked исполнялся только selfcheck-ом выпуска — стык оркестратора
+    с предпросмотром и предполётом жил без стенда, и ровно в нём этот круг находил
+    NameError и тождественно ложный флаг. Оба конца: COMPLETE при живом предпросмотре,
+    POSTPONED со счётчиком при отказе."""
+    return (not r['raised'] and r['ok'] is True
+            and r.get('предпросмотр_звался_с_планом') is True
+            and r.get('отказ_откладывает') is True)
 
 
 @rinv('возраст сердцебиения читается по содержимому, а touch его не лечит',
