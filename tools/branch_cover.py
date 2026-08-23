@@ -69,35 +69,56 @@ def executable(path):
     return _out
 
 
+def _is_catchall(t):
+    """Перехват-всех: bare, Exception, BaseException — и кортежи, их содержащие.
+
+    Первая редакция знала только Exception; в transition живут шесть `except BaseException`
+    — их однобокость структурна так же, и без льготы каждая стала бы ВЕЧНЫМ ложным красным.
+    """
+    import ast
+    if t is None:
+        return True
+    if isinstance(t, ast.Name) and t.id in ('Exception', 'BaseException'):
+        return True
+    if isinstance(t, ast.Tuple):
+        return any(_is_catchall(e) for e in t.elts)
+    return False
+
+
 def file_facts(path):
-    """Один AST-разбор файла: (диапазоны ПРОСТЫХ многострочных предложений, строки
-    перехватов-всех).
+    """Один AST-разбор файла: (спаны предложений с признаком ленивости, перехваты-всех).
 
-    ПРОСТЫХ — решающее слово (разбор /code-review 22.08, доказано шестью углами разом).
-    Первая редакция брала ВСЕ ast.stmt, а у составных (def, if, try, for, with) диапазон —
-    всё тело: строка `def` исполняется импортом, и спан FunctionDef «зачитывал» функцию
-    целиком — 2970 из 3126 строк transition.py от одних def-строк, то есть ворота мерили
-    «модуль импортирован», а не «ветка исполнена». Простое предложение — то, у которого нет
-    собственного тела: у него совпадение любой строки действительно означает исполнение.
-
-    Второй разбор на файл (catchall_lines) слит сюда же: он звался ВНУТРИ построчного
-    цикла — полный парс файла на каждую однобокую строку.
+    ДВА УРОКА ПЯТОГО ПРОГОНА /code-review (23.08) — затопление возвращалось уровнем ниже:
+    (1) СОСТАВНОЕ определяется НАЛИЧИЕМ ВЛОЖЕННЫХ ПРЕДЛОЖЕНИЙ, а не полем body: у ast.Match
+        поля body нет (cases), и целый match-блок проходил как «простое» — исполнение
+        строки subject зачитывало все ветви.
+    (2) Внутри ПРОСТОГО предложения живут ЛЕНИВЫЕ куски: ветви тернарника, правые операнды
+        and/or, тела лямбд и генераторов исполняются не всегда, и полное зачитывание спана
+        объявляло исполненной мёртвую ветвь — включая ту самую ветку done_all, ради которой
+        ворота строились. У ленивого предложения зачитывается только ЗАГОЛОВОЧНАЯ строка
+        («предложение исполнялось»), остальные строки отвечают за себя; их мёртвые ветви
+        ловит канал однобокости по BRANCH-событиям.
     """
     import ast
     try:
         _tree = ast.parse(Path(path).read_text(encoding='utf-8'))
     except (OSError, SyntaxError):
         return [], set()
+    _lazy_t = (ast.IfExp, ast.BoolOp, ast.Lambda, ast.GeneratorExp,
+               ast.ListComp, ast.SetComp, ast.DictComp)
     _spans, _catch = [], set()
     for _n in ast.walk(_tree):
-        if isinstance(_n, ast.stmt) and not hasattr(_n, 'body') \
+        # Составное = несёт вложенные предложения В ЛЮБОМ поле-списке (body, orelse,
+        # finalbody, cases->..., handlers): проверка по полю body пропускала ast.Match.
+        _compound = any(isinstance(_v, list) and _v and isinstance(_v[0], (ast.stmt,
+                        ast.ExceptHandler, ast.match_case))
+                        for _f, _v in ast.iter_fields(_n))
+        if isinstance(_n, ast.stmt) and not _compound \
                 and getattr(_n, 'end_lineno', None) and _n.end_lineno > _n.lineno:
-            _spans.append(set(range(_n.lineno, _n.end_lineno + 1)))
-        if isinstance(_n, ast.ExceptHandler):
-            _t = _n.type
-            if _t is None or (isinstance(_t, ast.Name) and _t.id == 'Exception'):
-                # У перехвата-всех нет второй стороны: «не совпал» невозможен.
-                _catch.add(_n.lineno)
+            _has_lazy = any(isinstance(_x, _lazy_t) for _x in ast.walk(_n))
+            _spans.append((set(range(_n.lineno, _n.end_lineno + 1)), _has_lazy))
+        if isinstance(_n, ast.ExceptHandler) and _is_catchall(_n.type):
+            _catch.add(_n.lineno)
     return _spans, _catch
 
 
@@ -148,8 +169,14 @@ def main():
     # вердикту «мутаций, которых не поймал никто».
     # Вне области: mutation.py исполняет собственный прогон, а не батарея; сам инструмент
     # меряет себя частично (report-ветки идут после снятия монитора) — self-шум.
+    # Вне области: mutation.py и contour_test.py исполняют собственные прогоны;
+    # branch_cover.py меряет сам себя лишь частично; review_new_code.py меняется каждый
+    # круг ПО ПОСТРОЕНИЮ (KRUG_N) и батареей не импортируется — без льготы подготовка
+    # следующего круга давала бы гарантированное ложное красное.
+    _out_of_scope = ('mutation.py', 'branch_cover.py', 'review_new_code.py',
+                     'contour_test.py')
     diff = {f: l for f, l in diff.items()
-            if not f.endswith('mutation.py') and not f.endswith('branch_cover.py')}
+            if not f.endswith(_out_of_scope)}
     diff = {f: (l & executable(f)) for f, l in diff.items()}
     diff = {f: l for f, l in diff.items() if l}
     if not diff:
@@ -176,10 +203,18 @@ def main():
     for f, lines in sorted(diff.items()):
         _ex = set(seen.get(f, set()))
         _spans, _catch = file_facts(f)
-        for _span in _spans:
-            if _ex & _span:
-                _ex |= _span
-        _test_infra = f.endswith('invariants.py')
+        # До неподвижной точки: два многострочных предложения могут делить строку через
+        # точку с запятой, и однопроходное слияние зависело бы от порядка.
+        _grew = True
+        while _grew:
+            _grew = False
+            for _span, _lazy in _spans:
+                if _ex & _span:
+                    _add = {min(_span)} if _lazy else _span
+                    if not _add <= _ex:
+                        _ex |= _add
+                        _grew = True
+        _test_infra = f.endswith(('invariants.py', 'ib_stub.py', 'fake_broker.py'))
         for ln in sorted(lines):
             _name = f'{Path(f).relative_to(ROOT)}:{ln}'
             if ln not in _ex:
@@ -193,7 +228,12 @@ def main():
                 # при красной батарее), но и не молчание: справочный список, как у строк.
                 (infra_branch if _test_infra else bad_branch).append(_name)
     _n = sum(len(v) for v in diff.values())
-    print(f'изменённых строк питона: {_n}; батарея исполнила: {_n - len(bad_lines)}')
+    # Обвязка вычитается ИЗ ИСПОЛНЕННОГО тоже: её неисполненные строки уходят в справочный
+    # ярус, и без вычитания заголовок завышал цифру, которая цитируется в BRIEF (пятый
+    # прогон: тот же класс, что «ложное 279/279»).
+    print(f'изменённых строк питона: {_n}; батарея исполнила: '
+          f'{_n - len(bad_lines) - len(infra)}'
+          + (f' (+{len(infra)} строк обвязки не исполнялось — справочно)' if infra else ''))
     if bad_lines:
         print(f'\nНЕ ИСПОЛНЯЛИСЬ НИ РАЗУ ({len(bad_lines)}):')
         for b in bad_lines:

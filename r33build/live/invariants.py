@@ -4307,17 +4307,37 @@ def _rules45_case(kind):
                           '    return 2\n'
                           '\n'
                           'y = (1 +\n'
-                          '     2)\n', encoding='utf-8')
+                          '     2)\n'
+                          'z = (1 if y else\n'
+                          '     f(0))\n'
+                          'match y:\n'
+                          '    case 3:\n'
+                          '        a = 1\n'
+                          '    case _:\n'
+                          '        a = 2\n'
+                          'try:\n'
+                          '    q = 1\n'
+                          'except BaseException:\n'
+                          '    q = 2\n', encoding='utf-8')
             _spans, _catch = _bc.file_facts(str(_m))
+            _plain = [_sp for _sp, _lz in _spans]
             # Затопление: НИ ОДИН спан не смеет накрывать тело f (строки 2-4) шире самого
             # тела — иначе строка def, исполненная импортом, зачитывает функцию целиком.
             out['тела_не_затапливаются'] = all(
-                not ({2, 3, 4} & _sp) or _sp <= {2, 3, 4} for _sp in _spans)
-            out['многострочное_склеено'] = any(_sp == {6, 7} for _sp in _spans)
+                not ({2, 3, 4} & _sp) or _sp <= {2, 3, 4} for _sp in _plain)
+            out['многострочное_склеено'] = any(
+                _sp == {6, 7} and not _lz for _sp, _lz in _spans)
+            # УРОКИ ПЯТОГО ПРОГОНА: тернарник ленив (мёртвая ветвь не зачитывается),
+            # match — составное без поля body, BaseException — перехват-всех.
+            out['тернарник_ленив'] = any(_sp == {8, 9} and _lz for _sp, _lz in _spans)
+            out['match_не_склеен'] = not any(10 in _sp and 13 in _sp for _sp in _plain)
+            out['baseexception_опознан'] = (17 in _catch)
             _exe = _bc.executable(str(_m))
             out['вселенная_исполняемая'] = (6 in _exe and 5 not in _exe)
             out['ok'] = all([out['тела_не_затапливаются'],
                              out['многострочное_склеено'],
+                             out['тернарник_ленив'], out['match_не_склеен'],
+                             out['baseexception_опознан'],
                              out['вселенная_исполняемая']])
         elif kind == 'правила45: оркестратор перехода исполняется батареей':
             # СЛОЙ 5 РЕЕСТРА, ОТКРЫВАЮЩАЯ РАБОТА (честные ворота 1, 22.08). Стенды перехода
@@ -4365,7 +4385,7 @@ def _rules45_case(kind):
                 _reg47 = str(ROOT / 'instruments.csv')
                 _cids = {r['instrument']: r['con_id']
                          for r in _csv47.DictReader(open(_reg47, encoding='utf-8'))
-                         if r['instrument'] in ('ES', 'MES', 'ZN')}
+                         if r['instrument'] in __import__('transition').FUT_ROOTS}
                 (_bd / 'margins_fix.json').write_text(_js47.dumps({
                     'ES': {'init': 34910.0, 'maint': 25059.0},
                     'MES': {'init': 3491.0, 'maint': 2506.0},
@@ -4383,7 +4403,8 @@ def _rules45_case(kind):
                                       prev_st_eq=True, prev_st_bd=True, ser_a='U26',
                                       ser_b='U26', es_held=0,
                                       last_session='2026-08-08',
-                                      close_provisional=False), 'F', 1)
+                                      close_provisional=False,
+                                      prev_close_lev=1.99), 'F', 1)
                 _J47.append(_bd / 'journal-F.csv', dict(
                     date='2026-08-08', leg='', instrument='ИТОГ', qty=0, px_order='-',
                     px_fill='', commission='', reason='', nav='1000000',
@@ -4451,7 +4472,7 @@ def _rules45_case(kind):
                 # Реестр — поставленный шаблон пакета, как у selfcheck (умолчание
                 # 'instruments.csv' относительно cwd — а батарея живёт в live/).
                 _кв = dict(signal_id='s1', journal=str(_jx), mr_state=str(_sx),
-                           asof='2026-08-10', registry=str(ROOT / 'instruments.csv'))
+                           asof='2026-08-10', registry=_reg47)
                 _b1 = _Br(ok=True)
                 _r1 = _TR47.execute(_b1, str(_sp47), 1e6, _L, **_кв)
                 out['завершается'] = (_r1.get('status') == 'COMPLETE')
@@ -4479,10 +4500,17 @@ def _rules45_case(kind):
                                       prev_st_eq=True, prev_st_bd=True, ser_a='U26',
                                       ser_b='U26', es_held=0,
                                       last_session='2026-08-08',
-                                      close_provisional=False), 'F', 1)
-                _r2 = _TR47.execute(_Br(ok=False), str(_sp47), 1e6, _L, **_кв)
+                                      close_provisional=False,
+                                      prev_close_lev=1.99), 'F', 1)
+                _b2 = _Br(ok=False)
+                _r2 = _TR47.execute(_b2, str(_sp47), 1e6, _L, **_кв)
+                # Пришпилено к ПРЕДПРОСМОТРУ (пятый прогон): POSTPONED производится и
+                # доменными отказами до вердикта preview — без якоря на сам вызов стык
+                # «оркестратор -> отказ preview» мог перестать исполняться незаметно.
                 out['отказ_откладывает'] = (_r2.get('status') == 'POSTPONED'
                                             and _r2.get('postponed') == 1)
+                out['отказал_именно_предпросмотр'] = any(
+                    c[0] == 'preview' and c[1] for c in _b2.calls)
             finally:
                 _M47.set_state_dir_for_tests(_keep_mrdir)
                 for _k, _v in _keep_env.items():
@@ -4492,7 +4520,8 @@ def _rules45_case(kind):
                         _os45.environ[_k] = _v
             out['ok'] = all([out['завершается'], out['предпросмотр_звался_с_планом'],
                              out['продажа_и_покупка_состоялись'],
-                             out['отказ_откладывает']])
+                             out['отказ_откладывает'],
+                             out['отказал_именно_предпросмотр']])
         elif kind == 'правила45: сторож серий и порог капитала перехода':
             # ВОРОТА 1 (правило 8в): первое измерение показало, что три ветки, заведённые
             # разбором 22.08, не исполняются батареей НИ РАЗУ — аварийная ветка реестра в
@@ -4507,7 +4536,8 @@ def _rules45_case(kind):
             import transition as _TR46
             _bd = _tf45.mkdtemp(prefix='addfut-i46reg-')
             _keep_env = {k: _os45.environ.get(k) for k in
-                         ('ADDFUT_LOCK_DIR', 'ADDFUT_BOOK_PATH', 'ADDFUT_DFIX_TEST')}
+                         ('ADDFUT_LOCK_DIR', 'ADDFUT_BOOK_PATH', 'ADDFUT_DFIX_TEST',
+                          'ADDFUT_REGISTRY')}
             _keep_reg = _FD46.registry
             # КАЛЕНДАРЬ ЗАМОРОЖЕН (разбор /code-review 22.08, угол «от живого состояния»).
             # Стенд зашивал ESU26 против ЖИВОГО exchange_today, а календарный сторож ролла
@@ -4566,25 +4596,18 @@ def _rules45_case(kind):
                 # ЖИВАЯ ВЕТКА «реестр несёт серии, а цели голые» (честные ворота: батарея
                 # гоняла её только с нечитаемым и шаблонным реестрами — обе стороны False).
                 import ib_stub as _IBS46
-                _keep_regenv = _os45.environ.get('ADDFUT_REGISTRY')
                 _FD46.registry = _keep_reg
-                try:
-                    _os45.environ['ADDFUT_REGISTRY'] = str(
-                        _IBS46.fixture_registry(_bd))
-                    _r6 = _pf(_dst_names=('ES', 'ZN'))
-                    out['голая_цель_при_живом_реестре'] = 'БЕЗ поставочной серии' in _r6
-                    _r7 = _pf(_dst_names=('ESU26', 'ZNU26'))
-                    out['серийная_цель_проходит'] = ('БЕЗ поставочной серии' not in _r7
-                                                     and 'd_fix' in _r7)
-                finally:
-                    if _keep_regenv is None:
-                        _os45.environ.pop('ADDFUT_REGISTRY', None)
-                    else:
-                        _os45.environ['ADDFUT_REGISTRY'] = _keep_regenv
+                _os45.environ['ADDFUT_REGISTRY'] = str(_IBS46.fixture_registry(_bd))
+                _r6 = _pf(_dst_names=('ES', 'ZN'))
+                out['голая_цель_при_живом_реестре'] = 'БЕЗ поставочной серии' in _r6
+                _r7 = _pf(_dst_names=('ESU26', 'ZNU26'))
+                out['серийная_цель_проходит'] = ('БЕЗ поставочной серии' not in _r7
+                                                 and 'd_fix' in _r7)
                 # ПОРОГ КАПИТАЛА ПЕРЕХОДА В Ф: батарея живёт на бумажных капиталах выше
                 # порога, и ветка не исполнялась никогда. Оба конца: без аварии — Incident
                 # с кодом причины; с аварией порог обходится (падение дальше — ДРУГОЕ).
-                _FD46.registry = _keep_reg
+                # (registry уже боевой с восстановления выше; мёртвый дубль снят — пятый
+                # прогон: «читатель, убирая дубль, с равной вероятностью удалит несущую».)
                 try:
                     _TR46.execute(None, str(Path(_bd) / 'tr.json'), 2_900_000, {},
                                   'sig-стенд', 'E', to_route='F')
@@ -4873,7 +4896,9 @@ def _worm_case(kind):
             # БОЕВАЯ функция, и её мутация теперь наблюдаема этим же стендом.
             import json as _js46
             _mrg0 = _js46.loads(Path(os.environ['ADDFUT_MARGINS']).read_text(encoding='utf-8'))
-            _drop = sorted(_mrg0['_meta']['series'])[0]
+            # ПОСЛЕДНЯЯ по сортировке, а не первая (пятый прогон): 'ESU26' — подстрока
+            # 'MESU26', и конъюнкт `_drop in _txt` был вакуумен — совпадал на ЧУЖОЙ серии.
+            _drop = sorted(_mrg0['_meta']['series'])[-1]
             _mrg0['_meta']['series'] = [x for x in _mrg0['_meta']['series'] if x != _drop]
             _mrg0['_meta']['con_ids'].pop(_drop, None)
             _mrg0.pop(_drop, None)
@@ -4891,8 +4916,8 @@ def _worm_case(kind):
                 _warn = Path(tmp) / 'WARN-registry-margins-2026-08-14.txt'
                 out['снимок_прошёл'] = bool(_rab) and bool(_anch)
                 out['расхождение_в_якоре'] = (
-                    'пара реестр/замер: замер не покрывает серии реестра' in _txt
-                    and _drop in _txt)
+                    f"пара реестр/замер: замер не покрывает серии реестра ['{_drop}']"
+                    in _txt)
                 out['warn_с_кодом'] = (_warn.exists() and
                                        'ПАРА-ПОКОЛЕНИЙ' in _warn.read_text(encoding='utf-8'))
                 out['ok'] = all([out['снимок_прошёл'], out['расхождение_в_якоре'],

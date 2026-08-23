@@ -2053,6 +2053,11 @@ def _note_killers(family, label, bad):
 # несогласием. Обычный прогон остаётся быстрым: вердикт «поймана» от полноты не зависит.
 import os as _os_mf
 
+# РЕЖИМ ПРОГОНА — ОДНОЙ ТОЧКОЙ (пятый прогон /code-review): флаг читался тремя выражениями
+# в двух полярностях, и правка одного рассинхронизировала бы подпись таблицы с фактом.
+def _mut_full():
+    return _os_mf.environ.get('ADDFUT_MUT_FULL') == '1'
+
 def _mutate_autopilot(was, now, prefix, что):
     """МУТАЦИЯ БОЕВОГО ШЕЛЛА — ОДНИМ ПОМОЩНИКОМ (разбор /code-review 45-го круга).
 
@@ -2952,7 +2957,7 @@ def run_run_mutations():
                 # ДОСРОЧНЫЙ ВЫХОД (рецензия 20.08): «поймана» доказывает ПЕРВОЕ несогласное
                 # утверждение; вердикт «не поймал НИКТО» по-прежнему требует полного
                 # прогона — при пустом bad выход не срабатывает по построению.
-                _, bad = I.run_run(stop_on_first=(_os_mf.environ.get('ADDFUT_MUT_FULL') != '1'))
+                _, bad = I.run_run(stop_on_first=not _mut_full())
             finally:
                 setattr(holder, attr, orig)
             print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
@@ -2970,7 +2975,7 @@ def run_run_mutations():
             holder = SS if hasattr(SS, attr) else FD
         setattr(holder, attr, patched)
         try:
-            _, bad = I.run_run(stop_on_first=(_os_mf.environ.get('ADDFUT_MUT_FULL') != '1'))      # то же (рецензия 20.08)
+            _, bad = I.run_run(stop_on_first=not _mut_full())      # то же (рецензия 20.08)
         finally:
             setattr(holder, attr, orig)
         print(f'{label:<40}{"да" if bad else "НЕТ":>9}  {", ".join(sorted(bad))[:56]}')
@@ -3300,14 +3305,16 @@ if __name__ == '__main__':
     # выходом таблица завышала список «без убийцы» (28 против честных 10), и отличить её
     # от полной можно было только по памяти о переменной окружения. Потребитель обязан
     # видеть режим там же, где число.
-    _full = _os_mf.environ.get('ADDFUT_MUT_FULL') == '1'
-    _mode = ('ПОЛНЫЙ прогон' if _full else
-             'ОБРЕЗАН досрочным выходом — список кандидатов ЗАВЫШЕН, судить по полному')
+    # Режим — ПО СЕМЬЕ (пятый прогон): досрочный выход есть только у run; таблица
+    # адаптера полна всегда, и общий ярлык «ОБРЕЗАН» ложно дисконтировал её точную цифру.
+    _modes = {'run': ('ПОЛНЫЙ прогон' if _mut_full() else
+                      'ОБРЕЗАН досрочным выходом — список ЗАВЫШЕН, судить по полному'),
+              'adapter': 'ПОЛНЫЙ прогон (досрочного выхода нет)'}
     for _fam, _reg in (('run', getattr(I, 'RUN', [])),
                        ('adapter', getattr(I, 'ADAPTER', []))):
         _seen = KILLERS.get(_fam, {})
         _weak = [n for n, _f, _nd in _reg if not _seen.get(n)]
-        print(f"\nУТВЕРЖДЕНИЯ СЕМЬИ «{_fam}» БЕЗ ЕДИНОГО УБИЙЦЫ ({_mode}): "
+        print(f"\nУТВЕРЖДЕНИЯ СЕМЬИ «{_fam}» БЕЗ ЕДИНОГО УБИЙЦЫ ({_modes[_fam]}): "
               f"{len(_weak)} из {len(_reg)}")
         for w in _weak:
             print(f'   {w}')

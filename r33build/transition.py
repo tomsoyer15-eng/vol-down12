@@ -874,6 +874,13 @@ def pv_remainder(plan, done, partial=None):
     return out
 
 
+def _bare_dst(dst_names):
+    """Голые (бессерийные) фьючерсные цели плана — одной функцией на обе ветки предполёта:
+    копии выражения в соседних взаимоисключающихся ветках разъехались бы при первой правке
+    нормализации имён (пятый прогон /code-review)."""
+    return sorted({str(n) for n in (dst_names or ()) if str(n) in FUT_ROOTS})
+
+
 # ОШИБКА КОДА НЕ СТАНОВИТСЯ ПРЕДПОЛЁТНЫМ ВЕРДИКТОМ НИ В ОДНОМ ИЗ ЗДЕШНИХ ПЕРЕХВАТОВ
 # (разбор /code-review 45-го круга). Запрет 45-й круг поставил на ВЫЗЫВАЮЩЕГО
 # (_execute_locked), но переодевание случается ЗДЕСЬ, внутри: до внешнего except
@@ -910,7 +917,10 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
         _hol_r = _DLp.holidays_for(_today_r.year)
         for _dn in (_dst_names or ()):
             _root_r = fut_root(_dn)
-            if _root_r not in ('ES', 'MES', 'ZN'):
+            # fut_root вернул полный корень ЛИБО имя целиком: не-корень — это «не фьючерс».
+            # Литеральный кортеж здесь был ТРЕТЬЕЙ копией FUT_ROOTS (пятый прогон): новый
+            # корень выпадал бы из сторожа календаря ролла молча — fail-open к поставке.
+            if _root_r not in FUT_ROOTS:
                 continue                       # фонды календарём ролла не связаны
             _ser_r = fut_series(_dn)
             if not _ser_r:
@@ -1050,12 +1060,8 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
         # `except Exception: _keys_p = []` превращал техническую ошибку в доменное «всё в
         # порядке» и ОТКЛЮЧАЛ сторожа ниже: книга Ф рождалась без ser_a/ser_b, leg_roll_due
         # при held is None навсегда отвечал «ролл не нужен», и позиция шла в поставку.
-        try:
-            import feed as _FDp2
-            _keys_p = list(_FDp2.registry().keys())
-        except _STce_tr.CODE_ERRORS:
-            raise      # ошибка кода — трассировкой, а не предполётным вердиктом
-        except Exception as _erp:
+        _keys_p, _erp = _read_registry_keys()
+        if _erp is not None:
             # УЖЕСТОЧЕНИЕ НЕ СМЕЕТ ЗАПЕРЕТЬ АВАРИЙНЫЙ ВЫХОД (разбор /code-review 21.08,
             # угол «от противоположного знака»). Реестр не принадлежит пакету («принадлежит
             # счёту, а не программе», MANIFEST его не несёт), а feed.registry() отказывает и
@@ -1076,7 +1082,7 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
                 raise RuntimeError(
                     f'живой реестр серий не читается ({_erp}) — проверить поставочные серии '
                     f'целей плана нечем, передача книги маршруту Ф остановлена') from _erp
-            _bare_e = sorted({str(n) for n in _dst_names if str(n) in FUT_ROOTS})
+            _bare_e = _bare_dst(_dst_names)
             if _bare_e:
                 raise RuntimeError(
                     f'живой реестр серий не читается ({_erp}), а цели плана {_bare_e} '
@@ -1087,7 +1093,7 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
         # серии» жил здесь ВТОРЫМ литералом, и мутация series_required_off наблюдала только
         # извлечённую копию — вопреки её же докстрингу «точка одна».
         if _series_required(_keys_p):
-            _bare = sorted({str(n) for n in _dst_names if str(n) in FUT_ROOTS})
+            _bare = _bare_dst(_dst_names)
             if _bare:
                 raise RuntimeError(
                     f'цели плана {_bare} заданы БЕЗ поставочной серии, а живой реестр её '
@@ -2209,7 +2215,8 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
     # позиция была целой: дробный остаток фьючерса (следствие частичного фила или ошибки
     # брокера) укладывался в допуск и уходил в книгу, где нога считается целыми контрактами.
     for _kf, _vf in (now or {}).items():
-        if not str(_kf).startswith(('ES', 'MES', 'ZN')):
+        # Тот же класс: не свой кортеж, а единственный источник корней (пятый прогон).
+        if not str(_kf).startswith(FUT_ROOTS):
             continue
         _ff = float(_vf or 0)
         if abs(_ff - round(_ff)) > 1e-9:
@@ -2444,24 +2451,28 @@ def open_session_in_journal(jp, day, sess_no, from_route, to_route, was_used):
              f'{from_route}->{to_route})'))
 
 
-def _registry_keys_or_none():
-    """Имена живого реестра ЛИБО None — «реестр нечитаем», доменная неизвестность.
-
-    Одна точка чтения реестра для ПУБЛИКАЦИИ книги (hand_over_book). Ошибка кода падает
-    своим типом; доменный отказ не глотается молча и не останавливает публикацию (деньги
-    уже двинулись) — он становится None, и решение принимает _series_required,
-    консервативно. Вынесено из тела hand_over_book по воротам 1 (правило 8в): ветка в ста
-    сорока строках от входа была недостижима стендом, то есть ненаблюдаема.
-    """
+def _read_registry_keys():
+    """ЕДИНСТВЕННЫЙ читатель живого реестра для обоих потребителей: (keys, None) либо
+    (None, ошибка). Ошибка кода падает своим типом; ПОЛИТИКУ доменного отказа решает
+    вызывающий — у предполёта и публикации она разная, а чтение одно (пятый прогон
+    /code-review: копия читателя в предполёте не наблюдалась ни мутацией, ни стендом)."""
     try:
         import feed as _FDs
-        return list(_FDs.registry().keys())
+        return list(_FDs.registry().keys()), None
     except _STce_tr.CODE_ERRORS:
         raise
     except Exception as _ers:
+        return None, _ers
+
+
+def _registry_keys_or_none():
+    """Политика ПУБЛИКАЦИИ (hand_over_book): деньги уже двинулись, останавливать нечем —
+    нечитаемый реестр становится None, и _series_required судит консервативно."""
+    _keys, _ers = _read_registry_keys()
+    if _ers is not None:
         print(f'ВНИМАНИЕ: живой реестр серий не читается ({_ers}); требование серии '
               f'считается действующим (консервативно)')
-        return None
+    return _keys
 
 
 def _series_required(reg_keys):
