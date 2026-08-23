@@ -1076,16 +1076,18 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
                 raise RuntimeError(
                     f'живой реестр серий не читается ({_erp}) — проверить поставочные серии '
                     f'целей плана нечем, передача книги маршруту Ф остановлена') from _erp
-            _bare_e = sorted({str(n) for n in _dst_names if str(n) in ('ES', 'MES', 'ZN')})
+            _bare_e = sorted({str(n) for n in _dst_names if str(n) in FUT_ROOTS})
             if _bare_e:
                 raise RuntimeError(
                     f'живой реестр серий не читается ({_erp}), а цели плана {_bare_e} '
                     f'заданы БЕЗ поставочной серии — книга Ф вышла бы без ser_a/ser_b и не '
                     f'роллировалась; аварийный выход задать явными сериями') from _erp
             _keys_p = []
-        if any(str(k) not in ('ES', 'MES', 'ZN') and
-               str(k).startswith(('ES', 'MES', 'ZN')) for k in _keys_p):
-            _bare = sorted({str(n) for n in _dst_names if str(n) in ('ES', 'MES', 'ZN')})
+        # ТА ЖЕ ТОЧКА, ЧТО У ПУБЛИКАЦИИ (разбор /code-review 22.08): предикат «реестр несёт
+        # серии» жил здесь ВТОРЫМ литералом, и мутация series_required_off наблюдала только
+        # извлечённую копию — вопреки её же докстрингу «точка одна».
+        if _series_required(_keys_p):
+            _bare = sorted({str(n) for n in _dst_names if str(n) in FUT_ROOTS})
             if _bare:
                 raise RuntimeError(
                     f'цели плана {_bare} заданы БЕЗ поставочной серии, а живой реестр её '
@@ -2471,8 +2473,11 @@ def _series_required(reg_keys):
     """
     if reg_keys is None:
         return True
-    return any(str(k) not in ('ES', 'MES', 'ZN') and str(k).startswith(('ES', 'MES', 'ZN'))
-               for k in reg_keys)
+    # ЧЕРЕЗ fut_series, А НЕ СВОИМ КОРТЕЖЕМ (разбор /code-review 22.08): список корней уже
+    # живёт в FUT_ROOTS, а «имя с серией» — это в точности fut_series(имя) != ''. Свой
+    # кортеж в этой функции разошёлся бы с FUT_ROOTS при первом же новом корне, и сторож
+    # публикации перекосился бы молча.
+    return any(fut_series(k) for k in reg_keys)
 
 
 def hand_over_book(broker, from_route, to_route, positions=None):
@@ -2596,13 +2601,6 @@ def hand_over_book(broker, from_route, to_route, positions=None):
         # значит ломать работу с шаблоном; не требовать вовсе — значит пустить книгу без
         # ser_a, которая не роллируется. Правило: серия обязательна ровно тогда, когда её
         # несёт активный реестр.
-        # ТА ЖЕ ПОЛИТИКА, ЧТО И В ПРЕДПОЛЁТЕ (разбор /code-review 22.08). Круг ужесточил
-        # копию в _preflight_handover и оставил эту — а решает именно она: здесь книга
-        # ПУБЛИКУЕТСЯ. `except Exception: _reg_keys = []` глотал в том числе ошибки кода,
-        # сторож серий выключался целиком, и книга Ф выходила с пустыми ser_a/ser_b —
-        # leg_roll_due при held is None навсегда отвечает «ролл не нужен», нога идёт в
-        # поставку. Одна политика на обе копии: ошибка кода падает своим типом, доменный
-        # отказ останавливает публикацию, голая цель отвергается и при нечитаемом реестре.
         # ЗДЕСЬ ДЕНЬГИ УЖЕ ДВИНУЛИСЬ — И ПОТОМУ ПОЛИТИКА НЕ ТА, ЧТО В ПРЕДПОЛЁТЕ (разбор
         # /code-review 22.08). Круг ужесточил копию в _preflight_handover и оставил эту, а
         # решает именно она: здесь книга ПУБЛИКУЕТСЯ. Но простой отказ был бы хуже дефекта:

@@ -4283,10 +4283,8 @@ def _rules45_case(kind):
             # разбором 22.08, не исполняются батареей НИ РАЗУ — аварийная ветка реестра в
             # предполёте, консервативная политика публикации и порог NLV перехода в Ф.
             # Незапущенный сторож — это класс, с которого ворота и начались.
-            import sys as _sy46
-            _lv46 = str(ROOT)
-            if _lv46 not in _sy46.path:
-                _sy46.path.insert(0, _lv46)
+            # Голые импорты: ROOT вставлен в sys.path строкой 86 модуля безусловно;
+            # рукописный сторож здесь был мёртвым ритуалом (разбор /code-review 22.08).
             import dataclasses as _dc46
             import daily as _DL46
             import feed as _FD46
@@ -4629,9 +4627,23 @@ def _worm_case(kind):
                                check=True, capture_output=True)
             (rdp / 'anchors').mkdir()
             keep_root, keep_anch = WA.ROOT, WA.ANCHORS
-            keep_mm = WA._registry_margins_mismatch
+            # РАСХОЖДЕНИЕ — НАСТОЯЩИМИ ФАЙЛАМИ, А НЕ ПОДМЕНОЙ ПРОВЕРКИ (разбор /code-review
+            # 22.08). Стаб _registry_margins_mismatch глушил ЕДИНСТВЕННУЮ точку worm_anchor,
+            # которую мутируют worm-мутации: судью этого стенда не убивал никто, а под
+            # мутацией «пара всегда согласна» стенд оставался зелёным. Кладём замер, из
+            # чьей _meta.series выброшена одна серия реестра, — расхождение вычисляет
+            # БОЕВАЯ функция, и её мутация теперь наблюдаема этим же стендом.
+            import json as _js46
+            _mrg0 = _js46.loads(Path(os.environ['ADDFUT_MARGINS']).read_text(encoding='utf-8'))
+            _drop = sorted(_mrg0['_meta']['series'])[0]
+            _mrg0['_meta']['series'] = [x for x in _mrg0['_meta']['series'] if x != _drop]
+            _mrg0['_meta']['con_ids'].pop(_drop, None)
+            _mrg0.pop(_drop, None)
+            _mm_path = Path(tmp) / 'margins_mismatch.json'
+            _mm_path.write_text(_js46.dumps(_mrg0, ensure_ascii=False), encoding='utf-8')
+            keep_mm_env = os.environ['ADDFUT_MARGINS']
+            os.environ['ADDFUT_MARGINS'] = str(_mm_path)
             WA.ROOT, WA.ANCHORS = rdp, rdp / 'anchors'
-            WA._registry_margins_mismatch = lambda reg, mrg: 'тест-расхождение поколений'
             try:
                 WA.snap('2026-08-14', bdir)
                 _rab = sorted(x.name for x in bdir.glob('addfut-*.tgz'))
@@ -4641,7 +4653,8 @@ def _worm_case(kind):
                 _warn = Path(tmp) / 'WARN-registry-margins-2026-08-14.txt'
                 out['снимок_прошёл'] = bool(_rab) and bool(_anch)
                 out['расхождение_в_якоре'] = (
-                    'пара реестр/замер: тест-расхождение поколений' in _txt)
+                    'пара реестр/замер: замер не покрывает серии реестра' in _txt
+                    and _drop in _txt)
                 out['warn_с_кодом'] = (_warn.exists() and
                                        'ПАРА-ПОКОЛЕНИЙ' in _warn.read_text(encoding='utf-8'))
                 out['ok'] = all([out['снимок_прошёл'], out['расхождение_в_якоре'],
@@ -4651,7 +4664,7 @@ def _worm_case(kind):
                 out['error'] = f'{type(ex).__name__}: {ex}'
             finally:
                 WA.ROOT, WA.ANCHORS = keep_root, keep_anch
-                WA._registry_margins_mismatch = keep_mm
+                os.environ['ADDFUT_MARGINS'] = keep_mm_env
             return out
         if kind == 'worm: ШТАТНЫЙ снимок проходит целиком':
             # ТРИДЦАТЫЙ КРУГ, №11. Успешный производственный путь snap() не исполнял НИ
