@@ -88,6 +88,9 @@ AUTOPILOT_SH = ROOT / 'live' / 'autopilot.sh'
 # распакованного пакета падала бы FileNotFoundError, а вакуумная регистрация без случая
 # роняла бы её «нулевым покрытием» (разбор /code-review 23.08 — блокер каждого выпуска).
 BRANCH_COVER = ROOT.parent / 'tools' / 'branch_cover.py'
+# Один ФЛАГ на обе точки регистрации (случай и судья): два независимых exists() на
+# расстоянии 2900 строк могли разойтись при git-операции посреди импорта (шестой прогон).
+BRANCH_COVER_OK = BRANCH_COVER.exists()
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / 'live'))
 import pandas as pd
 import sim_v13 as S
@@ -2495,7 +2498,7 @@ RUN_CASES = (
 
 
 # Регистрация — только в репозитории (см. BRANCH_COVER выше).
-if BRANCH_COVER.exists():
+if BRANCH_COVER_OK:
     RUN_CASES = RUN_CASES + ('правила45: ворота покрытия наблюдают сами себя',)
 
 _ROLLGAP_K = 2
@@ -4318,7 +4321,13 @@ def _rules45_case(kind):
                           'try:\n'
                           '    q = 1\n'
                           'except BaseException:\n'
-                          '    q = 2\n', encoding='utf-8')
+                          '    q = 2\n'
+                          'try:\n'
+                          '    r = 1\n'
+                          'except (ValueError, Exception):\n'
+                          '    r = 2\n'
+                          'except:\n'
+                          '    r = 3\n', encoding='utf-8')
             _spans, _catch = _bc.file_facts(str(_m))
             _plain = [_sp for _sp, _lz in _spans]
             # Затопление: НИ ОДИН спан не смеет накрывать тело f (строки 2-4) шире самого
@@ -4332,12 +4341,24 @@ def _rules45_case(kind):
             out['тернарник_ленив'] = any(_sp == {8, 9} and _lz for _sp, _lz in _spans)
             out['match_не_склеен'] = not any(10 in _sp and 13 in _sp for _sp in _plain)
             out['baseexception_опознан'] = (17 in _catch)
+            # Кортеж с Exception и голый except — тоже перехваты-всех (шестой прогон:
+            # эти плечи распознавателя не исполнялись ничем).
+            out['кортеж_и_голый_опознаны'] = (21 in _catch and 23 in _catch)
+            # ПОТРЕБЛЕНИЕ ленивого флага — той же функцией, что зовёт main(): исполнение
+            # заголовка тернарника не зачитывает его мёртвую ветвь.
+            _ex45 = _bc.credit_spans({8}, _spans)
+            out['мёртвая_ветвь_не_зачтена'] = (9 not in _ex45 and 8 in _ex45)
+            _ex46 = _bc.credit_spans({7}, _spans)
+            out['неленивое_склеивается_потреблением'] = (6 in _ex46)
             _exe = _bc.executable(str(_m))
             out['вселенная_исполняемая'] = (6 in _exe and 5 not in _exe)
             out['ok'] = all([out['тела_не_затапливаются'],
                              out['многострочное_склеено'],
                              out['тернарник_ленив'], out['match_не_склеен'],
                              out['baseexception_опознан'],
+                             out['кортеж_и_голый_опознаны'],
+                             out['мёртвая_ветвь_не_зачтена'],
+                             out['неленивое_склеивается_потреблением'],
                              out['вселенная_исполняемая']])
         elif kind == 'правила45: оркестратор перехода исполняется батареей':
             # СЛОЙ 5 РЕЕСТРА, ОТКРЫВАЮЩАЯ РАБОТА (честные ворота 1, 22.08). Стенды перехода
@@ -4382,10 +4403,11 @@ def _rules45_case(kind):
                 import csv as _csv47
                 import datetime as _dt47
                 import json as _js47
+                import transition as _TR47f
                 _reg47 = str(ROOT / 'instruments.csv')
                 _cids = {r['instrument']: r['con_id']
                          for r in _csv47.DictReader(open(_reg47, encoding='utf-8'))
-                         if r['instrument'] in __import__('transition').FUT_ROOTS}
+                         if r['instrument'] in _TR47f.FUT_ROOTS}
                 (_bd / 'margins_fix.json').write_text(_js47.dumps({
                     'ES': {'init': 34910.0, 'maint': 25059.0},
                     'MES': {'init': 3491.0, 'maint': 2506.0},
@@ -4393,18 +4415,22 @@ def _rules45_case(kind):
                     '_meta': {'date': _dt47.datetime.now(_dt47.timezone.utc)
                               .strftime('%Y-%m-%d'),
                               'account': 'DUTEST01',
-                              'series': ['ES', 'MES', 'ZN'],
+                              'series': sorted(_cids),   # из тех же строк, что con_ids
                               'con_ids': _cids}}, ensure_ascii=False), encoding='utf-8')
                 _os45.environ['ADDFUT_MARGINS'] = str(_bd / 'margins_fix.json')
                 _os45.environ['ADDFUT_REGISTRY'] = _reg47
-                # Книга Ф согласована с позициями стаба {'ZN': 1} — как _seed_books_from.
-                _ST47.save(_ST47.book_path('F'),
-                           _DL47.Book(d_fix=7.9, n_e=0, n_b=1, unit_is_mes=True,
+
+                def _bookF():
+                    # ОДНА фабрика книги на оба сценария (шестой прогон: два байт-в-байт
+                    # литерала уже заставили однажды править поле в двух местах).
+                    return _DL47.Book(d_fix=7.9, n_e=0, n_b=1, unit_is_mes=True,
                                       prev_st_eq=True, prev_st_bd=True, ser_a='U26',
                                       ser_b='U26', es_held=0,
                                       last_session='2026-08-08',
-                                      close_provisional=False,
-                                      prev_close_lev=1.99), 'F', 1)
+                                      close_provisional=False)
+
+                # Книга Ф согласована с позициями стаба {'ZN': 1} — как _seed_books_from.
+                _ST47.save(_ST47.book_path('F'), _bookF(), 'F', 1)
                 _J47.append(_bd / 'journal-F.csv', dict(
                     date='2026-08-08', leg='', instrument='ИТОГ', qty=0, px_order='-',
                     px_fill='', commission='', reason='', nav='1000000',
@@ -4495,13 +4521,7 @@ def _rules45_case(kind):
                 _M47.test_configure(str(_jx))
                 _M47.grant_granularity(str(_jx), str(_sx), '2026-08-10', 's1', 98565.0)
                 (_bd / 'route.txt').write_text('F', encoding='utf-8')
-                _ST47.save(_ST47.book_path('F'),
-                           _DL47.Book(d_fix=7.9, n_e=0, n_b=1, unit_is_mes=True,
-                                      prev_st_eq=True, prev_st_bd=True, ser_a='U26',
-                                      ser_b='U26', es_held=0,
-                                      last_session='2026-08-08',
-                                      close_provisional=False,
-                                      prev_close_lev=1.99), 'F', 1)
+                _ST47.save(_ST47.book_path('F'), _bookF(), 'F', 1)
                 _b2 = _Br(ok=False)
                 _r2 = _TR47.execute(_b2, str(_sp47), 1e6, _L, **_кв)
                 # Пришпилено к ПРЕДПРОСМОТРУ (пятый прогон): POSTPONED производится и
@@ -4511,17 +4531,30 @@ def _rules45_case(kind):
                                             and _r2.get('postponed') == 1)
                 out['отказал_именно_предпросмотр'] = any(
                     c[0] == 'preview' and c[1] for c in _b2.calls)
+                # «Вызван» не значит «произвёл вердикт» (шестой прогон): пришпиливаем и
+                # ПРИЧИНУ — why приходит из ветки отказа предпросмотра.
+                out['причина_отказа_предпросмотровая'] = (
+                    'О-3-Е' in str(_r2.get('why', '')))
             finally:
-                _M47.set_state_dir_for_tests(_keep_mrdir)
+                # ОКРУЖЕНИЕ — ПЕРВЫМ (шестой прогон): set_state_dir_for_tests умеет бросать
+                # (сторож _HELD, makedirs), и стоя первым, при отказе он оставлял
+                # фикстурные ADDFUT_* всем последующим случаям батареи.
                 for _k, _v in _keep_env.items():
                     if _v is None:
                         _os45.environ.pop(_k, None)
                     else:
                         _os45.environ[_k] = _v
+                try:
+                    _M47.set_state_dir_for_tests(_keep_mrdir)
+                except Exception as _exmr:
+                    out['error'] = (out.get('error') or '') + \
+                        f' | каталог МР не восстановлен: {_exmr}'
+                    out['ok'] = False
             out['ok'] = all([out['завершается'], out['предпросмотр_звался_с_планом'],
                              out['продажа_и_покупка_состоялись'],
                              out['отказ_откладывает'],
-                             out['отказал_именно_предпросмотр']])
+                             out['отказал_именно_предпросмотр'],
+                             out['причина_отказа_предпросмотровая']])
         elif kind == 'правила45: сторож серий и порог капитала перехода':
             # ВОРОТА 1 (правило 8в): первое измерение показало, что три ветки, заведённые
             # разбором 22.08, не исполняются батареей НИ РАЗУ — аварийная ветка реестра в
@@ -4593,6 +4626,14 @@ def _rules45_case(kind):
                 out['серии_реестра_требуют'] = (
                     _TR46._series_required(['ESU26', 'ZNU26']) is True
                     and _TR46._series_required(['ES', 'ZN']) is False)
+                # КОРНИ В БОЕВОМ feed — ТЕ ЖЕ, ЧТО В FUT_ROOTS (шестой прогон: «одна точка
+                # ВЕЗДЕ» была переобещанием — литералы feed.py:142/628 остались; вносить
+                # импорт transition в нижний слой дороже, чем держать равенство сверкой).
+                import inspect as _ins46
+                _feed_src = _ins46.getsource(_FD46)
+                out['корни_feed_не_разъехались'] = (
+                    _feed_src.count("('ES', 'MES', 'ZN')") == 2
+                    and set(_TR46.FUT_ROOTS) == {'ES', 'MES', 'ZN'})
                 # ЖИВАЯ ВЕТКА «реестр несёт серии, а цели голые» (честные ворота: батарея
                 # гоняла её только с нечитаемым и шаблонным реестрами — обе стороны False).
                 import ib_stub as _IBS46
@@ -4606,8 +4647,16 @@ def _rules45_case(kind):
                 # ПОРОГ КАПИТАЛА ПЕРЕХОДА В Ф: батарея живёт на бумажных капиталах выше
                 # порога, и ветка не исполнялась никогда. Оба конца: без аварии — Incident
                 # с кодом причины; с аварией порог обходится (падение дальше — ДРУГОЕ).
-                # (registry уже боевой с восстановления выше; мёртвый дубль снят — пятый
-                # прогон: «читатель, убирая дубль, с равной вероятностью удалит несущую».)
+                # ФИКСТУРНЫЙ ADDFUT_REGISTRY снимается ЗДЕСЬ (шестой прогон: прежний
+                # комментарий говорил «registry уже боевой», но данные читаются по env, и
+                # окно фикстуры тянулось сквозь обе пробы — сегодня безвредно, отказы
+                # стоят раньше чтения, но пробы исполнялись в среде, противоположной
+                # задокументированной).
+                _v46 = _keep_env.get('ADDFUT_REGISTRY')
+                if _v46 is None:
+                    _os45.environ.pop('ADDFUT_REGISTRY', None)
+                else:
+                    _os45.environ['ADDFUT_REGISTRY'] = _v46
                 try:
                     _TR46.execute(None, str(Path(_bd) / 'tr.json'), 2_900_000, {},
                                   'sig-стенд', 'E', to_route='F')
@@ -4639,6 +4688,7 @@ def _rules45_case(kind):
                              out['нечитаемый_реестр_консервативен'],
                              out['ошибка_кода_не_глотается'],
                              out['серии_реестра_требуют'],
+                             out['корни_feed_не_разъехались'],
                              out['голая_цель_при_живом_реестре'],
                              out['серийная_цель_проходит'],
                              out['порог_капитала_держит'],
@@ -4896,8 +4946,8 @@ def _worm_case(kind):
             # БОЕВАЯ функция, и её мутация теперь наблюдаема этим же стендом.
             import json as _js46
             _mrg0 = _js46.loads(Path(os.environ['ADDFUT_MARGINS']).read_text(encoding='utf-8'))
-            # ПОСЛЕДНЯЯ по сортировке, а не первая (пятый прогон): 'ESU26' — подстрока
-            # 'MESU26', и конъюнкт `_drop in _txt` был вакуумен — совпадал на ЧУЖОЙ серии.
+            # Несущая защита — ТОЧНОЕ сравнение списка ниже; [-1] лишь делает имя
+            # непохожим на соседей (пятый-шестой прогоны: 'ESU26' — подстрока 'MESU26').
             _drop = sorted(_mrg0['_meta']['series'])[-1]
             _mrg0['_meta']['series'] = [x for x in _mrg0['_meta']['series'] if x != _drop]
             _mrg0['_meta']['con_ids'].pop(_drop, None)
@@ -5384,7 +5434,7 @@ def _r47orch(r):
 
 
 
-if BRANCH_COVER.exists():
+if BRANCH_COVER_OK:
     @rinv('ворота покрытия не зачитывают неисполненное и склеивают многострочное',
           needs=lambda r: r['case'] == 'правила45: ворота покрытия наблюдают сами себя')
     def _r46gate(r):

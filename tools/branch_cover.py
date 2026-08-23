@@ -115,11 +115,36 @@ def file_facts(path):
                         for _f, _v in ast.iter_fields(_n))
         if isinstance(_n, ast.stmt) and not _compound \
                 and getattr(_n, 'end_lineno', None) and _n.end_lineno > _n.lineno:
-            _has_lazy = any(isinstance(_x, _lazy_t) for _x in ast.walk(_n))
+            # Шестой прогон, доказано зондами: сообщение assert вычисляется ТОЛЬКО при
+            # провале, третий операнд цепного сравнения — только при истинности первых.
+            _has_lazy = (any(isinstance(_x, _lazy_t) for _x in ast.walk(_n))
+                         or (isinstance(_n, ast.Assert) and _n.msg is not None)
+                         or any(isinstance(_x, ast.Compare) and len(_x.ops) > 1
+                                for _x in ast.walk(_n)))
             _spans.append((set(range(_n.lineno, _n.end_lineno + 1)), _has_lazy))
         if isinstance(_n, ast.ExceptHandler) and _is_catchall(_n.type):
             _catch.add(_n.lineno)
     return _spans, _catch
+
+
+def credit_spans(executed, spans):
+    """Зачёт спанов: НЕленивому — все строки, ленивому — только заголовок (мёртвые ветви
+    внутри ловит канал однобокости). До неподвижной точки: предложения могут делить строку
+    через точку с запятой. Вынесено из main() шестым прогоном: политика потребления флага
+    не исполнялась ни одним стендом, и её инверсия воскрешала бы затопление под зелёной
+    самопроверкой, которая видит только производство флага.
+    """
+    _ex = set(executed)
+    _grew = True
+    while _grew:
+        _grew = False
+        for _span, _lazy in spans:
+            if _ex & _span:
+                _add = {min(_span)} if _lazy else _span
+                if not _add <= _ex:
+                    _ex |= _add
+                    _grew = True
+    return _ex
 
 
 def measure(target):
@@ -169,14 +194,16 @@ def main():
     # вердикту «мутаций, которых не поймал никто».
     # Вне области: mutation.py исполняет собственный прогон, а не батарея; сам инструмент
     # меряет себя частично (report-ветки идут после снятия монитора) — self-шум.
-    # Вне области: mutation.py и contour_test.py исполняют собственные прогоны;
-    # branch_cover.py меряет сам себя лишь частично; review_new_code.py меняется каждый
-    # круг ПО ПОСТРОЕНИЮ (KRUG_N) и батареей не импортируется — без льготы подготовка
-    # следующего круга давала бы гарантированное ложное красное.
-    _out_of_scope = ('mutation.py', 'branch_cover.py', 'review_new_code.py',
-                     'contour_test.py')
+    # Вне замера БАТАРЕЕЙ: mutation.py исполняет собственный прогон, branch_cover.py
+    # меряет себя частично. Остальная обвязка и меняющийся по построению review_new_code
+    # (KRUG_N каждый круг) — СПРАВОЧНЫЙ ярус, не невидимость: шестой прогон показал, что
+    # полное исключение прятало бы недостижимый зонд бесследно. Имена сравниваются ТОЧНО
+    # (Path.name): endswith ловил бы будущий permutation.py как чужую запись.
+    _out_of_scope = {'mutation.py', 'branch_cover.py'}
+    _infra_names = {'invariants.py', 'ib_stub.py', 'fake_broker.py',
+                    'contour_test.py', 'review_new_code.py'}
     diff = {f: l for f, l in diff.items()
-            if not f.endswith(_out_of_scope)}
+            if Path(f).name not in _out_of_scope}
     diff = {f: (l & executable(f)) for f, l in diff.items()}
     diff = {f: l for f, l in diff.items() if l}
     if not diff:
@@ -203,18 +230,8 @@ def main():
     for f, lines in sorted(diff.items()):
         _ex = set(seen.get(f, set()))
         _spans, _catch = file_facts(f)
-        # До неподвижной точки: два многострочных предложения могут делить строку через
-        # точку с запятой, и однопроходное слияние зависело бы от порядка.
-        _grew = True
-        while _grew:
-            _grew = False
-            for _span, _lazy in _spans:
-                if _ex & _span:
-                    _add = {min(_span)} if _lazy else _span
-                    if not _add <= _ex:
-                        _ex |= _add
-                        _grew = True
-        _test_infra = f.endswith(('invariants.py', 'ib_stub.py', 'fake_broker.py'))
+        _ex = credit_spans(_ex, _spans)
+        _test_infra = Path(f).name in _infra_names
         for ln in sorted(lines):
             _name = f'{Path(f).relative_to(ROOT)}:{ln}'
             if ln not in _ex:

@@ -53,6 +53,13 @@ def fut_root(instrument):
     return n
 
 
+def is_fut_name(instrument):
+    """Имя принадлежит фьючерсному корню — ОДНО правило сопоставления на файл (шестой
+    прогон: `not in FUT_ROOTS` и `startswith(FUT_ROOTS)` — два пересказа внутренностей
+    fut_root, расходящиеся при первой же нормализации имени)."""
+    return fut_root(instrument) in FUT_ROOTS
+
+
 def fut_series(instrument):
     """Серия из полного имени ('MESU26' -> 'U26'); пустая строка, если имя голое."""
     n = str(instrument)
@@ -878,7 +885,10 @@ def _bare_dst(dst_names):
     """Голые (бессерийные) фьючерсные цели плана — одной функцией на обе ветки предполёта:
     копии выражения в соседних взаимоисключающихся ветках разъехались бы при первой правке
     нормализации имён (пятый прогон /code-review)."""
-    return sorted({str(n) for n in (dst_names or ()) if str(n) in FUT_ROOTS})
+    # БЕЗ `or ()` (шестой прогон): None здесь — потерянные ИМЕНА при существующих целях,
+    # и прежние инлайны честно падали TypeError (ошибка кода, трассировка); мягкий []
+    # превращал крах в молчаливый пропуск сторожа голой цели на аварийных воротах.
+    return sorted({str(n) for n in dst_names if str(n) in FUT_ROOTS})
 
 
 # ОШИБКА КОДА НЕ СТАНОВИТСЯ ПРЕДПОЛЁТНЫМ ВЕРДИКТОМ НИ В ОДНОМ ИЗ ЗДЕШНИХ ПЕРЕХВАТОВ
@@ -920,7 +930,7 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
             # fut_root вернул полный корень ЛИБО имя целиком: не-корень — это «не фьючерс».
             # Литеральный кортеж здесь был ТРЕТЬЕЙ копией FUT_ROOTS (пятый прогон): новый
             # корень выпадал бы из сторожа календаря ролла молча — fail-open к поставке.
-            if _root_r not in FUT_ROOTS:
+            if _root_r not in FUT_ROOTS:      # эквивалент not is_fut_name: _root_r уже вычислен
                 continue                       # фонды календарём ролла не связаны
             _ser_r = fut_series(_dn)
             if not _ser_r:
@@ -2216,7 +2226,7 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
     # брокера) укладывался в допуск и уходил в книгу, где нога считается целыми контрактами.
     for _kf, _vf in (now or {}).items():
         # Тот же класс: не свой кортеж, а единственный источник корней (пятый прогон).
-        if not str(_kf).startswith(FUT_ROOTS):
+        if not is_fut_name(_kf):
             continue
         _ff = float(_vf or 0)
         if abs(_ff - round(_ff)) > 1e-9:

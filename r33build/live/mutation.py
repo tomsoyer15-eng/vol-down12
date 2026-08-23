@@ -1823,17 +1823,19 @@ def _run_mutations():
         return orig, (lambda reg_keys: False), _TR5, '_series_required'
 
     def registry_read_swallows_code_errors():
-        """Чтение реестра публикации снова глотает ошибки кода — TypeError становится
-        «реестр нечитаем, консервативно» вместо трассировки: опечатка чинится деньгами."""
+        """ЧИТАТЕЛЬ реестра снова глотает ошибки кода — TypeError становится «реестр
+        нечитаем» вместо трассировки. Патчится _read_registry_keys — ОБЩАЯ точка предполёта
+        и публикации: прежняя мутация била в обёртку публикации, которую предполёт не
+        зовёт, и заявление «копия наблюдаема мутацией» было ложным (шестой прогон)."""
         import transition as _TR6
-        orig = _TR6._registry_keys_or_none
+        orig = _TR6._read_registry_keys
 
         def patched():
             try:
                 return orig()
-            except Exception:
-                return None
-        return orig, patched, _TR6, '_registry_keys_or_none'
+            except Exception as _e:
+                return None, _e
+        return orig, patched, _TR6, '_read_registry_keys'
 
     def book_lock_ignores_book():
         """Замок книги снова берётся на каталог состояния независимо от того, где книга —
@@ -3307,14 +3309,17 @@ if __name__ == '__main__':
     # видеть режим там же, где число.
     # Режим — ПО СЕМЬЕ (пятый прогон): досрочный выход есть только у run; таблица
     # адаптера полна всегда, и общий ярлык «ОБРЕЗАН» ложно дисконтировал её точную цифру.
-    _modes = {'run': ('ПОЛНЫЙ прогон' if _mut_full() else
-                      'ОБРЕЗАН досрочным выходом — список ЗАВЫШЕН, судить по полному'),
-              'adapter': 'ПОЛНЫЙ прогон (досрочного выхода нет)'}
-    for _fam, _reg in (('run', getattr(I, 'RUN', [])),
-                       ('adapter', getattr(I, 'ADAPTER', []))):
+    # Ярлык — ТРЕТЬИМ ЭЛЕМЕНТОМ кортежа семьи (шестой прогон: словарь, ключуемый именем
+    # из соседнего цикла, давал бы KeyError на новой семье ПОСЛЕ многоминутного прогона).
+    for _fam, _reg, _mode in (
+            ('run', getattr(I, 'RUN', []),
+             'ПОЛНЫЙ прогон' if _mut_full() else
+             'ОБРЕЗАН досрочным выходом — список ЗАВЫШЕН, судить по полному'),
+            ('adapter', getattr(I, 'ADAPTER', []),
+             'ПОЛНЫЙ прогон (досрочного выхода нет)')):
         _seen = KILLERS.get(_fam, {})
         _weak = [n for n, _f, _nd in _reg if not _seen.get(n)]
-        print(f"\nУТВЕРЖДЕНИЯ СЕМЬИ «{_fam}» БЕЗ ЕДИНОГО УБИЙЦЫ ({_modes[_fam]}): "
+        print(f"\nУТВЕРЖДЕНИЯ СЕМЬИ «{_fam}» БЕЗ ЕДИНОГО УБИЙЦЫ ({_mode}): "
               f"{len(_weak)} из {len(_reg)}")
         for w in _weak:
             print(f'   {w}')
