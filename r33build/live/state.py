@@ -132,7 +132,15 @@ def book_lock_dir(path=None):
         if not _src:
             return lock_dir()
     else:
-        _src, _откуда = path, 'аргумент book_lock_dir'
+        # ИМЯ ИСТОЧНИКА — ПО ФАКТУ, А НЕ ПО ВЕТКЕ (седьмой прогон /code-review, №13). Все
+        # боевые вызывающие (session.py, daily.py) передают book_path(route), а он —
+        # os.environ['ADDFUT_BOOK_PATH']; называя источником «аргумент», сообщение указывало
+        # оператору на величину, которой на его уровне не существует, — ровно вопреки цели
+        # правки, которая это имя и вводила. Правдивая ветка при этом была недостижима из боя.
+        _env_bp = os.environ.get('ADDFUT_BOOK_PATH')
+        _src = path
+        _откуда = ('ADDFUT_BOOK_PATH' if _env_bp and str(path) == str(_env_bp)
+                   else 'аргумент book_lock_dir')
     _p = Path(_src)
     if not _p.is_absolute():
         raise ValueError(
