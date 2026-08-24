@@ -39,8 +39,12 @@ def map_mes(n):
 # зависимым от того, звали ли до этого execute.
 import sys as _sys0, os as _os0
 _live0 = _os0.path.join(_os0.path.dirname(_os0.path.abspath(__file__)), 'live')
-if _live0 not in _sys0.path:
-    _sys0.path.insert(0, _live0)
+# БЕЗ ВЕТВЛЕНИЯ (ворота 8в-1). Прежняя форма `if _live0 not in path: insert` оставляла
+# тело неисполнимым везде, где путь уже стоит, — то есть в батарее ВСЕГДА. Ворота честно
+# назвали строку неисполненной, и закрывать её стендом означало бы городить искусственную
+# среду ради одной вставки. Эта форма исполняется всегда, идемпотентна и даёт тот же
+# результат: live/ первым, без дубля.
+_sys0.path[:] = [_live0] + [_p0 for _p0 in _sys0.path if _p0 != _live0]
 import contracts as _CT                                              # noqa: E402
 from contracts import fut_root, fut_series, is_fut_name              # noqa: E402,F401
 # КОРТЕЖ БЕРЁТСЯ АТРИБУТОМ, А НЕ from-ИМПОРТОМ. from-импорт связывает объект в момент
