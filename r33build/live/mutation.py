@@ -1822,6 +1822,26 @@ def _run_mutations():
         orig = _TR5._series_required
         return orig, (lambda reg_keys: False), _TR5, '_series_required'
 
+    def fut_name_always_true():
+        """Опознание фьючерсного имени тождественно ИСТИННО. Обратный конец пары к
+        fut_name_always_false: законная ДРОБНАЯ доля фонда (маршрут Е торгует дробями)
+        объявляется дробным фьючерсом, и COMPLETE запрещается на исправном счёте.
+        Патчится contracts.is_fut_name — единственный источник правила (седьмой прогон,
+        №5): прежде правило жило внутри _execute_locked и обе константы оставляли ВСЮ
+        батарею зелёной."""
+        import contracts as _CTt
+        orig = _CTt.is_fut_name
+        return orig, (lambda instrument: True), _CTt, 'is_fut_name'
+
+    def fut_name_always_false():
+        """Опознание фьючерсного имени тождественно ЛОЖНО: дробный остаток фьючерса от
+        частичного фила проходит финальную сверку и уходит в книгу, где нога считается
+        ЦЕЛЫМИ контрактами (дефект двадцать девятого круга, №10), а голое имя в позициях
+        перестаёт ловиться сторожем публикации hand_over_book."""
+        import contracts as _CTf
+        orig = _CTf.is_fut_name
+        return orig, (lambda instrument: False), _CTf, 'is_fut_name'
+
     def registry_read_swallows_code_errors():
         """ЧИТАТЕЛЬ реестра снова глотает ошибки кода — TypeError становится «реестр
         нечитаем» вместо трассировки. Патчится _read_registry_keys — ОБЩАЯ точка предполёта
@@ -2014,6 +2034,8 @@ def _run_mutations():
             ('остаток лота сравнивается с точным нулём', consume_partial_exact_zero),
             ('сторож серий публикации выключен', series_required_off),
             ('чтение реестра глотает ошибки кода', registry_read_swallows_code_errors),
+            ('фьючерсным считается любое имя', fut_name_always_true),
+            ('фьючерсным не считается ничто', fut_name_always_false),
             ('диагност игнорирует коды причин', diagnose_ignores_cause_codes),
             ('замер без счёта заверяется молча', worm_account_fail_open),
             ('заголовок журнала не сверяется', journal_header_unchecked),

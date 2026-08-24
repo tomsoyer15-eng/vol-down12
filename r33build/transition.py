@@ -32,38 +32,21 @@ def map_mes(n):
     ОБЯЗАНА совпадать с sim_v164.map_mes — сверяется самопроверкой."""
     return (n // 10, n % 10)
 
-FUT_ROOTS = ('MES', 'ES', 'ZN')          # порядок важен: MES проверяется раньше ES
-
-
-def fut_root(instrument):
-    """Корень фьючерса из ПОЛНОГО имени: 'MESU26' -> 'MES', 'ZNZ26' -> 'ZN'.
-
-    ИМЯ И КОРЕНЬ — РАЗНЫЕ ВЕЛИЧИНЫ (двадцать пятый круг, №2). Маржа (FUT_MARGIN, живой
-    замер) и упаковка ES/MES ключуются КОРНЕМ, а инструмент заявки, книга и поставочная
-    серия требуют ПОЛНОГО имени. Прежде эти два смысла были склеены: mapped_book сравнивал
-    имя точно с 'MES', а hand_over_book (двадцать третий круг, №7) требовал серию — переход
-    Е→Ф либо отказывал до сделки на правильных именах, либо исполнялся на голых и отвергал
-    книгу УЖЕ ПОСЛЕ покупки фьючерсов, то есть уходил в MIXED с фактической позицией без
-    управляемой серии и без ролла перед поставкой.
-    """
-    n = str(instrument)
-    for r in FUT_ROOTS:
-        if n.startswith(r):
-            return r
-    return n
-
-
-def is_fut_name(instrument):
-    """Имя принадлежит фьючерсному корню — ОДНО правило сопоставления на файл (шестой
-    прогон: `not in FUT_ROOTS` и `startswith(FUT_ROOTS)` — два пересказа внутренностей
-    fut_root, расходящиеся при первой же нормализации имени)."""
-    return fut_root(instrument) in FUT_ROOTS
-
-
-def fut_series(instrument):
-    """Серия из полного имени ('MESU26' -> 'U26'); пустая строка, если имя голое."""
-    n = str(instrument)
-    return n[len(fut_root(n)):]
+# КОРНИ, РАЗБОР ИМЕНИ И НОГА — ИЗ contracts.py (седьмой прогон, №3/№4): здесь они были
+# одной из четырёх копий кортежа, а «одно правило на файл» опровергалось соседним
+# _ser_of в hand_over_book. Путь к live/ ставится на уровне модуля, а не внутри execute:
+# правило разбора имени нужно уже при импорте, и ленивая вставка сделала бы FUT_ROOTS
+# зависимым от того, звали ли до этого execute.
+import sys as _sys0, os as _os0
+_live0 = _os0.path.join(_os0.path.dirname(_os0.path.abspath(__file__)), 'live')
+if _live0 not in _sys0.path:
+    _sys0.path.insert(0, _live0)
+import contracts as _CT                                              # noqa: E402
+from contracts import fut_root, fut_series, is_fut_name              # noqa: E402,F401
+# КОРТЕЖ БЕРЁТСЯ АТРИБУТОМ, А НЕ from-ИМПОРТОМ. from-импорт связывает объект в момент
+# импорта, и подмена канона в стенде до этого имени не доходит — то есть «одна точка»
+# опять оказалась бы непроверяемой. Функции from-импортировать можно: они читают
+# FUT_ROOTS в пространстве contracts В МОМЕНТ ВЫЗОВА и за подменой следуют.
 
 
 def mapped_book(instrument, units):
@@ -881,6 +864,30 @@ def pv_remainder(plan, done, partial=None):
     return out
 
 
+def fractional_fut(positions):
+    """Дробные ФЬЮЧЕРСНЫЕ позиции в книге брокера — отдельной функцией (седьмой прогон, №5).
+
+    Правило жило внутри _execute_locked, и единственная его точка — вызов is_fut_name —
+    парной мутацией не наблюдалась: обе константы (тождественно True и тождественно False)
+    оставляли ВСЮ батарею зелёной. Здесь у правила одна точка мутации и оба конца видны:
+      * is_fut_name == False всегда -> дробный фьючерс проходит в COMPLETE (дефект
+        двадцать девятого круга, №10: остаток частичного фила уходит в книгу, где нога
+        считается целыми контрактами);
+      * is_fut_name == True всегда -> ЗАКОННАЯ дробная доля фонда (маршрут Е торгует
+        дробями) объявляется дробным фьючерсом и запрещает COMPLETE — переход не
+        завершается на исправном счёте.
+    Допуск 1e-9 — тот же, что у сверки закрытия источника строкой выше.
+    """
+    out = []
+    for k, v in (positions or {}).items():
+        if not is_fut_name(k):
+            continue
+        f = float(v or 0)
+        if abs(f - round(f)) > 1e-9:
+            out.append(k)
+    return sorted(out)
+
+
 def _bare_dst(dst_names):
     """Голые (бессерийные) фьючерсные цели плана — одной функцией на обе ветки предполёта:
     копии выражения в соседних взаимоисключающихся ветках разъехались бы при первой правке
@@ -888,7 +895,7 @@ def _bare_dst(dst_names):
     # БЕЗ `or ()` (шестой прогон): None здесь — потерянные ИМЕНА при существующих целях,
     # и прежние инлайны честно падали TypeError (ошибка кода, трассировка); мягкий []
     # превращал крах в молчаливый пропуск сторожа голой цели на аварийных воротах.
-    return sorted({str(n) for n in dst_names if str(n) in FUT_ROOTS})
+    return sorted({str(n) for n in dst_names if str(n) in _CT.FUT_ROOTS})
 
 
 # ОШИБКА КОДА НЕ СТАНОВИТСЯ ПРЕДПОЛЁТНЫМ ВЕРДИКТОМ НИ В ОДНОМ ИЗ ЗДЕШНИХ ПЕРЕХВАТОВ
@@ -913,6 +920,21 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
         _sp.path.insert(0, _lv)
     import state as _STp, daily as _DLp, journal as _Jp
 
+    # КОНТРАКТ ИМЁН ЦЕЛИ — ОДНОЙ ПРОВЕРКОЙ НА ВХОДЕ (седьмой прогон /code-review, №2).
+    # В шестом прогоне я снял `or ()` в _bare_dst, чтобы потерянные имена честно падали
+    # TypeError, и объявил вопрос закрытым. Но _bare_dst зовётся ПОЗЖЕ двух соседей по той
+    # же переменной, которые свои `or ()` сохранили: сторож календаря ролла (ниже) при None
+    # обходил пустой список и пропускал уходящую серию к поставке — тот самый fail-open,
+    # который его же комментарий запрещает, — а требование свежей d_fix отключалось через
+    # _zn_target=False. До _bare_dst дело могло не дойти вовсе: при голом реестре
+    # _series_required ложно, и ветка не берётся. Отдельно ловится СТРОКА вместо списка:
+    # _bare_dst('ESU26') перебирает буквы и молча отдаёт [] — сторож выключен без ошибки.
+    if _dst_names is None or isinstance(_dst_names, str):
+        raise TypeError(
+            f'_preflight_handover: _dst_names={_dst_names!r} — имена целей потеряны или '
+            f'переданы одной строкой; сторожа голой цели и календаря ролла на таком входе '
+            f'молча пропускают уходящую серию к поставке (ошибка кода, не вердикт)')
+
     # СЕРИЯ ЦЕЛИ СВЕРЯЕТСЯ С КАЛЕНДАРЁМ РОЛЛА (СОРОК ЧЕТВЁРТЫЙ КРУГ, №3, P0).
     # Проверялось лишь, что имя несёт серию, но не то, что серия НЕ УХОДЯЩАЯ. В день ролла
     # реестр законно содержит обе (26.08 — U26 и Z26), и переход Е->Ф мог купить U26. Дальше
@@ -925,12 +947,12 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
         import feed as _FDr
         _today_r = _FDr.exchange_today()
         _hol_r = _DLp.holidays_for(_today_r.year)
-        for _dn in (_dst_names or ()):
+        for _dn in _dst_names:          # без `or ()`: None отсечён на входе
             _root_r = fut_root(_dn)
             # fut_root вернул полный корень ЛИБО имя целиком: не-корень — это «не фьючерс».
             # Литеральный кортеж здесь был ТРЕТЬЕЙ копией FUT_ROOTS (пятый прогон): новый
             # корень выпадал бы из сторожа календаря ролла молча — fail-open к поставке.
-            if _root_r not in FUT_ROOTS:      # эквивалент not is_fut_name: _root_r уже вычислен
+            if _root_r not in _CT.FUT_ROOTS:  # эквивалент not is_fut_name: _root_r уже вычислен
                 continue                       # фонды календарём ролла не связаны
             _ser_r = fut_series(_dn)
             if not _ser_r:
@@ -1122,7 +1144,7 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
         # Возврат в Ф с ЖИВОЙ ногой Б требует свежей доходности; старая книга больше не
         # доказательство. Стендам — явная калитка, как у замера маржи и даты перехода.
         import os as _osd3
-        _zn_target = any(str(_n).startswith('ZN') for _n in (_dst_names or ()))
+        _zn_target = any(fut_root(_n) == 'ZN' for _n in _dst_names)
         _dfx_ok = False
         _dfx_val = 0.0
         try:
@@ -2224,14 +2246,10 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
     # проверяла ДОЛЛАРОВЫЙ допуск до половины единицы цели, но не требовала, чтобы сама
     # позиция была целой: дробный остаток фьючерса (следствие частичного фила или ошибки
     # брокера) укладывался в допуск и уходил в книгу, где нога считается целыми контрактами.
-    for _kf, _vf in (now or {}).items():
-        # Тот же класс: не свой кортеж, а единственный источник корней (пятый прогон).
-        if not is_fut_name(_kf):
-            continue
-        _ff = float(_vf or 0)
-        if abs(_ff - round(_ff)) > 1e-9:
-            fail(f'{_kf}: дробная фьючерсная позиция {_ff:+g} у брокера — книга считает '
-                 f'ногу ЦЕЛЫМИ контрактами, COMPLETE запрещён (ручная сверка)')
+    for _kf in fractional_fut(now):
+        _ff = float((now or {})[_kf] or 0)
+        fail(f'{_kf}: дробная фьючерсная позиция {_ff:+g} у брокера — книга считает '
+             f'ногу ЦЕЛЫМИ контрактами, COMPLETE запрещён (ручная сверка)')
     for name, spec in legs.items():
         di, dp = spec['dst'][0], spec['dst'][1]
         planned_usd = sum(n*u for _, n, u in spec['src'])
@@ -2634,14 +2652,14 @@ def hand_over_book(broker, from_route, to_route, positions=None):
         # неизвестном реестре считаем, что серия требуется. Позиции с сериями публикуются
         # как обычно: там книга родится роллируемой, и останавливать нечего.
         _reg_has_series = _series_required(_registry_keys_or_none())
-        def _ser_of(k):                    # ТА ЖЕ логика, что у state.book_from_broker
-            k = str(k)
-            if k.startswith('MES'): return k[3:]
-            if k.startswith('ES'):  return k[2:]
-            if k.startswith('ZN'):  return k[2:]
-            return None
+        # ГОЛОЕ ФЬЮЧЕРСНОЕ ИМЯ — ЭТО is_fut_name БЕЗ СЕРИИ (седьмой прогон, №3). Здесь
+        # стоял свой разбор корней (_ser_of), пересказывавший fut_root срезами [3:]/[2:]:
+        # при добавлении четвёртого корня он отвечал None вместо '', позиция без серии не
+        # попадала в _bad_ser, и сторож ниже пропускал книгу Ф с пустым ser_a/ser_b —
+        # leg_roll_due навсегда «ролл не нужен», нога идёт в поставку. Замена дословно
+        # равна прежней на всех входах: имя вне FUT_ROOTS даёт False обоими путями.
         _bad_ser = sorted({k for k, v in (_pos_src or {}).items()
-                           if float(v or 0) and _ser_of(k) == ''})
+                           if float(v or 0) and is_fut_name(k) and not fut_series(k)})
         if _bad_ser and _reg_has_series:
             raise RuntimeError(
                 f'позиции {_bad_ser} без серии контракта: книга Ф получила бы пустой '

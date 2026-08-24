@@ -20,6 +20,7 @@
 """
 import fcntl, hashlib, json, os, tempfile
 from contextlib import contextmanager
+import contracts as _CT      # корни/серия/нога — одна точка (contracts.FUT_ROOTS)
 from pathlib import Path
 
 # ОШИБКИ КОДА, КОТОРЫЕ НЕЛЬЗЯ ЛОВИТЬ ШИРОКИМ except — ОДНО ОПРЕДЕЛЕНИЕ НА СЛОЙ
@@ -389,12 +390,9 @@ def check_one_series(pos):
     защиты была парная мутация, бьющая ровно в неё."""
     _ser = {'А': set(), 'Б': set()}
     for k in pos:
-        if k.startswith('MES'):
-            _ser['А'].add(k[3:])
-        elif k.startswith('ES'):
-            _ser['А'].add(k[2:])
-        elif k.startswith('ZN'):
-            _ser['Б'].add(k[2:])
+        _lg = _CT.fut_leg(k)          # разбор корня был здесь третьей копией (седьмой прогон)
+        if _lg:
+            _ser[_lg].add(_CT.fut_series(k))
     for _leg, _ss in _ser.items():
         if len(_ss) > 1:
             raise ValueError(f'нога {_leg}: у брокера несколько серий {sorted(_ss)} — книга '
@@ -420,7 +418,7 @@ def book_from_broker(cls, positions, route, *, ser_a=None, ser_b=None, unit_is_m
     # ПОСТОРОННЯЯ ПОЗИЦИЯ НЕ ВЫБРАСЫВАЕТСЯ (девятнадцатый круг, №12): книга, построенная
     # «только из знакомых инструментов», молча теряла чужую позицию, появившуюся во время
     # перехода, — она оставалась неуправляемой при формально успешной передаче.
-    known = (('CSPX', 'CBU0') if route == 'E' else ('MES', 'ES', 'ZN'))
+    known = (('CSPX', 'CBU0') if route == 'E' else _CT.FUT_ROOTS)
     alien = [k for k in pos
              if not any(str(k).startswith(w) for w in known)] if route != 'E' else \
             [k for k in pos if k not in known]
@@ -440,12 +438,13 @@ def book_from_broker(cls, positions, route, *, ser_a=None, ser_b=None, unit_is_m
     # это разбор вручную (О-5), а не арифметика.
     check_one_series(pos)
     for k, v in pos.items():
-        if k.startswith('MES'):
-            mes += int(v); ser_a = ser_a or k[3:]
-        elif k.startswith('ES'):
-            es += int(v); ser_a = ser_a or k[2:]
-        elif k.startswith('ZN'):
-            zn += int(v); ser_b = ser_b or k[2:]
+        _r = _CT.fut_root(k)          # четвёртая копия срезов [3:]/[2:] (седьмой прогон)
+        if _r == 'MES':
+            mes += int(v); ser_a = ser_a or _CT.fut_series(k)
+        elif _r == 'ES':
+            es += int(v); ser_a = ser_a or _CT.fut_series(k)
+        elif _r == 'ZN':
+            zn += int(v); ser_b = ser_b or _CT.fut_series(k)
     # НЕЗАВЕРШЁННЫЙ РОЛЛ ПЕРЕЖИВАЕТ СМЕНУ МАРШРУТА. Позиции у брокера говорят, ЧТО есть, но
     # не говорят, что осталось СДЕЛАТЬ. Прежде признак отложенного ролла терялся при
     # перестроении книги: перенос не состоялся бы до следующего квартального ролла, и

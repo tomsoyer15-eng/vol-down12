@@ -139,7 +139,7 @@ def registry_horizon(book, today=None, days=REG_HORIZON_DAYS):
         # серии книги не несут корня: одна и та же буква (U26) стоит у обеих ног, поэтому
         # целевую серию требуем у ВСЕХ трёх корней — сетка ноги А держит ES и MES, нога Б
         # держит ZN; лишний корень в требовании не вредит (реестр first_connect пишет все).
-        need = [f'{r}{target}' for r in ('ES', 'MES', 'ZN')]
+        need = [f'{r}{target}' for r in CT.FUT_ROOTS]     # одна точка: contracts.FUT_ROOTS
         miss = [x for x in need if x not in reg]
         if miss:
             problemy.append(f'ролл {tag} {dl:%d.%m} требует {need}, в реестре нет {miss}')
@@ -625,7 +625,7 @@ def reference_prices(ib, route='F'):
     """
     today = exchange_today()
     reg = registry()
-    want = ('CSPX', 'CBU0') if route == 'E' else ('ES', 'MES', 'ZN')
+    want = ('CSPX', 'CBU0') if route == 'E' else CT.FUT_ROOTS
     # ТОЧНАЯ ПРЕДЫДУЩАЯ СЕССИЯ И ДЛЯ ОРИЕНТИРОВ (девятнадцатый круг, №16): без неё ориентир
     # дальней MES/ZN-серии мог быть на сессию старше — пятидневный допуск это пропускал, и
     # сверка §7 на роллах систематически мерила издержки от чужого закрытия.
