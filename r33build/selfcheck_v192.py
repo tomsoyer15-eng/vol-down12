@@ -189,6 +189,7 @@ chk('Е масштаб пилота 1 млн', abs(c1-9.70) <= 0.02 and abs(st1[
 # --- боевой контур ред. 33: он теперь часть пакета, значит и часть проверок ---
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'live'))
 import daily as _DL, journal as _J
+import contracts as _CTsc      # корни — одна точка (contracts.FUT_ROOTS)
 import mr_engine as _M2
 import pandas as _pd, tempfile as _tf
 
@@ -199,7 +200,7 @@ _m = _DL.Market(date=_pd.Timestamp('2026-08-26'), px_eq_prev=600.0, dref_prev=8.
 _rd = _DL.step(_held, _m, 10_000_000.0, check_guards=False)
 _ro = _DL.book_to_orders(_rd, _held)
 chk('контур: ролл даёт пару заявок в РАЗНЫХ сериях',
-    len(_rd.roll_pairs) == 2 and all(i not in ('ES', 'MES', 'ZN') for i, _ in _ro)
+    len(_rd.roll_pairs) == 2 and all(i not in _CTsc.FUT_ROOTS for i, _ in _ro)
     and sorted(q for i, q in _ro if i.startswith('ZN')) == [-101, 101])
 _nx = _DL.step(_rd.book_after, _DL.Market(date=_pd.Timestamp('2026-08-27'), px_eq_prev=600.0,
                dref_prev=8.0, dref_today=8.0, px_eq_today=600.0, roll_today=False,
@@ -579,10 +580,10 @@ open(_MFIX, 'w').write(_json1.dumps({
     # же instruments.csv, на который смотрит ADDFUT_REGISTRY ниже. Без поля замер теперь
     # отвергается — имя серии переживает исправление con_id, а маржа нет.
     '_meta': {'date': _dt1.datetime.now(_dt1.timezone.utc).strftime('%Y-%m-%d'),
-              'account': 'DUTEST01', 'series': ['ES', 'MES', 'ZN'],
+              'account': 'DUTEST01', 'series': list(_CTsc.FUT_ROOTS),
               'con_ids': {r['instrument']: r['con_id']
                           for r in csv.DictReader(open('instruments.csv', encoding='utf-8'))
-                          if r['instrument'] in ('ES', 'MES', 'ZN')}}}))
+                          if r['instrument'] in _CTsc.FUT_ROOTS}}}))
 _os1.environ['ADDFUT_MARGINS'] = _MFIX
 _os1.environ['ADDFUT_REGISTRY'] = _os1.path.abspath('instruments.csv')
 _os1.environ['ADDFUT_ACCOUNT'] = 'DUTEST01'

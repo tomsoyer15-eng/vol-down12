@@ -1291,7 +1291,7 @@ def _feed_mutations():
         def patched(ib, route='F'):
             today = FD.exchange_today()
             reg = FD.registry()
-            want = ('CSPX', 'CBU0') if route == 'E' else ('ES', 'MES', 'ZN')
+            want = ('CSPX', 'CBU0') if route == 'E' else FD.CT.FUT_ROOTS
             out = {}
             for name, r in reg.items():
                 if not any(name.startswith(w) for w in want):

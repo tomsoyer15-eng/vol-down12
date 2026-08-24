@@ -38,19 +38,35 @@ def map_mes(n):
 # правило разбора имени нужно уже при импорте, и ленивая вставка сделала бы FUT_ROOTS
 # зависимым от того, звали ли до этого execute.
 import sys as _sys0, os as _os0
-_live0 = _os0.path.join(_os0.path.dirname(_os0.path.abspath(__file__)), 'live')
+_LIVE_DIR = _os0.path.join(_os0.path.dirname(_os0.path.abspath(__file__)), 'live')
 # БЕЗ ВЕТВЛЕНИЯ (ворота 8в-1). Прежняя форма `if _live0 not in path: insert` оставляла
 # тело неисполнимым везде, где путь уже стоит, — то есть в батарее ВСЕГДА. Ворота честно
 # назвали строку неисполненной, и закрывать её стендом означало бы городить искусственную
 # среду ради одной вставки. Эта форма исполняется всегда, идемпотентна и даёт тот же
 # результат: live/ первым, без дубля.
-_sys0.path[:] = [_live0] + [_p0 for _p0 in _sys0.path if _p0 != _live0]
+# ИМЯ РАЗВЕДЕНО С ЛОКАЛЬНЫМ (восьмой прогон /code-review): в _execute_locked _live0 —
+# это СПИСОК ЖИВЫХ ЗАЯВОК, и одноимённый модульный путь ждал первой же правки, читающей
+# его до присваивания: `if _live0:` стало бы истинным всегда, и переход отказывал бы
+# «живые заявки на счёте» на чистом счёте.
+_sys0.path[:] = [_LIVE_DIR] + [_p0 for _p0 in _sys0.path if _p0 != _LIVE_DIR]
 import contracts as _CT                                              # noqa: E402
-from contracts import fut_root, fut_series, is_fut_name              # noqa: E402,F401
-# КОРТЕЖ БЕРЁТСЯ АТРИБУТОМ, А НЕ from-ИМПОРТОМ. from-импорт связывает объект в момент
-# импорта, и подмена канона в стенде до этого имени не доходит — то есть «одна точка»
-# опять оказалась бы непроверяемой. Функции from-импортировать можно: они читают
-# FUT_ROOTS в пространстве contracts В МОМЕНТ ВЫЗОВА и за подменой следуют.
+# ВСЁ БЕРЁТСЯ АТРИБУТОМ — И КОРТЕЖ, И ФУНКЦИИ (восьмой прогон /code-review). В седьмом
+# круге я оставил функции from-импортом с доводом «они читают FUT_ROOTS в момент вызова и
+# за подменой следуют». Довод верен ровно для подмены КОРТЕЖА и ложен для подмены САМОЙ
+# функции — а обе заведённые тогда парные мутации патчат именно contracts.is_fut_name.
+# Итог был измерен: полная батарея RUN отвечала «поймана=НЕТ» на обе, то есть правило
+# целочисленности фьючерсной позиции (запрет COMPLETE при дробном остатке частичного фила)
+# осталось без единого наблюдателя, а находка №5 была объявлена закрытой ложно.
+def fut_root(instrument):
+    return _CT.fut_root(instrument)
+
+
+def fut_series(instrument):
+    return _CT.fut_series(instrument)
+
+
+def is_fut_name(instrument):
+    return _CT.is_fut_name(instrument)
 
 
 def mapped_book(instrument, units):
@@ -673,9 +689,6 @@ def execute(broker, state_path, capital, legs, signal_id='', from_route='F', to_
     # ребалансировщик и перевод между маршрутами могли работать по одной книге
     # одновременно и подать встречные заявки.
     import sys as _sys, os as _os
-    _live = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'live')
-    if _live not in _sys.path:
-        _sys.path.insert(0, _live)
     import state as _ST
     # ЗАМОК БЕЗ АРГУМЕНТА — ЭТО ЗАМОК КНИГИ (см. state.book_lock_dir): умолчание
     # выводится из пути книги, поэтому переходный исполнитель и ежедневный контур
@@ -897,11 +910,19 @@ def _check_dst_names(dst_names):
     предполёте у правила не было ни одной точки мутации, а его законный путь недостижим
     из стенда — предполёт без фикстурной книги падает раньше по другой причине, и «вход
     пройден» нельзя было отличить от «сторож не сработал»."""
-    if dst_names is None or isinstance(dst_names, str):
+    # ТРЕБУЕТСЯ ПОВТОРНО ОБХОДИМАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ (восьмой прогон /code-review).
+    # Седьмой круг закрыл None и строку — и оставил открытым тот же fail-open для
+    # ОДНОРАЗОВОГО итератора: _dst_names обходится ТРИЖДЫ (календарь ролла, _bare_dst,
+    # _zn_target), генератор исчерпывается первым проходом, и два оставшихся сторожа
+    # видят пустоту. bytes и set проходили тоже: bytes перебираются числами, а порядок
+    # set не воспроизводим. Проверяется тип контейнера — список или кортеж; боевой
+    # вызывающий и так передаёт список.
+    if not isinstance(dst_names, (list, tuple)):
         raise TypeError(
-            f'_preflight_handover: _dst_names={dst_names!r} — имена целей потеряны или '
-            f'переданы одной строкой; сторожа голой цели и календаря ролла на таком входе '
-            f'молча пропускают уходящую серию к поставке (ошибка кода, не вердикт)')
+            f'_preflight_handover: _dst_names={dst_names!r} ({type(dst_names).__name__}) — '
+            f'нужен список или кортеж: имена обходятся трижды, и одноразовый итератор '
+            f'молча выключает сторожа голой цели и календаря ролла, пропуская уходящую '
+            f'серию к поставке (ошибка кода, не вердикт)')
 
 
 def _bare_dst(dst_names):
@@ -931,9 +952,6 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
     узнать заранее, и узнавать это ПОСЛЕ перевода денег бессмысленно.
     """
     import sys as _sp, os as _op
-    _lv = _op.path.join(_op.path.dirname(_op.path.abspath(__file__)), 'live')
-    if _lv not in _sp.path:
-        _sp.path.insert(0, _lv)
     import state as _STp, daily as _DLp, journal as _Jp
 
     # КОНТРАКТ ИМЁН ЦЕЛИ — ОДНОЙ ПРОВЕРКОЙ НА ВХОДЕ (седьмой прогон /code-review, №2).
@@ -2545,9 +2563,6 @@ def hand_over_book(broker, from_route, to_route, positions=None):
     ровно в момент, когда брокер уже переведён.
     """
     import os as _os2, sys as _sys2
-    _lv = _os2.path.join(_os2.path.dirname(_os2.path.abspath(__file__)), 'live')
-    if _lv not in _sys2.path:
-        _sys2.path.insert(0, _lv)
     import dataclasses as _dc2
     import state as _ST2
     import feed as _FD2

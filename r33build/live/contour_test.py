@@ -27,6 +27,7 @@ import tempfile as _tf_iso
 _os_iso.environ['ADDFUT_LOCK_DIR'] = _tf_iso.mkdtemp(prefix='addfut-ct-')
 for _v_iso in ('ADDFUT_BOOK_PATH', 'ADDFUT_DIR', 'ADDFUT_SIGNALS'):
     _os_iso.environ.pop(_v_iso, None)
+import contracts as _CTct      # корни — одна точка
 import daily as DL, journal as J
 from fake_broker import FakeBroker, BrokerError
 
@@ -55,7 +56,7 @@ mes = sum(q for i, q in orders if i.startswith('MES'))
 chk('раскладка MES-сетки в книгу совпадает с map_mes',
     es * 10 + mes == dec.book_after.n_e, f'{es}×ES + {mes}×MES = {es*10+mes}')
 chk('заявки первой сессии тоже адресованы серии, а не корню',
-    all(i not in ('ES', 'MES', 'ZN') for i, _ in orders),
+    all(i not in _CTct.FUT_ROOTS for i, _ in orders),
     ', '.join(f'{i}{q:+d}' for i, q in orders))
 
 # --- 2. отказы §8 ---
@@ -109,7 +110,7 @@ chk('ролл: серии сдвинулись на следующую пост�
     rd.book_after.ser_b == 'Z26' and rd.book_after.ser_a == 'Z26',
     f'{rd.book_after.ser_a} / {rd.book_after.ser_b}')
 chk('ролл: заявки адресованы КОНКРЕТНЫМ сериям, а не корню',
-    all(o[0] not in ('ES', 'MES', 'ZN') for o in ro), ', '.join(f'{i}{q:+d}' for i, q in ro))
+    all(o[0] not in _CTct.FUT_ROOTS for o in ro), ', '.join(f'{i}{q:+d}' for i, q in ro))
 zn = [q for i, q in ro if i.startswith('ZN')]
 chk('ролл: старая серия ZN закрывается целиком, новая открывается',
     sorted(zn) == sorted([-101, 101]), str(zn))
