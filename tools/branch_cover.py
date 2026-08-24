@@ -185,6 +185,38 @@ def measure(target):
     return seen, one_sided
 
 
+_SELF_NAME = Path(__file__).name
+
+
+def _tier_of(path, seen):
+    """Ярус файла: ('боевой'|'справочно', причина). Причина непустая только у справочного.
+
+    Единственное ИМЕНОВАННОЕ исключение — сам инструмент: его отчётные ветки исполняются
+    ПОСЛЕ снятия монитора и потому ненаблюдаемы по построению, а не по недосмотру. Его
+    наблюдает отдельный случай батареи («ворота покрытия наблюдают сами себя») с парными
+    мутациями — то есть исключение здесь не означает бесконтрольности.
+    Всё остальное решает факт загрузки: файл, который батарея не открывала ни разу,
+    измерить нечем (типичный случай — tools/, откуда батарея не импортирует ничего).
+    """
+    if Path(path).name == _SELF_NAME:
+        return 'справочно', 'сам инструмент: отчётные ветки идут после снятия монитора'
+    if path not in seen:
+        return 'справочно', 'файл не загружался батареей — измерять нечего'
+    return 'боевой', ''
+
+
+# ФАЙЛЫ САМОЙ БАТАРЕИ. Для них ОДНОСТОРОННОСТЬ не отказ: отказная ветка зонда берётся
+# только при красной батарее, и требовать оба конца значило бы держать прогон вечно
+# красным. НЕИСПОЛНЕННАЯ строка отказом остаётся и здесь — именно её пропуск дал седьмому
+# прогону мёртвый блок восстановления каталога МР, напечатанный справочно и не уронивший
+# ничего. Список узкий и назван: он управляет ровно одним каналом из двух.
+_STAND_NAMES = {'invariants.py', 'ib_stub.py', 'fake_broker.py', 'contour_test.py'}
+
+
+def _one_sided_is_fatal(path):
+    return Path(path).name not in _STAND_NAMES
+
+
 def main():
     base = sys.argv[1] if len(sys.argv) > 1 else 'origin/master'
     diff = changed_lines(base)
@@ -199,11 +231,16 @@ def main():
     # (KRUG_N каждый круг) — СПРАВОЧНЫЙ ярус, не невидимость: шестой прогон показал, что
     # полное исключение прятало бы недостижимый зонд бесследно. Имена сравниваются ТОЧНО
     # (Path.name): endswith ловил бы будущий permutation.py как чужую запись.
-    _out_of_scope = {'mutation.py', 'branch_cover.py'}
-    _infra_names = {'invariants.py', 'ib_stub.py', 'fake_broker.py',
-                    'contour_test.py', 'review_new_code.py'}
-    diff = {f: l for f, l in diff.items()
-            if Path(f).name not in _out_of_scope}
+    # ЯРУС ОПРЕДЕЛЯЕТСЯ ИЗМЕРЕНИЕМ, А НЕ СПИСКОМ ИМЁН (седьмой прогон, №6 и №10).
+    # Список имён давал три беды сразу. (1) invariants.py числился обвязкой, а обвязка в
+    # код возврата не входит — значит неисполненная строка стенда НЕ МОГЛА уронить прогон
+    # никогда; этот же круг напечатал в справочном ярусе мёртвый блок восстановления
+    # каталога МР и вышел с нулём. (2) branch_cover.py исключался целиком, поэтому весь
+    # новый код самих ворот оставался неизмеренным, а заголовок занижал знаменатель.
+    # (3) diff смотрит и tools/, но батарея оттуда не импортирует НИЧЕГО — любая правка
+    # tools/release.py давала красный без лечения, кроме дописывания ещё одного имени.
+    # Новое правило одно: справочный ярус — ТОЛЬКО там, где измерение невозможно, и
+    # причина ПЕЧАТАЕТСЯ. Всё, что батарея загрузила, судится боевым порядком.
     diff = {f: (l & executable(f)) for f, l in diff.items()}
     diff = {f: l for f, l in diff.items() if l}
     if not diff:
@@ -227,11 +264,15 @@ def main():
 
     seen, one_sided = measure(_run)
     bad_lines, bad_branch, infra, infra_branch = [], [], [], []
+    _reasons = {}
     for f, lines in sorted(diff.items()):
         _ex = set(seen.get(f, set()))
         _spans, _catch = file_facts(f)
         _ex = credit_spans(_ex, _spans)
-        _test_infra = Path(f).name in _infra_names
+        _tier, _why_tier = _tier_of(f, seen)
+        _test_infra = (_tier == 'справочно')
+        if _test_infra:
+            _reasons[str(Path(f).relative_to(ROOT))] = _why_tier
         for ln in sorted(lines):
             _name = f'{Path(f).relative_to(ROOT)}:{ln}'
             if ln not in _ex:
@@ -241,16 +282,22 @@ def main():
                 # ложный по построению» класс — в инструменте, построенном его ловить.
                 (infra if _test_infra else bad_lines).append(_name)
             elif (f, ln) in one_sided and ln not in _catch:
-                # Однобокость обвязки — не отказ (отказные ветки зондов исполняются только
-                # при красной батарее), но и не молчание: справочный список, как у строк.
-                (infra_branch if _test_infra else bad_branch).append(_name)
+                (bad_branch if (not _test_infra and _one_sided_is_fatal(f))
+                 else infra_branch).append(_name)
+                if _test_infra or not _one_sided_is_fatal(f):
+                    _reasons.setdefault(
+                        str(Path(f).relative_to(ROOT)),
+                        'файл батареи: отказная ветка зонда берётся только при красной батарее')
     _n = sum(len(v) for v in diff.values())
-    # Обвязка вычитается ИЗ ИСПОЛНЕННОГО тоже: её неисполненные строки уходят в справочный
-    # ярус, и без вычитания заголовок завышал цифру, которая цитируется в BRIEF (пятый
-    # прогон: тот же класс, что «ложное 279/279»).
-    print(f'изменённых строк питона: {_n}; батарея исполнила: '
-          f'{_n - len(bad_lines) - len(infra)}'
-          + (f' (+{len(infra)} строк обвязки не исполнялось — справочно)' if infra else ''))
+    # ЗНАМЕНАТЕЛЬ — ПОЛНЫЙ, С РАЗБИВКОЙ ПО ЯРУСАМ (седьмой прогон, №6). Прежний заголовок
+    # печатал только то, что осталось после вычитания исключённых файлов, и цифра,
+    # цитируемая в BRIEF как покрытие круга, была занижена: код самих ворот в неё не
+    # входил вовсе. Теперь видно всё три числа сразу — сколько изменено, сколько судится
+    # боевым порядком, сколько измерить нечем и почему.
+    _n_ref = sum(len(v) for f, v in diff.items() if _tier_of(f, seen)[0] == 'справочно')
+    _n_prod = _n - _n_ref
+    print(f'изменённых строк питона: {_n} (боевых {_n_prod}, справочных {_n_ref}); '
+          f'батарея исполнила боевых: {_n_prod - len(bad_lines)}')
     if bad_lines:
         print(f'\nНЕ ИСПОЛНЯЛИСЬ НИ РАЗУ ({len(bad_lines)}):')
         for b in bad_lines:
@@ -261,9 +308,13 @@ def main():
             print(f'   {b}')
     for _tag, _lst in (('НЕ ИСПОЛНЯЛАСЬ', infra), ('ОДНОБОКА', infra_branch)):
         if _lst:
-            print(f'\nТЕСТОВАЯ ОБВЯЗКА, {_tag} (справочно, {len(_lst)}):')
+            print(f'\nСПРАВОЧНО ({_tag}, {len(_lst)}) — измерить нечем:')
             for b in _lst:
                 print(f'   {b}')
+    if _reasons:
+        print('\nПОЧЕМУ СПРАВОЧНО:')
+        for _f, _r in sorted(_reasons.items()):
+            print(f'   {_f}: {_r}')
     return 1 if (bad_lines or bad_branch) else 0
 
 
