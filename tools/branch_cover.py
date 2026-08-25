@@ -64,10 +64,17 @@ def executable(path):
     научились бы пропускать. Источник истины — сам компилятор: co_lines() перечисляет
     ровно то, что имеет исполняемое представление.
     """
+    # ОТКАЗ РАЗБОРА — ГРОМКИЙ (девятый прогон /code-review). Прежде SyntaxError и OSError
+    # глотались, функция отдавала пустое множество, и файл ЦЕЛИКОМ исчезал из diff: main
+    # печатал «проверять нечего» и выходил с нулём. Это тот же fail-open, который этот же
+    # круг только что закрыл для отказа git, — незакомпилировавшийся файл обязан быть
+    # отказом, а не невидимкой.
     try:
         _code = compile(Path(path).read_text(encoding='utf-8'), str(path), 'exec')
-    except (OSError, SyntaxError):
-        return set()
+    except (OSError, SyntaxError, UnicodeDecodeError) as _e:
+        raise SystemExit(f'ВОРОТА НЕ СРАБОТАЛИ: {path} не разбирается '
+                         f'({type(_e).__name__}: {str(_e)[:120]}) — измерить его нечем, '
+                         f'и молча выбросить из diff значило бы выдать пустоту за чистоту')
     _out, _todo = set(), [_code]
     while _todo:
         _c = _todo.pop()
