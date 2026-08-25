@@ -4294,10 +4294,10 @@ def _rules45_case(kind):
                     _fut, {'_meta': dict(_ok_meta, account='DU000001')}) == '')
                 out['замер_без_счёта_виден'] = 'не называет счёта' in _pair(_fut, _ok)
             finally:
-                if _keepa is None:
-                    _os45.environ.pop('ADDFUT_ACCOUNT', None)
-                else:
-                    _os45.environ['ADDFUT_ACCOUNT'] = _keepa
+                # БЕЗ ВЕТВЛЕНИЯ (греп по классу, 25.08): развилка восстановления держит
+                # одно плечо неисполнимым — в среде батареи переменной нет никогда.
+                _os45.environ.pop('ADDFUT_ACCOUNT', None)
+                _os45.environ.update({'ADDFUT_ACCOUNT': _keepa} if _keepa else {})
             out['ok'] = all([out['согласованное_молчит'], out['фонды_не_мешают'],
                              out['реестр_новее_виден'], out['замер_новее_виден'],
                              out['con_id_виден'], out['форма_не_роняет'],
@@ -4893,8 +4893,9 @@ def _rules45_case(kind):
                     _r9 = _pf(_dst_names=('ESU26', 'ZNU26'))
                     _r10 = _pf(_dst_names=('ESU26',))
                 finally:
-                    if _keep_dfix46 is not None:
-                        _os45.environ['ADDFUT_DFIX_TEST'] = _keep_dfix46
+                    _os45.environ.pop('ADDFUT_DFIX_TEST', None)
+                    _os45.environ.update(
+                        {'ADDFUT_DFIX_TEST': _keep_dfix46} if _keep_dfix46 else {})
                 out['цель_с_ногой_б_ловится_своим_сторожем'] = (
                     'нога Б открывается заново' in _r9)
                 out['цель_без_ноги_б_минует_его_и_с_калиткой'] = (
@@ -4955,8 +4956,8 @@ def _rules45_case(kind):
                     # СНЯТЬ, ПОТОМ ВЕРНУТЬ, ЕСЛИ БЫЛО (ворота 8в-1): прежняя развилка
                     # if/else держала плечо pop неисполнимым — значение здесь есть всегда.
                     _os45.environ.pop('ADDFUT_REGISTRY', None)
-                    if _keep_reg46 is not None:
-                        _os45.environ['ADDFUT_REGISTRY'] = _keep_reg46
+                    _os45.environ.update(
+                        {'ADDFUT_REGISTRY': _keep_reg46} if _keep_reg46 else {})
                 # ЦЕЛОЧИСЛЕННОСТЬ ФЬЮЧЕРСНОЙ ПОЗИЦИИ — ОБА КОНЦА (седьмой прогон, №5).
                 # Правило решает деньгами (запрет COMPLETE) и до сих пор не имело ни одного
                 # наблюдателя: обе константы is_fut_name оставляли батарею зелёной.

@@ -885,8 +885,8 @@ try:
 except Exception as _exn:
     _asof_blocked = str(_exn)
 finally:
-    if _keep_ov is not None:
-        _os1.environ['ADDFUT_ASOF_OVERRIDE'] = _keep_ov
+    _os1.environ.pop('ADDFUT_ASOF_OVERRIDE', None)
+    _os1.environ.update({'ADDFUT_ASOF_OVERRIDE': _keep_ov} if _keep_ov else {})
 chk('Исполнитель: производственный вызов (без калитки asof) не отвергается воротами даты',
     'биржевым сегодня' not in _asof_blocked, _asof_blocked[:80] or 'прошёл до конца')
 _cl(); _sig('F', sid='s1')
