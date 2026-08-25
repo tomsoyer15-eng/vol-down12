@@ -1825,6 +1825,21 @@ def _run_mutations():
         orig = _TR5._series_required
         return orig, (lambda reg_keys: False), _TR5, '_series_required'
 
+    def leg_b_never_live():
+        """«Нога Б никогда не жива»: откат к d_fix СТАРОЙ книги Ф разрешается ДАЖЕ при
+        живом ZN, и трежерис месяцами оцениваются по дюрации на момент ухода в Е — вклад
+        ноги Б и плечо закрытия неверны (22-й круг, №9)."""
+        import transition as _TRl
+        orig = _TRl.нога_б_жива
+        return orig, (lambda positions: False), _TRl, 'нога_б_жива'
+
+    def leg_b_always_live():
+        """Обратный конец: «нога Б жива всегда» — законный откат к старой книге запрещён
+        даже при пустой ноге Б, и передача книги отказывает на исправном счёте."""
+        import transition as _TRl2
+        orig = _TRl2.нога_б_жива
+        return orig, (lambda positions: True), _TRl2, 'нога_б_жива'
+
     def fut_name_always_true():
         """Опознание фьючерсного имени тождественно ИСТИННО. Обратный конец пары к
         fut_name_always_false: законная ДРОБНАЯ доля фонда (маршрут Е торгует дробями)
@@ -2037,6 +2052,8 @@ def _run_mutations():
             ('остаток лота сравнивается с точным нулём', consume_partial_exact_zero),
             ('сторож серий публикации выключен', series_required_off),
             ('чтение реестра глотает ошибки кода', registry_read_swallows_code_errors),
+            ('нога Б никогда не жива', leg_b_never_live),
+            ('нога Б жива всегда', leg_b_always_live),
             ('фьючерсным считается любое имя', fut_name_always_true),
             ('фьючерсным не считается ничто', fut_name_always_false),
             ('диагност игнорирует коды причин', diagnose_ignores_cause_codes),

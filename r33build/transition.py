@@ -881,6 +881,22 @@ def pv_remainder(plan, done, partial=None):
     return out
 
 
+def нога_б_жива(positions):
+    """Есть ли у брокера НЕНУЛЕВАЯ позиция ноги Б.
+
+    Вынесено отдельной функцией (слой 5, шаг 3): правило решает, можно ли откатиться к
+    d_fix СТАРОЙ книги Ф. При живой ноге Б откат означал бы месяцы оценки трежерис по
+    чужой дюрации — вклад ноги Б и плечо закрытия были бы неверны (двадцать второй круг,
+    №9; тридцать третий круг, №3). Измерение 25.08 показало, что батарея эту строку не
+    исполняет НИ РАЗУ — то есть и перевод её на канон (батч 21) держался на разовом зонде.
+    Отдельной функцией у правила одна точка мутации, и оба конца видны.
+    """
+    for k, v in (positions or {}).items():
+        if _CT.leg_of(k) == 'Б' and float(v or 0):
+            return True
+    return False
+
+
 def fractional_fut(positions):
     """Дробные ФЬЮЧЕРСНЫЕ позиции в книге брокера — отдельной функцией (седьмой прогон, №5).
 
@@ -2628,9 +2644,8 @@ def hand_over_book(broker, from_route, to_route, positions=None):
             # откат к ней означал бы месяцы оценки ноги Б по чужому D. Предполёт уже
             # потребовал свежую доходность (или явную калитку стендов) — здесь тот же порядок.
             import os as _osd4
-            _zn_now = any(_CT.leg_of(k) == 'Б' and float(v)
-                          for k, v in ((positions if positions is not None
-                                        else broker.net_positions()) or {}).items())
+            _zn_now = нога_б_жива(positions if positions is not None
+                                  else broker.net_positions())
             if not _zn_now or _osd4.environ.get('ADDFUT_DFIX_TEST') == '1':
                 try:
                     _oldF, _, _ = _ST2.load(_ST2.book_path('F'), _BF)
