@@ -473,7 +473,10 @@ class IBBroker:
         import sim_v13 as _Su
         import contracts as _CTu
         name = str(instrument)
-        root = ''.join(ch for ch in name if not ch.isdigit()).rstrip('UZHM') or name
+        # РАЗБОР КОРНЯ — КАНОНОМ (девятый прогон /code-review): rstrip снимает ВСЕ
+        # хвостовые буквы из набора, поэтому 'YMU26' превращался в 'Y', и любой будущий
+        # корень на U/Z/H/M разбирался неверно — единица ноги не находилась.
+        root = _CTu.fut_root(name)
         today = _FDu.exchange_today()
         # ОДИН МОМЕНТ — ЭТО ОДНА ДАТА, А НЕ «ТИП ЦЕНЫ» (сорок второй круг, №5). at_close
         # переключал каждый инструмент на его ПОСЛЕДНЕЕ закрытие, а даты выбрасывались, и
@@ -535,7 +538,7 @@ class IBBroker:
                                           min_prev=self._venue_prev(True, today))
             px = float(px)
             return (px * (1.0 - self.UNIT_BAND_ETF), px * (1.0 + self.UNIT_BAND_ETF))
-        if root in ('ES', 'MES'):
+        if _CTu.fut_leg(root) == 'А':
             # Модельная единица ноги А — ES_MULT x SPY; котировка ES отличается от SPY
             # фьючерсным базисом, и es_to_unit приводит её к десятой доле индекса.
             # MES КОТИРУЕТСЯ ТЕМ ЖЕ УРОВНЕМ ИНДЕКСА, ЧТО И ES (тридцать первый круг, №6).
@@ -580,7 +583,7 @@ class IBBroker:
             else:
                 u = mult * _FDu.es_to_unit(float(px))
             return (u * (1.0 - self.UNIT_BAND_EQ), u * (1.0 + self.UNIT_BAND_EQ))
-        if root == 'ZN':
+        if _CTu.fut_leg(root) == 'Б':
             # ДАТА ТРЕБУЕТСЯ И ДЛЯ ZN (сорок третий круг, №4). Для ETF/ES я передал
             # expected_prev, а обе ветки доходности оставил без него — и feed.closes снова
             # допускает бар возрастом до пяти календарных дней: пятничный TNX во вторник
@@ -788,8 +791,8 @@ class IBBroker:
             # NaN-cushion семнадцатого круга: неизвестность обязана быть отказом.
             if _q != _q or _q in (float('inf'), float('-inf')):
                 raise BrokerError(f'{_inst}: позиция {_q!r} не конечна — плечо непроверяемо')
-            _root = ''.join(c for c in str(_inst) if not c.isdigit()).rstrip('UZHM')
-            if _root == 'ZN':
+            import contracts as _CTg
+            if _CTg.leg_of(_inst) == 'Б':      # канон, а не rstrip (девятый прогон)
                 if d_fix is None or float(d_fix) != float(d_fix) or not float(d_fix):
                     raise BrokerError(f'{_inst}: d_fix книги не передан или не конечен '
                                       f'({d_fix!r}) — модельная единица ноги Б неизвестна, '

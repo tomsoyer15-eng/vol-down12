@@ -20,6 +20,8 @@ HOST = os.environ.get('IB_HOST', '127.0.0.1')
 PORT = int(os.environ.get('IB_PORT', '4002'))          # 4002 — бумажный счёт
 CLIENT_ID = int(os.environ.get('IB_CLIENT_ID', '17'))
 
+import contracts as _CTf      # нога — одна точка (contracts.fut_leg)
+
 ROOTS = [('ES', 'CME', 'USD'), ('MES', 'CME', 'USD'), ('ZN', 'CBOT', 'USD')]
 # ИМЕНА ФОНДОВ ПРОВЕРЕНЫ НА СЧЁТЕ 12.08.2026. В §8а нога Б маршрута Е названа «CBU0», но
 # такого тикера на LSE не существует: это CSBGU0 (ISIN IE00B3VWN518), торгуемый на EBS —
@@ -229,7 +231,8 @@ def main():
             if _bad:
                 raise SystemExit('; '.join(_bad) + ' — реестр не пишется')
             rows.append(dict(instrument=f'{root}{tag}', sec_type=d.contract.secType,
-                             pair_group='EQ' if root in ('ES', 'MES') else 'BOND',
+                             pair_group=('EQ' if _CTf.fut_leg(root) == 'А'
+                                         else 'BOND'),   # канон, а не литералы
                              exchange=exch, currency=cur, con_id=d.contract.conId,
                              local_symbol=d.contract.localSymbol,
                              expiry=d.contract.lastTradeDateOrContractMonth,

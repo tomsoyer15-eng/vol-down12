@@ -1174,7 +1174,10 @@ def _preflight_handover(from_route, to_route, _dst_names=(), _broker_p=None,
         # Возврат в Ф с ЖИВОЙ ногой Б требует свежей доходности; старая книга больше не
         # доказательство. Стендам — явная калитка, как у замера маржи и даты перехода.
         import os as _osd3
-        _zn_target = any(fut_root(_n) == 'ZN' for _n in _dst_names)
+        # НОГА Б — ПО КАНОНУ (девятый прогон): литерал 'ZN' означал «нога Б бывает
+        # только ZN», и ВТОРОЙ корень ноги Б проходил этот сторож как «ноги Б нет» —
+        # требование свежей d_fix снималось, книга Ф публиковалась с d_fix=0.
+        _zn_target = any(_CT.leg_of(_n) == 'Б' for _n in _dst_names)
         _dfx_ok = False
         _dfx_val = 0.0
         try:
@@ -2625,7 +2628,7 @@ def hand_over_book(broker, from_route, to_route, positions=None):
             # откат к ней означал бы месяцы оценки ноги Б по чужому D. Предполёт уже
             # потребовал свежую доходность (или явную калитку стендов) — здесь тот же порядок.
             import os as _osd4
-            _zn_now = any(str(k).startswith('ZN') and float(v)
+            _zn_now = any(_CT.leg_of(k) == 'Б' and float(v)
                           for k, v in ((positions if positions is not None
                                         else broker.net_positions()) or {}).items())
             if not _zn_now or _osd4.environ.get('ADDFUT_DFIX_TEST') == '1':
@@ -2648,7 +2651,7 @@ def hand_over_book(broker, from_route, to_route, positions=None):
     # закрытия лгало, а следующая сессия падала на нулевом шаге. Обещанной «явной пометки»
     # не существовало — теперь это честный отказ передачи ДО записи состояния.
     _zn_live = sum(float(v) for k, v in (_pos_src or {}).items()
-                   if str(k).startswith('ZN') and float(v))
+                   if _CT.leg_of(k) == 'Б' and float(v))
     if to_route == 'F' and _zn_live and not _dfx:
         raise RuntimeError(
             f'd_fix не восстановлен (старой книги Ф нет, живой доходности у брокера нет), '
