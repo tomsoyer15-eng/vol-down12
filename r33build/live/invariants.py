@@ -5125,6 +5125,22 @@ def _rules45_case(kind):
                 finally:
                     _os45.environ.pop('ADDFUT_ACCOUNT', None)
                     _os45.environ.update({'ADDFUT_ACCOUNT': _keep_acc47} if _keep_acc47 else {})
+                # СЛОЙ 5, ШАГ 3. «КНИГИ МАРШРУТА НЕТ» — первый барьер предполёта, и он
+                # не исполнялся: случай создаёт книгу-фикстуру, поэтому ветка отсутствия
+                # никогда не бралась. Путь книги уводится в пустой временный каталог.
+                _keep_bp46 = _os45.environ.get('ADDFUT_BOOK_PATH')
+                _keep_ld46 = _os45.environ.get('ADDFUT_LOCK_DIR')
+                try:
+                    _пусто46 = _tf45.mkdtemp(prefix='addfut-нетбкниги-')
+                    _os45.environ['ADDFUT_LOCK_DIR'] = _пусто46
+                    _os45.environ['ADDFUT_BOOK_PATH'] = str(Path(_пусто46) / 'book-E.json')
+                    _r_нб = _pf(_dst_names=('ESU26',))
+                finally:
+                    for _к, _v in (('ADDFUT_BOOK_PATH', _keep_bp46),
+                                   ('ADDFUT_LOCK_DIR', _keep_ld46)):
+                        _os45.environ.pop(_к, None)
+                        _os45.environ.update({_к: _v} if _v else {})
+                out['нет_книги_источника_запрещает'] = 'передавать нечего' in _r_нб
                 out['ошибка_кода_не_переодета'] = (_к46 == 'TypeError')
                 out['недоступный_снимок_доменный_отказ'] = 'снимок счёта недоступен' in _r_сн
                 out['нога_б_жива_видит_фьючерс'] = _TR46.нога_б_жива({'ZNU26': 10}) is True
@@ -5195,6 +5211,7 @@ def _rules45_case(kind):
                              out['брокер_без_счёта_запрещает'],
                              out['чужой_счёт_запрещает'],
                              out['свой_счёт_проходит_личность'],
+                             out['нет_книги_источника_запрещает'],
                              out['ошибка_кода_не_переодета'],
                              out['недоступный_снимок_доменный_отказ'],
                              out['нога_б_жива_видит_фьючерс'],
