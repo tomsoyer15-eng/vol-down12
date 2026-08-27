@@ -1671,6 +1671,18 @@ def _run_mutations():
         orig = _Im9.LOCK_SRC
         return orig, str(_dir), _Im9, 'LOCK_SRC'
 
+    def provisional_locks_emergency():
+        """Сторож незамкнутой книги снова запирает АВАРИЙНЫЙ выход — как было до разбора
+        сплошного аудита 27.08: с 08:45 до 02:00 следующего дня выхода из маршрута Е нет,
+        то есть всю американскую сессию, когда стресс и случается."""
+        import transition as T
+        _orig = T._preflight_handover
+
+        def _mut(from_route, to_route, *a, **k):
+            k['emergency'] = False           # признак аварии теряется по дороге
+            return _orig(from_route, to_route, *a, **k)
+        return _orig, _mut, T, '_preflight_handover'
+
     def registry_exact_name_only():
         """Реестр перехода снова сверяется по ТОЧНОМУ имени — как было до разбора сплошного
         аудита 27.08: живые позиции приходят с серией (ESZ26), реестр направлений держит
@@ -2140,6 +2152,7 @@ def _run_mutations():
             ('каталог копий не приводится к Path', worm_bdir_not_normalized),
             ('история якорей ничего не помнит', worm_ever_attested_blind),
             ('возраст сердцебиения откатывается на mtime', hb_age_falls_back_to_mtime),
+            ('незамкнутая книга запирает аварию', provisional_locks_emergency),
             ('реестр перехода сверяется по точному имени', registry_exact_name_only),
             ('поиск по корню без проверки серии', registry_root_without_series),
             ('годность цены определяется непустотой', price_ok_by_emptiness),
