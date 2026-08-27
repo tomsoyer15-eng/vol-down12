@@ -1718,6 +1718,21 @@ def _run_mutations():
             '            _d=${_mk##*-2}; _d=2$_d                     # хвост ГГГГ-ММ-ДД из имени',
             'addfut-mut-mark-', 'уборщик отметок теряет дни 20-29')
 
+    def plan_orders_leaks_tmpdir():
+        """Оценка плана заявок снова оставляет временный каталог — как было до разбора
+        находки №25: боевой предполёт течёт каталогами, /tmp растёт, автопилот однажды
+        встаёт на переполнении."""
+        import os as _os
+        import tempfile as _tf
+        import transition as T
+        _orig = T.plan_orders
+
+        def _mut(plan, legs, lim=None):
+            _d = _tf.mkdtemp(prefix='addfut-plancount-')   # намеренно без уборки
+            open(_os.path.join(_d, 'st.json'), 'w').write('{}')
+            return _orig(plan, legs, lim)
+        return _orig, _mut, T, 'plan_orders'
+
     def empty_route_is_a_route():
         """Пустой route.txt снова считается маршрутом «» — как было до разбора находки №20:
         отказ «маршрут неизвестен» не срабатывает, книга ищется по пути book-.json, и
@@ -2274,6 +2289,7 @@ def _run_mutations():
             ('статус уборщика становится статусом снимка', rotation_status_becomes_snapshot_status),
             ('предупреждение о замере запаздывает', margin_age_warns_too_late),
             ('уборщик отметок теряет дни 20-29', marker_cleanup_skips_late_days),
+            ('оценка плана заявок течёт каталогами', plan_orders_leaks_tmpdir),
             ('пустой route.txt считается маршрутом', empty_route_is_a_route),
             ('журнал §7 дописывается неатомарно', journal_append_not_atomic),
             ('ворота журнала §7 молчат', j7_gate_silent),

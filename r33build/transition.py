@@ -397,12 +397,20 @@ def plan_orders(plan, legs, lim):
     br = _CountBroker()
     st = dict(done=[], order_ids=[], log=[], executed_usd=0.0)
     unp = {name: 0.0 for name in legs}
-    sp = os.path.join(tempfile.mkdtemp(prefix='addfut-plancount-'), 'st.json')
 
     def _f(msg, cancel=True):
         raise Incident(f'оценка плана заявок: {msg}')
 
-    _run_lots(br, copy.deepcopy(plan), st, sp, lim, unp, {}, _f)
+    # КАТАЛОГ УБИРАЕТСЯ ЗА СОБОЙ (27.08.2026, находка №25 сплошного аудита). Здесь стоял
+    # голый mkdtemp без уборки, а функция зовётся из БОЕВОГО предполёта
+    # (preflight_margin_orders) и дважды из selfcheck — то есть вне процесса батареи, где
+    # уборка по atexit есть. Измерено на живой машине: 3591 каталог /tmp/addfut-*, из них
+    # 199 с этим префиксом; /tmp чистится системой лишь через 30 дней. Переполнение /tmp
+    # останавливает автопилот — тот же класс, из-за которого убирает за собой измеритель
+    # покрытия. Оценка плана не оставляет ничего: состояние ей нужно только на время счёта.
+    with tempfile.TemporaryDirectory(prefix='addfut-plancount-') as _d:
+        _run_lots(br, copy.deepcopy(plan), st, os.path.join(_d, 'st.json'),
+                  lim, unp, {}, _f)
     return br.n, br.n + len(plan)
 
 def preflight_margin_orders(legs, plan, capital, reg, to_route, lim=None):
