@@ -1374,6 +1374,16 @@ class IBBroker:
                 if ref != 'ADDFUT':
                     return dict(terminal=False, cancelled=False, status='чужая стратегия',
                                 filled=0.0, foreign=True)
+                # СТАТУС ДО СНЯТИЯ ЗАПОМИНАЕТСЯ, И ЭТО НЕ ПЕДАНТИЗМ (27.08.2026).
+                # ib_insync.IB.cancelOrder при статусе Inactive ПИШЕТ 'Cancelled' САМ,
+                # локально, без единого сообщения от шлюза (ib.py:699-706). Наш цикл ниже
+                # видит терминальный статус на первой же итерации и возвращает
+                # «снята, сделок нет» — то есть выдаёт СОБСТВЕННУЮ запись за факт брокера.
+                # Это прямое нарушение правила 7 в единственном месте, где код статусу
+                # верит. Заявка при этом жива: Inactive у IBKR означает «не работает
+                # СЕЙЧАС», её могут активировать на открытии площадки, и она исполнится
+                # поверх книги, которую контур уже считает чистой.
+                _st0 = t.orderStatus.status
                 self.ib.cancelOrder(t.order)
                 t0 = time.time()
                 while time.time() - t0 < 30:
@@ -1381,6 +1391,16 @@ class IBBroker:
                     if t.orderStatus.status in TERMINAL_BAD + TERMINAL_OK:
                         self.ib.sleep(1.0)
                         done = self._executed(t)
+                        if _st0 == 'Inactive' and not done:
+                            # ИСХОД НЕИЗВЕСТЕН, И ТАК И НАДО СКАЗАТЬ. Отчётов об исполнении
+                            # нет, а «Cancelled» здесь — запись клиентской библиотеки, а не
+                            # шлюза. Молчаливое «ничего не произошло» опаснее остановки:
+                            # оно разрешает торговать поверх живой заявки. О-5.
+                            raise BrokerError(
+                                f'заявка {oid}: была Inactive, отмену подтвердил КЛИЕНТ, а '
+                                f'не шлюз (ib_insync пишет Cancelled сам), отчётов об '
+                                f'исполнении нет — исход НЕИЗВЕСТЕН, заявка может ожить '
+                                f'на открытии площадки. Разбор вручную (О-5).')
                         return dict(terminal=True, cancelled=bool(not done),
                                     status=t.orderStatus.status, filled=done)
                 raise BrokerError(f'заявка {oid}: снятие не подтверждено за 30 с')

@@ -1494,6 +1494,39 @@ def _a9(beh):
     return not br.net_positions()
 
 
+@ainv('отмена заявки Inactive не выдаётся за факт брокера', needs=lambda b: b == 'reject')
+def _a_inactive_cancel(beh):
+    """СПЛОШНОЙ АУДИТ 27.08.2026, находка №3 реестра §5в. Единственное место, где код верил
+    СТАТУСУ, а не отчётам, — и потому прямое нарушение правила 7.
+
+    ib_insync.IB.cancelOrder при статусе Inactive пишет 'Cancelled' САМ, локально, без
+    единого сообщения от шлюза (ib.py:699-706). Прежде наш цикл видел терминальный статус
+    на первой итерации и возвращал «снята, сделок нет» — то есть выдавал запись клиентской
+    библиотеки за факт брокера. Заявка при этом жива: Inactive у IBKR означает «не работает
+    СЕЙЧАС», её активируют на открытии площадки, и она исполняется поверх книги, которую
+    контур уже считает чистой.
+
+    ТРИ ТРЕБОВАНИЯ СРАЗУ, и третье — зонд достижимости самого стенда: заявка обязана быть
+    в openTrades, иначе проверяется запасная ветка «заявки нет», а не разбор Inactive.
+    Именно на этом стенд поймал меня при первом прогоне.
+    """
+    import ib_broker as IBB
+    br, ib, rows = _adapter(beh)
+    try:
+        br.place(rows[0]['instrument'], 1)
+    except IBB.BrokerError:
+        pass
+    oid = ib._trades[-1].order.orderId
+    в_открытых = any(t.order.orderId == oid for t in ib.openTrades())
+    статус_до = ib._trades[-1].orderStatus.status
+    try:
+        br.cancel_order(oid)
+        снята_молча = True
+    except IBB.BrokerError:
+        снята_молча = False
+    return (в_открытых and статус_до == 'Inactive' and not снята_молча)
+
+
 @ainv('отказ брокера не меняет позицию', needs=lambda b: b == 'reject')
 def _a6(beh):
     import ib_broker as IBB

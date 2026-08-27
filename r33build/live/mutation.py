@@ -1671,6 +1671,23 @@ def _run_mutations():
         orig = _Im9.LOCK_SRC
         return orig, str(_dir), _Im9, 'LOCK_SRC'
 
+    def inactive_cancel_trusted():
+        """Снятие заявки Inactive снова принимается за факт брокера — как было до разбора
+        сплошного аудита 27.08: ib_insync пишет 'Cancelled' сам, а адаптер возвращает
+        «снята, сделок нет». Заявка при этом жива и может исполниться на открытии."""
+        import ib_broker as B
+        _orig = B.IBBroker.cancel_order
+        _src = _orig
+
+        def _mut(self, oid):
+            try:
+                return _orig(self, oid)
+            except B.BrokerError as e:
+                if 'была Inactive' in str(e):
+                    return dict(terminal=True, cancelled=True, status='Cancelled', filled=0.0)
+                raise
+        return _src, _mut, B.IBBroker, 'cancel_order'
+
     def verdict_reads_whole_answer():
         """Вердикт вахты снова читается как «весь ответ начинается с LOW» — как было до
         45-го круга, №1: диагностические строки ib_insync встают перед маркером, разбор
@@ -2094,6 +2111,7 @@ def _run_mutations():
             ('каталог копий не приводится к Path', worm_bdir_not_normalized),
             ('история якорей ничего не помнит', worm_ever_attested_blind),
             ('возраст сердцебиения откатывается на mtime', hb_age_falls_back_to_mtime),
+            ('снятие заявки Inactive принято за факт', inactive_cancel_trusted),
             ('вердикт вахты читается целиком', verdict_reads_whole_answer),
             ('белый список сторожа окружения открыт', env_guard_whitelist_open),
             ('тревога сторожа окружения без даты', env_guard_alarm_undated),

@@ -348,8 +348,17 @@ class StubIB:
         return out
 
     def fills(self): return list(self._fills)
+    # ОТКРЫТАЯ ЗАЯВКА ОПРЕДЕЛЯЕТСЯ КАК У НАСТОЯЩЕЙ БИБЛИОТЕКИ (27.08.2026): всё, что НЕ
+    # завершено. ib_insync (ib.py:481-484) отбирает по `status not in DoneStates`, а
+    # DoneStates = {Filled, Cancelled, ApiCancelled} — то есть Inactive СЧИТАЕТСЯ ОТКРЫТОЙ.
+    # Прежний стаб перечислял два статуса белым списком, поэтому Inactive из openTrades
+    # выпадала, cancel_order уходил в запасную ветку «заявки нет» и возвращал
+    # «снята, сделок нет». Фикстура была не просто беднее правды, а описывала ДРУГОЙ
+    # маршрут исполнения — и защита, разбирающая Inactive, оказывалась недостижима.
+    DONE_STATES = ('Filled', 'Cancelled', 'ApiCancelled')
+
     def openTrades(self):
-        return [t for t in self._trades if t.orderStatus.status in ('PendingSubmit', 'Submitted')]
+        return [t for t in self._trades if t.orderStatus.status not in self.DONE_STATES]
 
     # --- контракты ---
     def _contract_of(self, cid):
@@ -594,6 +603,15 @@ class StubIB:
         return tr
 
     def cancelOrder(self, order):
+        # СТАБ ОБЯЗАН БЫТЬ НЕ ДОБРЕЕ НАСТОЯЩЕЙ БИБЛИОТЕКИ (27.08.2026). Прежде заявка со
+        # статусом Inactive здесь не трогалась вовсе, и дефект «клиент сам пишет Cancelled»
+        # был батарее НЕВИДИМ по построению фикстуры. В ib_insync (ib.py:699-706) при
+        # Inactive статус локально становится Cancelled — без сообщения от шлюза и без
+        # единой сделки. Воспроизводим ровно это.
+        for t in self._trades:
+            if t.order.orderId == order.orderId and t.orderStatus.status == 'Inactive':
+                t.orderStatus.status = 'Cancelled'
+                return
         for t in self._trades:
             if t.order.orderId == order.orderId and t.orderStatus.status in ('PendingSubmit',
                                                                             'Submitted'):
