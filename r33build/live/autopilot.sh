@@ -981,6 +981,42 @@ except Exception as ex:
             *) echo "$_rh" > "$_wr"; log "ВНИМАНИЕ: $_rh" ;;
         esac
     fi
+    # ВОЗРАСТ ЗАМЕРА МАРЖИ (27.08.2026, находка №14 сплошного аудита). Замер живёт 35 дней
+    # (transition._meta_age_ok): старше — «неотличим от забытого», и _live_margins поднимает
+    # Incident. Дальше цепочка молчаливая: selfcheck ловит его широким перехватом, срок
+    # 2026-08-20 давно истёк, поэтому chk(False) -> ИТОГ: ПРОВАЛ -> release.py «ВЫПУСК НЕ
+    # СОСТОЯЛСЯ». Нынешний замер снят 18.08, значит С 23.09 ВЫПУСК ВСТАЁТ САМ СОБОЙ, и до
+    # этого дня НИЧТО об этом не говорит: отказ датируемый и тихий.
+    # Хуже того, освежить замер по требованию нельзя когда угодно — whatIf на бумажном
+    # шлюзе днём маржи не отдаёт (§12), то есть у оператора должно быть заранее известное
+    # утро, а не сюрприз в день выпуска.
+    # ЭТО ПРЕДУПРЕЖДЕНИЕ, А НЕ ТРЕВОГА, и порог с запасом: торговле возраст замера не
+    # мешает, мешает только выпуску. Идиома та же, что у горизонтов календаря и реестра —
+    # раз в день, с отметкой, без остановки контура.
+    local _wm="$ST/WARN-margins-$(chicago %F).txt"
+    if [ ! -e "$_wm" ]; then
+        local _mg
+        _mg=$(cd "$LIVE" && "$PY" -c "
+import sys, json, datetime as dt
+sys.path.insert(0, '.')
+try:
+    md = json.load(open('margins_live.json'))['_meta']['date'][:10]
+    d = dt.date.fromisoformat(md)
+    age = (dt.datetime.now(dt.timezone.utc).date() - d).days
+    left = 35 - age
+    if left > 10:
+        sys.stdout.write('ADDFUT-VERDICT OK замеру %d дней, запас %d' % (age, left))
+    else:
+        sys.stdout.write('ADDFUT-VERDICT NO замер маржи от %s: ему %d дней, до предела 35 '
+                         'осталось %d — после этого ВЫПУСК ПАКЕТА НЕВОЗМОЖЕН. Освежить '
+                         'first_connect утром, пока whatIf отдаёт маржу.' % (md, age, left))
+except Exception as ex:
+    sys.stdout.write('ADDFUT-VERDICT NO возраст замера маржи не проверить: %r' % (ex,))" 2>&1)
+        case "$(verdict "$_mg")" in
+            OK\ *) : ;;
+            *) echo "$_mg" > "$_wm"; log "ВНИМАНИЕ: $_mg" ;;
+        esac
+    fi
     if [ "$(route)" = NONE ]; then
         log "ТРЕВОГА: действующий маршрут неизвестен — торговля и замыкание запрещены"
         return 0

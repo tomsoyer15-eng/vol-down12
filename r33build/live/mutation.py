@@ -1687,6 +1687,15 @@ def _run_mutations():
         _dst.write_text(_src.replace(_mark, 'exit 0'), encoding='utf-8')
         return _orig, _dst, _I, 'BACKUP_PUSH_SH'
 
+    def margin_age_warns_too_late():
+        """Предупреждение о возрасте замера снова появляется только ПОСЛЕ предела — как
+        было до разбора находки №14: до 23.09 не говорит ничего, а 23.09 выпуск встаёт.
+        Заблаговременность и есть вся ценность этой проверки."""
+        return _mutate_autopilot(
+            '    if left > 10:',
+            '    if left >= 0:',
+            'addfut-mut-mgage-', 'предупреждение о замере запаздывает')
+
     def marker_cleanup_skips_late_days():
         """Уборщик отметок снова разбирает дату срезом по последнему «-2» — как было до
         разбора находки №12: КАЖДАЯ отметка с днём 20-29 пропускается, треть входа, и
@@ -2221,6 +2230,7 @@ def _run_mutations():
             ('история якорей ничего не помнит', worm_ever_attested_blind),
             ('возраст сердцебиения откатывается на mtime', hb_age_falls_back_to_mtime),
             ('выгрузка копий всегда возвращает 0', backup_push_always_zero),
+            ('предупреждение о замере запаздывает', margin_age_warns_too_late),
             ('уборщик отметок теряет дни 20-29', marker_cleanup_skips_late_days),
             ('журнал §7 дописывается неатомарно', journal_append_not_atomic),
             ('ворота журнала §7 молчат', j7_gate_silent),
