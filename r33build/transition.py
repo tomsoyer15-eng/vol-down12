@@ -284,9 +284,9 @@ def book_margin(book, reg, prices=None, live=None):
     total = 0.0
     _lm = _live_margins() if live is None else live
     for instr, units in book.items():
-        if instr not in reg:
+        if reg_of(reg, instr) is None:
             raise Incident(f'{instr}: инструмента нет в реестре — маржа не считается')
-        if reg[instr]['sec_type'] == 'FUT':
+        if reg_of(reg, instr)['sec_type'] == 'FUT':
             # ПО КОРНЮ (двадцать пятый круг, №2): FUT_MARGIN ключуется 'ES'/'MES'/'ZN',
             # а книга несёт полные имена с серией.
             if fut_root(instr) not in FUT_MARGIN:
@@ -497,6 +497,43 @@ class Incident(Exception):
     pass
 
 STRATEGY_ID = 'ADD-FUT-v1_6'
+
+def reg_of(reg, instrument):
+    """Строка реестра для инструмента: по точному имени, иначе ПО КОРНЮ. None — нет такого.
+
+    ЗАЧЕМ (сплошной аудит 27.08.2026, находка №6 реестра §5в). В проекте ДВА реестра, и они
+    говорят на разных языках. `instruments.csv` — закреплённый хэшем whitelist НАПРАВЛЕНИЙ
+    перехода; в нём голые корни (ES, MES, ZN, CSPX, CBU0), потому что пара «ES -> CSPX»
+    относится к корню, а не к поставочной серии. `live/instruments_live.csv` — живой реестр
+    con_id, и в нём имена С СЕРИЕЙ (ESZ26, MESZ26), потому что торгуется именно серия.
+    `broker.net_positions()` (ib_broker.py:246-255) отдаёт ВТОРЫЕ имена.
+    Сверка шла по ТОЧНОМУ имени, поэтому любая живая позиция объявлялась неизвестной
+    реестру. Проверено на фактической книге счёта 27.08: ESZ26 и MESZ26 по имени
+    отсутствуют, по корню — есть. Следствие: переход Ф->Е отвергался ДО первой заявки, а
+    обратный Е->Ф — на сверке плана; маршрут был заперт в ОБЕ стороны, включая АВАРИЙНЫЙ
+    выход, который нужен ровно при маржинальном стрессе.
+    Почему не заметили: selfcheck подставляет стендам тот же голый instruments.csv, и в
+    фикстуре обе стороны говорят корнями. Фикстура описывала мир, которого на счёте нет, —
+    тот же класс, что закрывали слои 5, 6 и 7.
+
+    ПОЧЕМУ ПО КОРНЮ, А НЕ РАСШИРЕНИЕМ РЕЕСТРА: whitelist направлений и класс инструмента
+    (FUT/ETF) — свойства КОРНЯ и от серии не зависят. Перечислять в закреплённом хэшем
+    файле все будущие серии значит менять корень доверия четыре раза в год.
+    """
+    if instrument in reg:
+        return reg[instrument]
+    # ПО КОРНЮ — ТОЛЬКО ПРИ ПРАВИЛЬНОЙ СЕРИИ (угол «от противоположного знака», 27.08).
+    # Первая редакция принимала любое имя, начинающееся с известного корня, и вместе с
+    # законным ESZ26 впускала мусорный ESZ26X: ослабление, сделанное ради живых имён,
+    # открыло путь, которого не было при сверке по точному имени. Поймал это сам стенд —
+    # запрещающая половина, дописанная рядом с разрешающей.
+    # Правильная серия — буква месяца и две цифры года (U26, Z26, H27), ровно то, что
+    # печатает биржа; всё прочее к реестру отношения не имеет.
+    _ser = fut_series(instrument)
+    if len(_ser) != 3 or not _ser[0].isalpha() or not _ser[1:].isdigit():
+        return None
+    return reg.get(fut_root(instrument))
+
 
 REGISTRY_SHA256 = 'd5a2982c128f6869081a820d68bbaea4da7f6284ea1695b12db093beefeba2f7'
 
@@ -753,21 +790,21 @@ def _execute_guarded(broker, state_path, capital, legs, signal_id='', from_route
     src_cls = 'ETF' if from_route == 'E' else 'FUT'
     for name, spec in legs.items():
         di = spec['dst'][0]
-        if di not in reg:
+        if reg_of(reg, di) is None:
             raise Incident(f'{name}: инструмент цели {di} отсутствует в реестре instruments.csv')
-        rc = reg[di]['sec_type']
+        rc = reg_of(reg, di)['sec_type']
         if len(spec['dst']) != 3 or spec['dst'][2] != rc:
             raise Incident(f'{name}: метка класса {spec["dst"][2] if len(spec["dst"]) > 2 else "?"} '
                            f'не совпадает с реестром ({di} = {rc})')
         if rc != want_cls:
             raise Incident(f'{name}: класс цели {rc} по реестру не соответствует маршруту {to_route} (ожидается {want_cls})')
         for instr, units, u in spec['src']:
-            if instr not in reg:
+            if reg_of(reg, instr) is None:
                 raise Incident(f'{name}: инструмент источника {instr} отсутствует в реестре')
-            if reg[instr]['sec_type'] != src_cls:
-                raise Incident(f'{name}: {instr} класса {reg[instr]["sec_type"]} не является источником маршрута {from_route}')
-            if reg[instr]['pair_group'] != reg[di]['pair_group']:
-                raise Incident(f'{name}: пара {instr}->{di} вне whitelist направлений (группы {reg[instr]["pair_group"]}/{reg[di]["pair_group"]})')
+            if reg_of(reg, instr)['sec_type'] != src_cls:
+                raise Incident(f'{name}: {instr} класса {reg_of(reg, instr)["sec_type"]} не является источником маршрута {from_route}')
+            if reg_of(reg, instr)['pair_group'] != reg_of(reg, di)['pair_group']:
+                raise Incident(f'{name}: пара {instr}->{di} вне whitelist направлений (группы {reg_of(reg, instr)["pair_group"]}/{reg_of(reg, di)["pair_group"]})')
     _st_now = _M.derive_state(journal, __import__('datetime').date.fromisoformat(asof))
     _r_now = _st_now[0]
     if _r_now != from_route:
@@ -1747,11 +1784,11 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
                                    f'плану ({_units(instr, units)}) — переход отклонён')
         for instr, qty in snap0.items():                       # ПОЛНАЯ сверка книги
             if qty == 0: continue
-            if instr not in reg:
+            if reg_of(reg, instr) is None:
                 raise Incident(f'{instr}: неизвестный реестру инструмент в книге ({qty}) — исполнение запрещено')
-            if reg[instr]['sec_type'] == src_cls and instr not in planned_src:
+            if reg_of(reg, instr)['sec_type'] == src_cls and instr not in planned_src:
                 raise Incident(f'{instr}: позиция класса источника ({qty}) вне плана — книга не переводится целиком')
-            if reg[instr]['sec_type'] == want_cls:
+            if reg_of(reg, instr)['sec_type'] == want_cls:
                 raise Incident(f'{instr}: предсуществующая позиция класса цели ({qty}) до перехода — требуется разбор')
     # ЗАПАС СЧИТАЕТСЯ ОТ ФАКТИЧЕСКОГО СЧЁТА (№4): cushion = capital/margin, и завышенный
     # на допуск capital давал завышенный запас — те же ворота О-3 по фиктивному числу.
@@ -2120,14 +2157,14 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
                 fail(f'{_i0}: позиция {_q0!r} не конечна перед первой заявкой', cancel=False)
             if not _q0f:
                 continue
-            if _i0 not in reg:
+            if reg_of(reg, _i0) is None:
                 fail(f'{_i0}: неизвестный реестру инструмент ({_q0}) появился перед первой '
                      f'заявкой перехода', cancel=False)
                 continue
-            if reg[_i0]['sec_type'] == src_cls and _i0 not in _planned_src0:
+            if reg_of(reg, _i0)['sec_type'] == src_cls and _i0 not in _planned_src0:
                 fail(f'{_i0}: позиция класса источника ({_q0}) вне плана появилась перед '
                      f'первой заявкой — книга переводится не целиком', cancel=False)
-            if reg[_i0]['sec_type'] == want_cls:
+            if reg_of(reg, _i0)['sec_type'] == want_cls:
                 fail(f'{_i0}: позиция класса ЦЕЛИ ({_q0}) появилась между предполётом и '
                      f'первой заявкой — полная цель легла бы поверх неё', cancel=False)
         # NLV, ОТ КОТОРОГО СЧИТАН ЛИМИТ 1%, ОБЯЗАН БЫТЬ СВЕЖИМ: между предполётом и этой

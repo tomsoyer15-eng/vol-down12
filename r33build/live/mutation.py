@@ -1671,6 +1671,21 @@ def _run_mutations():
         orig = _Im9.LOCK_SRC
         return orig, str(_dir), _Im9, 'LOCK_SRC'
 
+    def registry_exact_name_only():
+        """Реестр перехода снова сверяется по ТОЧНОМУ имени — как было до разбора сплошного
+        аудита 27.08: живые позиции приходят с серией (ESZ26), реестр направлений держит
+        голые корни (ES), и любая живая позиция объявляется неизвестной. Переход заперт в
+        обе стороны, включая аварийный выход при маржинальном стрессе."""
+        import transition as T
+        return T.reg_of, (lambda reg, i: reg.get(i)), T, 'reg_of'
+
+    def registry_root_without_series():
+        """Поиск по корню без проверки серии — первая, слишком широкая редакция правки:
+        вместе с законным ESZ26 проходит мусорный ESZ26X. Ослабление впускает то, чего не
+        впускала сверка по точному имени."""
+        import transition as T
+        return T.reg_of, (lambda reg, i: reg.get(i) or reg.get(T.fut_root(i))), T, 'reg_of'
+
     def price_ok_by_emptiness():
         """Годность цены снова определяется НЕПУСТОТОЙ, как было до разбора сплошного
         аудита 27.08: значение -1, которым IBKR обозначает отсутствие стороны стакана,
@@ -2125,6 +2140,8 @@ def _run_mutations():
             ('каталог копий не приводится к Path', worm_bdir_not_normalized),
             ('история якорей ничего не помнит', worm_ever_attested_blind),
             ('возраст сердцебиения откатывается на mtime', hb_age_falls_back_to_mtime),
+            ('реестр перехода сверяется по точному имени', registry_exact_name_only),
+            ('поиск по корню без проверки серии', registry_root_without_series),
             ('годность цены определяется непустотой', price_ok_by_emptiness),
             ('количество в отказе печатается как целое', qty_format_int_only),
             ('снятие заявки Inactive принято за факт', inactive_cancel_trusted),
