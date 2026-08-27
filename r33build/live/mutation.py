@@ -1718,6 +1718,29 @@ def _run_mutations():
             '            _d=${_mk##*-2}; _d=2$_d                     # хвост ГГГГ-ММ-ДД из имени',
             'addfut-mut-mark-', 'уборщик отметок теряет дни 20-29')
 
+    def own_run_frees_everything():
+        """Освобождение по собственному объявлению снова безусловно: _own_run отдаёт строку
+        для ЛЮБОГО файла, весь контур уходит в справочный ярус, и ворота покрытия зеленеют,
+        не проверив ни одной боевой строки. У самого механизма освобождения до разбора
+        находки №24 не было ни стенда, ни мутации.
+
+        МУТИРУЕТСЯ ФАЙЛ, А НЕ ЗАГРУЖЕННЫЙ МОДУЛЬ, И ЭТО НЕ ПРИДИРКА. Первая редакция
+        подменяла атрибут в СВОЁМ экземпляре branch_cover, а стенд грузит инструмент из
+        файла ЗАНОВО (spec_from_file_location) — мутация до него не доставала, судья
+        оставался зелёным в обоих состояниях, то есть не наблюдал ничего. Правильная точка
+        уже есть: invariants.BRANCH_COVER — путь, по которому стенд и читает инструмент."""
+        import invariants as _I
+        import tempfile as _tf
+        from pathlib import Path as _P
+        _orig = _I.BRANCH_COVER
+        _src = _P(_orig).read_text(encoding='utf-8')
+        _was = "    _own = _own_run(path)\n    if _own:"
+        assert _src.count(_was) == 1, 'мутация освобождения не нашла своего места'
+        _dst = _P(_tf.mkdtemp(prefix='addfut-mut-own-')) / 'branch_cover.py'
+        _dst.write_text(_src.replace(_was, "    _own = 'освобождено'\n    if _own:"),
+                        encoding='utf-8')
+        return _orig, _dst, _I, 'BRANCH_COVER'
+
     def calendar_horizon_active_route_only():
         """Горизонт календаря снова спрашивается только про АКТИВНЫЙ маршрут — как было до
         разбора находки №23: активен Ф с таблицей до 2028, предупреждение молчит всегда, а
@@ -2313,6 +2336,7 @@ def _run_mutations():
             ('статус уборщика становится статусом снимка', rotation_status_becomes_snapshot_status),
             ('предупреждение о замере запаздывает', margin_age_warns_too_late),
             ('уборщик отметок теряет дни 20-29', marker_cleanup_skips_late_days),
+            ('освобождение по объявлению безусловно', own_run_frees_everything),
             ('горизонт только активного маршрута', calendar_horizon_active_route_only),
             ('потерянный маршрут молча становится Ф', lost_route_defaults_to_f),
             ('оценка плана заявок течёт каталогами', plan_orders_leaks_tmpdir),
