@@ -104,6 +104,22 @@ def chk(name, ok, msg=''):
     print(('[PASS] ' if ok else '[FAIL] ') + name + (': ' + msg if msg else ''))
     if not ok: FAIL.append(name)
 
+# ИСХОДНЫЕ РЯДЫ ПЕРЕЧИСЛЕНЫ ЯВНО, А НЕ ВЫВЕДЕНЫ ИЗ КАТАЛОГА (27.08.2026, находка №29).
+# Здесь стояло `sorted(os.listdir('data'))`, то есть «зашитый список» строился ПЕРЕЧИСЛЕНИЕМ
+# ТОГО САМОГО КАТАЛОГА, который проверяется. Проверка была круговой: исчезновение ряда И из
+# архива, И из манифеста уменьшало ALLOW ровно на ту же запись, сверка длин сходилась, и
+# уровень 0а проходил зелёным. Пакет уехал бы с обещанием «ИСХОДНЫЕ РЯДЫ» и без части рядов,
+# а §10 снова проверял бы только неизменность кода — ровно то, ради чего ряды и клали.
+# Ни одна расчётная проверка пропажи не заметит: gld_daily.csv и tlt_daily.csv не
+# упоминаются ни одним модулем r33build.
+# СПИСОК, А НЕ ВЫВОД — по той же причине, что и таблица словоформ (21.08): вывод из
+# окружения проверяет сам себя. Ряды меняются раз в год, список честнее.
+_DATA_RYADY = (
+    'bond10_recon_daily.csv', 'dgs10.csv', 'dtb3.csv', 'gld_daily.csv',
+    'gspc_1928_1935.csv', 'ief_daily.csv', 'nav_v13_modern.csv', 'nav_v13_splice.csv',
+    'rfr_daily.csv', 'shiller-monthly-1871-2026.csv', 'signals_monthly.csv',
+    'spy_daily.csv', 'tlt_daily.csv', 'us-market-daily-1885-2025.csv')
+
 ALLOW = ['ADD-FUT-v1_6_0-r33.pdf', 'ADD-FUT-v1_6_0-r33.txt', 'sim_v164.py', 'sim_etf.py', 'mr_engine.py', 'transition.py',
          'mr_inputs_retro.csv', 'mr_tariff.csv', 'mr_state.csv', 'mr_journal.csv', 'selfcheck_v192.py',
          'nav_v164_modern.csv', 'nav_v164_splice.csv', 'nav_etf_modern.csv', 'instruments.csv', 'README-192.md',
@@ -129,7 +145,20 @@ ALLOW = ['ADD-FUT-v1_6_0-r33.pdf', 'ADD-FUT-v1_6_0-r33.txt', 'sim_v164.py', 'sim
          'live/worm_anchor.py', 'live/diagnose.py'] + [
          # ИСХОДНЫЕ РЯДЫ. Без них §10 проверял только неизменность кода: пересчитать
          # результат по архиву было НЕЛЬЗЯ — данных в нём не было вовсе.
-         f'data/{n}' for n in sorted(os.listdir('data')) if n.endswith('.csv')]
+         f'data/{n}' for n in _DATA_RYADY]
+
+# КАТАЛОГ СВЕРЯЕТСЯ СО СПИСКОМ В ОБЕ СТОРОНЫ. Пропажа ряда — провал (архив неполон);
+# лишний ряд — тоже провал, иначе в пакет молча уедет неучтённый файл.
+try:
+    _есть = {n for n in os.listdir('data') if n.endswith('.csv')}
+    _нет = sorted(set(_DATA_RYADY) - _есть)
+    _лишние = sorted(_есть - set(_DATA_RYADY))
+    chk(f'уровень 0в: исходные ряды на месте ({len(_DATA_RYADY)} шт.)',
+        not _нет and not _лишние,
+        (f'нет: {_нет}; ' if _нет else '') + (f'лишние: {_лишние}' if _лишние else '')
+        or 'состав совпадает со списком')
+except Exception as _ex_ryad:
+    chk('уровень 0в: исходные ряды на месте', False, str(_ex_ryad))
 
 try:
     # строки-комментарии (git-база выпуска, девятнадцатый круг, №22) — не записи манифеста
