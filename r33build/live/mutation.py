@@ -1687,6 +1687,19 @@ def _run_mutations():
         _dst.write_text(_src.replace(_mark, 'exit 0'), encoding='utf-8')
         return _orig, _dst, _I, 'BACKUP_PUSH_SH'
 
+    def rotation_status_becomes_snapshot_status():
+        """Статус уборщика архивов снова становится статусом снимка — как было до разбора
+        находки №22: под pipefail отказ ротации читается вызывающим как «копия не снята»,
+        замыкание дня не отмечается, и каждый следующий тик повторяет его заново.
+
+        Мутация подменяет условие на заведомо ложное: предупреждение исчезает, а конвейер
+        ротации снова оказывается последней исполняемой строкой функции — ровно прежнее
+        поведение."""
+        return _mutate_autopilot(
+            '    if ! ls -1 "$bdir"/addfut-*.tgz 2>/dev/null | sort -r | tail -n +61 | xargs -r rm -f; then',
+            '    if false; then',
+            'addfut-mut-rot-', 'статус уборщика становится статусом снимка')
+
     def margin_age_warns_too_late():
         """Предупреждение о возрасте замера снова появляется только ПОСЛЕ предела — как
         было до разбора находки №14: до 23.09 не говорит ничего, а 23.09 выпуск встаёт.
@@ -2258,6 +2271,7 @@ def _run_mutations():
             ('история якорей ничего не помнит', worm_ever_attested_blind),
             ('возраст сердцебиения откатывается на mtime', hb_age_falls_back_to_mtime),
             ('выгрузка копий всегда возвращает 0', backup_push_always_zero),
+            ('статус уборщика становится статусом снимка', rotation_status_becomes_snapshot_status),
             ('предупреждение о замере запаздывает', margin_age_warns_too_late),
             ('уборщик отметок теряет дни 20-29', marker_cleanup_skips_late_days),
             ('пустой route.txt считается маршрутом', empty_route_is_a_route),
