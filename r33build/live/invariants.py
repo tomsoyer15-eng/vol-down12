@@ -2653,6 +2653,7 @@ RUN_CASES = (
              'правила45: пустой route.txt — отсутствие маршрута, а не маршрут «»',
              'автопилот: отказ уборщика архивов не выдаётся за отказ снимка',
              'правила45: оценка плана заявок не оставляет временных каталогов',
+             'автопилот: потерянный маршрут не подменяется молча на Ф',
 )
 
 
@@ -4074,6 +4075,64 @@ unset -f exit
             out['успех_ноль'] = _прогон(lambda s: s) == 0
             out['ok'] = all([out['нет_каталога_проекта'], out['нет_rclone'],
                              out['успех_ноль']])
+        except Exception as ex:
+            out['raised'] = True
+            out['error'] = f'{type(ex).__name__}: {ex}'
+        return out
+    if kind == 'автопилот: потерянный маршрут не подменяется молча на Ф':
+        # СПЛОШНОЙ АУДИТ 27.08.2026, находка №21 реестра §5в. Во ВСЕХ ПЯТИ питоновских
+        # вставках оболочки стояло `route.txt ... else 'F'`: потеря файла молча означала
+        # маршрут Ф. Сама оболочка ту же потерю трактует как ТРЕВОГУ и останавливает контур
+        # (route()), но traded_today вызывается ВЫШЕ этой проверки — значит решение «день
+        # отторгован» принималось по СТАРОЙ книге Ф, когда живой маршрут Е. Дальше
+        # close_after отдал бы ворота Ф (16:05) вместо Е (~10:35), и замыкание ушло бы с
+        # маршрутом NONE. Громкий сторож обходили помощники, готовящие ему решение.
+        # Файл маршрута терялся уже дважды (ALARM-route-2026-08-15 и -16).
+        # СТЕНД СТРОИТ РЕШАЮЩИЙ СЛУЧАЙ: книга Ф ЕСТЬ и отторгована. Без книги все ответы
+        # были бы «нет» и стенд не различал бы ничего — на этом первая редакция и попалась.
+        import os as _os21
+        import tempfile as _tf21
+        out = dict(case=kind, raised=False, error='', ok=False)
+        try:
+            _sh21 = str(AUTOPILOT_SH)
+            _live21 = str(ROOT / 'live')
+
+            def _ответ(route_txt):
+                _дом = _tf21.mkdtemp(prefix='addfut-r21-')
+                _st = _os21.path.join(_дом, '.addfut')
+                _os21.makedirs(_st, exist_ok=True)
+                _код = (
+                    "import sys; sys.path.insert(0, %r)\n"
+                    "import daily as DL, state as ST\n"
+                    "b = DL.Book(n_e=26, n_b=0, unit_is_mes=True, d_fix=7.93,\n"
+                    "            prev_close_lev=1.0, prev_st_eq=True, prev_st_bd=False,\n"
+                    "            ser_a='Z26', ser_b='Z26', es_held=2, roll_pending=False,\n"
+                    "            last_session='2026-08-26', close_provisional=False)\n"
+                    "ST.save(ST.book_path('F'), b, 'F', 11)\n" % _live21)
+                subprocess.run([sys.executable, '-c', _код],
+                               env=dict(_os21.environ, ADDFUT_LOCK_DIR=_st),
+                               capture_output=True, text=True, timeout=180)
+                if route_txt is not None:
+                    open(_os21.path.join(_st, 'route.txt'), 'w').write(route_txt)
+                _prog = ('exit() { return 0; }\n'
+                         f'source "{_sh21}" __стенд__ >/dev/null 2>&1\n'
+                         'unset -f exit\n'
+                         'if traded_today 2026-08-26; then echo "ДА"; else echo "НЕТ"; fi\n')
+                _r = subprocess.run(
+                    ['/bin/bash', '-c', _prog],
+                    env={'HOME': _дом, 'PATH': _os21.environ.get('PATH', ''), 'TERM': 'dumb'},
+                    capture_output=True, text=True, timeout=300)
+                _o = _r.stdout.strip().splitlines()
+                return _o[-1] if _o else ''
+
+            # РАЗРЕШАЮЩАЯ ТОЧКА: при известном маршруте книга обязана читаться, иначе стенд
+            # зелен и для кода, который не читает её никогда, — а это пропущенное замыкание.
+            out['известный_маршрут_читает_книгу'] = _ответ('F') == 'ДА'
+            out['потерянный_маршрут_отказ'] = _ответ(None) == 'НЕТ'
+            out['пустой_маршрут_отказ'] = _ответ('') == 'НЕТ'
+            out['ok'] = all([out['известный_маршрут_читает_книгу'],
+                             out['потерянный_маршрут_отказ'],
+                             out['пустой_маршрут_отказ']])
         except Exception as ex:
             out['raised'] = True
             out['error'] = f'{type(ex).__name__}: {ex}'
@@ -6687,6 +6746,14 @@ def _r45empty(r):
 def _l11push(r):
     """Находка №11. Успех обязан остаться нулём — иначе тревога каждое замыкание и
     остановка контура на третьи сутки на ровном месте."""
+    return not r['raised'] and r['ok'] is True
+
+
+@rinv('потерянный маршрут не подменяется молча на Ф',
+      needs=lambda r: r['case'] == 'автопилот: потерянный маршрут не подменяется молча на Ф')
+def _l21route(r):
+    """Находка №21. Разрешающая точка обязательна: помощник, не читающий книгу никогда,
+    так же вреден — он пропустил бы замыкание отторгованного дня."""
     return not r['raised'] and r['ok'] is True
 
 

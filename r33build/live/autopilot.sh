@@ -77,8 +77,21 @@ traded_today() {
 import sys
 from pathlib import Path
 import daily, state as ST
-rt = Path.home() / '.addfut' / 'route.txt'
-route = rt.read_text().strip() if rt.exists() else 'F'
+# МАРШРУТ БЕРЁТСЯ У ЕДИНСТВЕННОГО ИСТОЧНИКА (27.08.2026, находка №21 сплошного аудита).
+# Во ВСЕХ ПЯТИ питоновских вставках оболочки стояло `route.txt ... else 'F'`: потеря файла
+# молча означала маршрут Ф. Оболочка при этом трактует ту же потерю как ТРЕВОГУ и
+# останавливает контур (route(), строка 32), а traded_today вызывается ВЫШЕ этой проверки —
+# то есть решение «день отторгован» принималось по СТАРОЙ книге Ф, когда живой маршрут Е.
+# Дальше close_after отдавал бы ворота Ф (16:05) вместо Е (~10:35), и замыкание уходило бы
+# с маршрутом NONE. Громкий сторож обходился теми самыми помощниками, которые готовят ему
+# решение. Файл маршрута терялся уже дважды (ALARM-route-2026-08-15 и -16), так что это не
+# гипотеза.
+# ST.active_route() поднимает исключение при неизвестном маршруте (и с 27.08 считает
+# неизвестным пустой файл). Вставка тогда не печатает ничего, вызывающий получает пустую
+# строку и трактует её как «нет» — то есть fail-closed: с неизвестным маршрутом контур не
+# торгует и не замыкает. Заодно уходит второй дефект: Path.home() игнорировал
+# ADDFUT_LOCK_DIR, из-за чего вставки читали БОЕВОЙ каталог даже на стендах.
+route = ST.active_route()
 cls = daily.BookE if route == 'E' else daily.Book
 b, _, _ = ST.load(ST.book_path(route), cls)
 sys.stdout.write('1' if (b is not None and b.last_session == sys.argv[1]) else '0')
@@ -552,7 +565,15 @@ try:
     import pandas as pd, daily as DL, feed as FD, subprocess
     d = pd.Timestamp(subprocess.run(['date', '+%F'], env={'TZ': 'America/Chicago'},
                                     capture_output=True, text=True).stdout.strip())
-    route = sys.argv[1] if len(sys.argv) > 1 else 'F'
+    # НЕИЗВЕСТНЫЙ МАРШРУТ — ОТКАЗ, А НЕ «Ф» (27.08.2026, тот же класс, что находка №21).
+    # Здесь стояло `... else 'F'`: пустой или отсутствующий аргумент молча означал маршрут
+    # Ф, то есть КАЛЕНДАРЬ ЧУЖОГО МАРШРУТА. Оболочка передаёт сюда результат route(), и он
+    # бывает NONE — тогда праздники считались бы по таблице CME для маршрута, живущего на
+    # европейских площадках. Код 2 у вызывающего уже означает «календарь сломан» и поднимает
+    # тревогу; именно это и требуется, когда маршрут неизвестен.
+    route = sys.argv[1] if len(sys.argv) > 1 else ''
+    if route not in ('F', 'E'):
+        sys.exit(2)
     try:
         hol = (FD.eu_holidays(d.year) if route == 'E' else DL.holidays_for(d.year))
     except Exception:
@@ -666,8 +687,7 @@ run_trade() {
 import sys
 from pathlib import Path
 import daily, state as ST
-rt = Path.home() / '.addfut' / 'route.txt'
-route = rt.read_text().strip() if rt.exists() else 'F'
+route = ST.active_route()
 cls = daily.BookE if route == 'E' else daily.Book
 try:
     b, _, _ = ST.load(ST.book_path(route), cls)
@@ -712,8 +732,7 @@ BK0
 import sys
 from pathlib import Path
 import daily, state as ST
-rt = Path.home() / '.addfut' / 'route.txt'
-route = rt.read_text().strip() if rt.exists() else 'F'
+route = ST.active_route()
 cls = daily.BookE if route == 'E' else daily.Book
 b, _, _ = ST.load(ST.book_path(route), cls)
 sys.stdout.write('1' if (b is not None and b.last_session == sys.argv[1]) else '0')
@@ -767,8 +786,7 @@ BK2
 import sys
 from pathlib import Path
 import daily, state as ST
-rt = Path.home() / '.addfut' / 'route.txt'
-route = rt.read_text().strip() if rt.exists() else 'F'
+route = ST.active_route()
 cls = daily.BookE if route == 'E' else daily.Book
 b, _, _ = ST.load(ST.book_path(route), cls)   # load сверяет digest: порча файла = не штатно
 sys.exit(0 if (b is not None and b.last_session == sys.argv[1]) else 1)
@@ -847,8 +865,7 @@ run_close() {
 import sys
 from pathlib import Path
 import daily, state as ST
-rt = Path.home() / '.addfut' / 'route.txt'
-route = rt.read_text().strip() if rt.exists() else 'F'
+route = ST.active_route()
 cls = daily.BookE if route == 'E' else daily.Book
 b, _, _ = ST.load(ST.book_path(route), cls)   # digest + ДАТА: чужой день не «уже замкнут»
 sys.exit(0 if (b is not None and b.last_session == sys.argv[1]
