@@ -269,9 +269,33 @@ def _i12a(b, m, cap0, d, o, ue, ub):
     return not any('ИЗБЫТОК ОБОРОТА УПАКОВКИ' in r for r in d.reasons)
 
 
+def _izbytok(b, m, d):
+    """Несписанный избыток оборота упаковки: (физическая сетка, чистая сетка, избыток $).
+
+    ОДНОЙ ТОЧКОЙ ДЛЯ ОТБОРА И ДЛЯ УТВЕРЖДЕНИЯ (27.08.2026, находка №17 реестра §5в).
+    Прежде этот расчёт жил ВНУТРИ тела инварианта и заканчивался ранним `return True`, если
+    избытка нет. Механизм анти-вакуумности при этом обходился: покрытие считается по числу
+    ВЫЗОВОВ, а не по числу вычисленных утверждений, поэтому батарея печатала «ДЕРЖИТСЯ на
+    5688 состояниях», тогда как само утверждение считалось на 68. Завышение в 83 раза —
+    и оно читалось как доказательство.
+    Правило простое: применимость решает `needs`, тело УТВЕРЖДАЕТ. Тогда напечатанное
+    покрытие говорит правду, а нулевое покрытие честно становится провалом.
+    """
+    _roll_now = bool(m.roll_today or b.roll_pending
+                     or DL.leg_roll_overdue(b.ser_a, m) or DL.leg_roll_overdue(b.ser_b, m))
+    _same = DL.replace(d.book_after, ser_a=b.ser_a, ser_b=b.ser_b)
+    _phys = DL.orders_from_books(b, _same)
+    _g = DL.repack_grid(_phys, b.unit_is_mes) if _phys else 0
+    _n = _g if _roll_now else abs(d.book_after.n_e - b.n_e) * (1 if b.unit_is_mes else 10)
+    return _g, _n
+
+
 @inv('кап 2,00 держится и по капиталу за вычетом несписанного избытка',
-     needs=lambda b, m, cap0, d, o, ue, ub: not d.refusals and (d.orders or d.roll_pairs)
-     and d.capital_after_costs and d.capital_after_costs > 0 and ue == ue and ue > 0)
+     needs=lambda b, m, cap0, d, o, ue, ub: (
+         not d.refusals and (d.orders or d.roll_pairs)
+         # ИЗБЫТОК ДОЛЖЕН БЫТЬ — иначе утверждать нечего, и состояние не должно попадать
+         # в покрытие: именно так завышение и возникало.
+         and _izbytok(b, m, d)[0] > _izbytok(b, m, d)[1]))
 def _i12b(b, m, cap0, d, o, ue, ub):
     """ДВАДЦАТЬ ДЕВЯТЫЙ КРУГ, №6. Запись причины денег не возвращает и кап не соблюдает:
     издержки известны ДО заявок, а порог 2,00 проверялся по капиталу, из которого они не
@@ -290,18 +314,16 @@ def _i12b(b, m, cap0, d, o, ue, ub):
     # НА ЛЮБОМ РОЛЛЕ (в т.ч. отложенном и навёрстывании) УПАКОВКА БЕСПЛАТНА (сороковой
     # круг, №2): прежде здесь канонизировалось только при m.roll_today, и roll_pending с
     # навёрстыванием оставались на старой формуле — утверждение снова стало бы строже кода.
-    _roll_now = bool(m.roll_today or b.roll_pending
-                     or DL.leg_roll_overdue(b.ser_a, m) or DL.leg_roll_overdue(b.ser_b, m))
-    _same = DL.replace(d.book_after, ser_a=b.ser_a, ser_b=b.ser_b)
-    _phys = DL.orders_from_books(b, _same)
-    _g = DL.repack_grid(_phys, b.unit_is_mes) if _phys else 0
-    _n = _g if _roll_now else abs(d.book_after.n_e - b.n_e) * (1 if b.unit_is_mes else 10)
-    if _g <= _n:
-        return True
+    _g, _n = _izbytok(b, m, d)
     _ex = DL.repack_cost(_g - _n, ue)
     _e = d.capital_after_costs - _ex
     if _e <= 0:
-        return True                     # книга и так срезана до нуля — ворота отработали
+        # НУЛЕВОЙ КАПИТАЛ — НЕ ИНДУЛЬГЕНЦИЯ. Здесь стояло безусловное `return True` с
+        # пояснением «книга и так срезана до нуля»; ветка не бралась НИ РАЗУ за весь
+        # перебор, то есть проверялась только на словах. Утверждать её как «всё хорошо»
+        # опасно: при неположительном капитале ЛЮБАЯ ненулевая экспозиция — нарушение капа,
+        # а не его соблюдение. Требуем ровно этого.
+        return (d.exposure['А'] + d.exposure['Б']) <= 1e-9
     return (d.exposure['А'] + d.exposure['Б']) <= DL.CAP_LEV * _e + 1e-9
 
 
