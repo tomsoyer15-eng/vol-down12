@@ -1671,6 +1671,31 @@ def _run_mutations():
         orig = _Im9.LOCK_SRC
         return orig, str(_dir), _Im9, 'LOCK_SRC'
 
+    def backup_push_always_zero():
+        """Выгрузка копий снова всегда возвращает 0 — как было до разбора находки №11:
+        последней командой скрипта был echo, счётчик неудач обнулялся каждое замыкание, и
+        порог «три отказа подряд = тревога» был недостижим. Механизм существовал на бумаге,
+        а в журнале уже лежало 16 пропущенных выгрузок."""
+        import invariants as _I
+        import tempfile as _tf
+        from pathlib import Path as _P
+        _orig = _I.BACKUP_PUSH_SH
+        _src = _P(_orig).read_text(encoding='utf-8')
+        _mark = 'exit "${_rc:-0}"'
+        assert _src.count(_mark) == 1, 'мутация выгрузки не нашла своего места'
+        _dst = _P(_tf.mkdtemp(prefix='addfut-mut-bp-')) / 'backup_push.sh'
+        _dst.write_text(_src.replace(_mark, 'exit 0'), encoding='utf-8')
+        return _orig, _dst, _I, 'BACKUP_PUSH_SH'
+
+    def marker_cleanup_skips_late_days():
+        """Уборщик отметок снова разбирает дату срезом по последнему «-2» — как было до
+        разбора находки №12: КАЖДАЯ отметка с днём 20-29 пропускается, треть входа, и
+        уборщик при этом не сообщает ничего."""
+        return _mutate_autopilot(
+            '            _base=${_mk##*/}; _d=${_base#*-}            # хвост ГГГГ-ММ-ДД из имени',
+            '            _d=${_mk##*-2}; _d=2$_d                     # хвост ГГГГ-ММ-ДД из имени',
+            'addfut-mut-mark-', 'уборщик отметок теряет дни 20-29')
+
     def journal_append_not_atomic():
         """Журнал §7 снова дописывается обычным append — как было до разбора находок №9
         и №10: утрата терминатора последней строки затирает row_hash предыдущей и рвёт
@@ -2195,6 +2220,8 @@ def _run_mutations():
             ('каталог копий не приводится к Path', worm_bdir_not_normalized),
             ('история якорей ничего не помнит', worm_ever_attested_blind),
             ('возраст сердцебиения откатывается на mtime', hb_age_falls_back_to_mtime),
+            ('выгрузка копий всегда возвращает 0', backup_push_always_zero),
+            ('уборщик отметок теряет дни 20-29', marker_cleanup_skips_late_days),
             ('журнал §7 дописывается неатомарно', journal_append_not_atomic),
             ('ворота журнала §7 молчат', j7_gate_silent),
             ('незамкнутая книга запирает аварию', provisional_locks_emergency),
