@@ -1705,6 +1705,21 @@ def _run_mutations():
             '            _d=${_mk##*-2}; _d=2$_d                     # хвост ГГГГ-ММ-ДД из имени',
             'addfut-mut-mark-', 'уборщик отметок теряет дни 20-29')
 
+    def empty_route_is_a_route():
+        """Пустой route.txt снова считается маршрутом «» — как было до разбора находки №20:
+        отказ «маршрут неизвестен» не срабатывает, книга ищется по пути book-.json, и
+        оператору сообщают об утрате КНИГИ вместо утраты МАРШРУТА."""
+        import state as ST
+        _orig = ST.active_route
+
+        def _mut():
+            from pathlib import Path as _P
+            rt = _P(ST.lock_dir()) / 'route.txt'
+            if rt.exists():
+                return rt.read_text(encoding='utf-8').strip()
+            return _orig()
+        return _orig, _mut, ST, 'active_route'
+
     def journal_append_not_atomic():
         """Журнал §7 снова дописывается обычным append — как было до разбора находок №9
         и №10: утрата терминатора последней строки затирает row_hash предыдущей и рвёт
@@ -2245,6 +2260,7 @@ def _run_mutations():
             ('выгрузка копий всегда возвращает 0', backup_push_always_zero),
             ('предупреждение о замере запаздывает', margin_age_warns_too_late),
             ('уборщик отметок теряет дни 20-29', marker_cleanup_skips_late_days),
+            ('пустой route.txt считается маршрутом', empty_route_is_a_route),
             ('журнал §7 дописывается неатомарно', journal_append_not_atomic),
             ('ворота журнала §7 молчат', j7_gate_silent),
             ('незамкнутая книга запирает аварию', provisional_locks_emergency),
