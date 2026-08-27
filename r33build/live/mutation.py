@@ -1775,6 +1775,19 @@ def _run_mutations():
         import transition as T
         return T.reg_of, (lambda reg, i: reg.get(i) or reg.get(T.fut_root(i))), T, 'reg_of'
 
+    def partial_fill_reported_full():
+        """Недобор исполнения снова сообщается как полное: адаптер отдаёт ЗАКАЗАННОЕ
+        количество вместо фактического. Книга разойдётся со счётом молча — контур сочтёт
+        ногу набранной, тогда как у брокера её половина."""
+        import ib_broker as B
+        _orig = B.IBBroker._rec
+
+        def _mut(self, tr, instrument, qty, px_order=None):
+            rec = _orig(self, tr, instrument, qty, px_order)
+            rec['filled'] = float(qty)
+            return rec
+        return _orig, _mut, B.IBBroker, '_rec'
+
     def price_ok_by_emptiness():
         """Годность цены снова определяется НЕПУСТОТОЙ, как было до разбора сплошного
         аудита 27.08: значение -1, которым IBKR обозначает отсутствие стороны стакана,
@@ -2237,6 +2250,7 @@ def _run_mutations():
             ('незамкнутая книга запирает аварию', provisional_locks_emergency),
             ('реестр перехода сверяется по точному имени', registry_exact_name_only),
             ('поиск по корню без проверки серии', registry_root_without_series),
+            ('недобор исполнения выдаётся за полное', partial_fill_reported_full),
             ('годность цены определяется непустотой', price_ok_by_emptiness),
             ('количество в отказе печатается как целое', qty_format_int_only),
             ('снятие заявки Inactive принято за факт', inactive_cancel_trusted),
