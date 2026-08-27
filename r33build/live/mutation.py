@@ -1671,6 +1671,20 @@ def _run_mutations():
         orig = _Im9.LOCK_SRC
         return orig, str(_dir), _Im9, 'LOCK_SRC'
 
+    def price_ok_by_emptiness():
+        """Годность цены снова определяется НЕПУСТОТОЙ, как было до разбора сплошного
+        аудита 27.08: значение -1, которым IBKR обозначает отсутствие стороны стакана,
+        считается настоящей ценой, и mid выходит вдвое заниженным."""
+        import ib_broker as B
+        return B._px_ok, (lambda x: (float(x) if x else None)), B, '_px_ok'
+
+    def qty_format_int_only():
+        """Количество в отказе снова печатается как целое — как было до разбора сплошного
+        аудита 27.08: на дробном количестве (а оно приходит из sell_units/buy_units всегда)
+        форматирование падает ValueError, и доменный BrokerError не возникает вовсе."""
+        import ib_broker as B
+        return B._q, (lambda x: f'{x:+d}'), B, '_q'
+
     def inactive_cancel_trusted():
         """Снятие заявки Inactive снова принимается за факт брокера — как было до разбора
         сплошного аудита 27.08: ib_insync пишет 'Cancelled' сам, а адаптер возвращает
@@ -2111,6 +2125,8 @@ def _run_mutations():
             ('каталог копий не приводится к Path', worm_bdir_not_normalized),
             ('история якорей ничего не помнит', worm_ever_attested_blind),
             ('возраст сердцебиения откатывается на mtime', hb_age_falls_back_to_mtime),
+            ('годность цены определяется непустотой', price_ok_by_emptiness),
+            ('количество в отказе печатается как целое', qty_format_int_only),
             ('снятие заявки Inactive принято за факт', inactive_cancel_trusted),
             ('вердикт вахты читается целиком', verdict_reads_whole_answer),
             ('белый список сторожа окружения открыт', env_guard_whitelist_open),

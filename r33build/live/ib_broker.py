@@ -24,6 +24,40 @@ from pathlib import Path
 import tz                      # подключает устаревшие зоны IBKR (см. tz.py)
 
 
+def _px_ok(x):
+    """Годная котировка или None. ОДНА точка на все источники цены.
+
+    IBKR обозначает отсутствие стороны стакана значением -1, а не пустотой: проверка «если
+    цена задана» пропускает такую цену как настоящую. Здесь отсекаются разом три негодности
+    — отсутствие (None), нечисло (NaN) и неположительное значение, включая -1.
+    """
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return v if (v == v and v > 0) else None
+
+
+def _q(x):
+    """Количество в сообщении об отказе — ОДНОЙ точкой, и это не косметика.
+
+    Здесь стояло `f'{qty:+d}'`, а `sell_units`/`buy_units` всегда передают `float(units)`
+    (строки 627 и 632). Значит на ВСЕХ трёх отказных путях place() вместо доменного
+    BrokerError поднимался ValueError «Unknown format code 'd' for object of type 'float'»:
+    задуманный отказ не возникал НИКОГДА, оператор вместо статуса заявки получал ошибку
+    форматирования, а слой CODE_ERRORS видел ошибку кода там, где должен был увидеть
+    доменный вердикт. Проверено исполнением 27.08.2026 на сценариях reject и disconnect.
+
+    Формат `+.10g`, а не `+d` и не `+g`: целые остаются целыми (-2), дробные читаются
+    (+0.5), и нет экспоненты на реальных величинах — 2 000 000,5 печатается полностью, а
+    `+g` дал бы «+2e+06». Дроби здесь законны: книга фонда CBU0 бывает дробной.
+
+    ОДНА ТОЧКА, А НЕ ТРИ ФОРМАТНЫЕ СТРОКИ — чтобы у защиты было единственное место мутации
+    (урок §5: правило, размазанное по копиям, ненаблюдаемо).
+    """
+    return f'{x:+.10g}'
+
+
 TERMINAL_OK = ('Filled',)
 TERMINAL_BAD = ('Cancelled', 'ApiCancelled', 'Inactive')
 SETTLE_S = 8.0        # сколько ждать разноски сделок и позиций после терминального статуса
@@ -1265,10 +1299,19 @@ class IBBroker:
             # обязано быть ЯВНЫМ: только marketDataType == 1.
             _mdt = getattr(t, 'marketDataType', None)
             _rt = bool(getattr(self, 'realtime_md', False)) and (_mdt == 1)
-            _mid = (t.bid + t.ask) / 2 if (t.bid and t.ask) else None
-            for v, live in ((t.last, _rt), (_mid, _rt), (t.close, False)):
-                v = float(v) if v is not None else float('nan')
-                if v == v and v > 0:
+            # ГОДНОСТЬ ЦЕНЫ ПРОВЕРЯЕТСЯ ДО УСРЕДНЕНИЯ, А НЕ ПОСЛЕ (27.08.2026, находка №5).
+            # Прежде mid считался при условии `t.bid and t.ask` — то есть по НЕПУСТОТЕ, а
+            # IBKR обозначает ОТСУТСТВИЕ стороны стакана значением -1, и оно истинно.
+            # Фильтр `v > 0` ниже спасал last и close, но mid к нему приходил уже
+            # усреднённым: при bid=-1, ask=6000 получалось 2999.5 — величина
+            # правдоподобная, положительная и вдвое заниженная. Дальше она уходит в
+            # unit_ref (полоса вокруг половины настоящего номинала) и в px_order строки §7.
+            # Правило одно для всех трёх источников, поэтому и точка одна: примесь -1
+            # обязана отсекаться там же, где NaN и ноль.
+            _b, _a = _px_ok(t.bid), _px_ok(t.ask)
+            _mid = (_b + _a) / 2 if (_b is not None and _a is not None) else None
+            for v, live in ((_px_ok(t.last), _rt), (_mid, _rt), (_px_ok(t.close), False)):
+                if v is not None:
                     return v, live
         except AttributeError as ex:
             # ПОЛОМКА ИНТЕРФЕЙСА — НЕ «КОТИРОВКИ НЕТ» (двадцать пятый круг, №16): молчаливое
@@ -1318,7 +1361,7 @@ class IBBroker:
                 if not rec['filled']:
                     # ПРОТИВОРЕЧИЕ: статус «исполнена», отчётов нет. Молча вернуть нулевое
                     # исполнение значит выдать неизвестность за факт.
-                    raise BrokerError(f'{instrument} {qty:+d}: статус {st}, но отчётов об '
+                    raise BrokerError(f'{instrument} {_q(qty)}: статус {st}, но отчётов об '
                                       f'исполнении нет — исход НЕИЗВЕСТЕН, повтор запрещён')
                 return rec
             if st in TERMINAL_BAD:
@@ -1328,12 +1371,12 @@ class IBBroker:
                     # Отменена ПО СТАТУСУ, но исполнена по факту. Это не ошибка вызывающего
                     # и не повод повторять: книга изменилась, и вернуть надо именно факт.
                     return self._rec(tr, instrument, qty, px_order)
-                raise BrokerError(f'{instrument} {qty:+d}: статус {st}, сделок нет — '
+                raise BrokerError(f'{instrument} {_q(qty)}: статус {st}, сделок нет — '
                                   f'заявка не исполнена')
         self._exec_barrier()
         self.ib.sleep(self.settle_s)
         done = self._executed(tr)
-        raise BrokerError(f'{instrument} {qty:+d}: за {self.timeout_s} с статус остался '
+        raise BrokerError(f'{instrument} {_q(qty)}: за {self.timeout_s} с статус остался '
                           f'{tr.orderStatus.status}, исполнено по отчётам {done:+.0f} — '
                           f'исход НЕИЗВЕСТЕН, повтор запрещён')
 

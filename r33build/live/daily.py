@@ -1660,16 +1660,16 @@ def execute_roll(broker, orders, book_before=None, route='F', ref_prices=None,
             # и его надо повторить (roll_pending). После первого исполнения книга разорвана
             # — это О-5, а не отложенный перенос.
             _touched = any(r.get('filled') for r in placed)
-            bail(f'{inst} {qty:+d}: {ex} — заявка НЕ подавалась',
+            bail(f'{inst} {qty:+.10g}: {ex} — заявка НЕ подавалась',
                  known=not _touched, restore=_touched)
         try:
             rec = broker.place(inst, qty, (ref_prices or {}).get(inst))
         except Exception as ex:
-            bail(f'{inst} {qty:+d}: {ex} (статус заявки НЕИЗВЕСТЕН, повтор не выполняется)',
+            bail(f'{inst} {qty:+.10g}: {ex} (статус заявки НЕИЗВЕСТЕН, повтор не выполняется)',
                  known=False)
         placed.append(rec)
         if not _filled(rec, qty):
-            bail(f'{inst}: заявка {qty:+d}, исполнено {rec.get("filled")}')
+            bail(f'{inst}: заявка {qty:+.10g}, исполнено {rec.get("filled")}')
     stuck = _cancel_all(broker)
     if stuck:
         bail(f'после переноса остались неснятые заявки: {stuck}')
@@ -2272,7 +2272,7 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                             note = (f'восстановление НЕ ВЫПОЛНЕНО ({ex2}) — ручной '
                                     f'разбор (О-5)')
                         raise RuntimeError(
-                            f'{inst} {qty:+d}: {ex} (статус НЕИЗВЕСТЕН, повтор не '
+                            f'{inst} {qty:+.10g}: {ex} (статус НЕИЗВЕСТЕН, повтор не '
                             f'выполняется); {note}')
                     except BaseException as ex:
                         # ИСКЛЮЧЕНИЕ ПОСЛЕ ПЕРВОГО ИСПОЛНЕНИЯ — это рассинхронизация, а не
@@ -2287,7 +2287,7 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                         except Exception:
                             pass          # аварийная уборка не смеет маскировать причину
                         raise RuntimeError(
-                            f'{inst} {qty:+d}: {ex}; ранее исполнено {len(placed)} из '
+                            f'{inst} {qty:+.10g}: {ex}; ранее исполнено {len(placed)} из '
                             f'{len(orders)} заявок — книга в промежуточном состоянии, '
                             f'состояние не сохранено, требуется ручной разбор (О-5)')
                     placed.append(rec)
@@ -2305,7 +2305,7 @@ def run_session(broker, market, *, dirpath, route='F', band=None, cap=CAP_LEV,
                             note = (f'восстановление НЕ ВЫПОЛНЕНО ({ex2}) — ручной '
                                     f'разбор (О-5)')
                         raise RuntimeError(
-                            f'{inst}: заявка {qty:+d}, исполнено {rec.get("filled")}; '
+                            f'{inst}: заявка {qty:+.10g}, исполнено {rec.get("filled")}; '
                             + note)
         # dry_run НЕ ПИШЕТ §7 (девятнадцатый круг, №15): строки наблюдения без итоговой
         # оставляли журнал «незакрытым», и следующая ЖИВАЯ сессия отказывала — штатный

@@ -60,7 +60,7 @@ class FakeBroker:
         b = self.behaviour
         if b == 'reject':
             self._orders[oid] = dict(status='rejected', instrument=instrument, qty=qty)
-            raise BrokerError(f'заявка отклонена брокером: {instrument} {qty:+d}')
+            raise BrokerError(f'заявка отклонена брокером: {instrument} {qty:+.10g}')
         filled = qty
         if b == 'partial':
             filled = int(qty * 0.6) or (1 if qty > 0 else -1)

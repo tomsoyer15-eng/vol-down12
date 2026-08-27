@@ -52,7 +52,7 @@ book0 = DL.Book(d_fix=dref[-2])
 dec = DL.step(book0, m, 10_000_000.0)
 orders = DL.book_to_orders(dec, book0)
 chk('штатная сессия: заявки сформированы', dec.trade and orders,
-    ', '.join(f'{i} {q:+d}' for i, q in orders))
+    ', '.join(f'{i} {q:+.10g}' for i, q in orders))
 # Заявки теперь адресованы сериям (ESZ26, MESZ26), поэтому корень берётся из имени.
 es = sum(q for i, q in orders if i.startswith('ES'))
 mes = sum(q for i, q in orders if i.startswith('MES'))
@@ -60,7 +60,7 @@ chk('раскладка MES-сетки в книгу совпадает с map_m
     es * 10 + mes == dec.book_after.n_e, f'{es}×ES + {mes}×MES = {es*10+mes}')
 chk('заявки первой сессии тоже адресованы серии, а не корню',
     all(i not in _CTct.FUT_ROOTS for i, _ in orders),
-    ', '.join(f'{i}{q:+d}' for i, q in orders))
+    ', '.join(f'{i}{q:+.10g}' for i, q in orders))
 
 # --- 2. отказы §8 ---
 chk('отказ ниже порога 3 млн', bool(DL.step(book0, m, 2_999_999.0).refusals))
@@ -107,13 +107,13 @@ held = DL.Book(d_fix=dref[-2], n_e=260, n_b=101, unit_is_mes=True,
 rd = DL.step(held, roll_m, 10_000_000.0, check_guards=False)
 ro = DL.book_to_orders(rd, held)
 chk('ролл: пара заявок на каждую ногу с позицией', len(rd.roll_pairs) == 2,
-    '; '.join(f"{p['leg']}: {p['close'][0]}{p['close'][1]:+d} -> {p['open'][0]}{p['open'][1]:+d}"
+    '; '.join(f"{p['leg']}: {p['close'][0]}{p['close'][1]:+.10g} -> {p['open'][0]}{p['open'][1]:+.10g}"
               for p in rd.roll_pairs))
 chk('ролл: серии сдвинулись на следующую поставку',
     rd.book_after.ser_b == 'Z26' and rd.book_after.ser_a == 'Z26',
     f'{rd.book_after.ser_a} / {rd.book_after.ser_b}')
 chk('ролл: заявки адресованы КОНКРЕТНЫМ сериям, а не корню',
-    all(o[0] not in _CTct.FUT_ROOTS for o in ro), ', '.join(f'{i}{q:+d}' for i, q in ro))
+    all(o[0] not in _CTct.FUT_ROOTS for o in ro), ', '.join(f'{i}{q:+.10g}' for i, q in ro))
 zn = [q for i, q in ro if i.startswith('ZN')]
 chk('ролл: старая серия ZN закрывается целиком, новая открывается',
     sorted(zn) == sorted([-101, 101]), str(zn))
@@ -240,7 +240,7 @@ me = DL.MarketE(date=days[-1], px_eq_prev=700.0, px_bd_prev=5.0, px_eq_today=700
                 px_bd_today=5.0, st_eq=True, st_bd=True)
 de = DL.step_e(be, me, 10_000_000.0)
 chk('маршрут Е: контур строит книгу в долях CSPX/CBU0, а не во фьючерсах',
-    set(de.orders) == {'CSPX', 'CBU0'}, ', '.join(f'{k} {v:+d}' for k, v in de.orders.items()))
+    set(de.orders) == {'CSPX', 'CBU0'}, ', '.join(f'{k} {v:+.10g}' for k, v in de.orders.items()))
 chk('маршрут Е: считается дебет, TER, drag и заём',
     all(k in de.daily_costs for k in ('ter', 'drag', 'loan', 'debit')),
     f"дебет {de.daily_costs['debit']:,.0f} $")
