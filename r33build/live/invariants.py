@@ -57,6 +57,25 @@ def _sweep_tmp0():
 
 _os0.environ['ADDFUT_LOCK_DIR'] = _tf0.mkdtemp(prefix='addfut-inv-')
 import pathlib as _pl0
+
+
+def _вернуть_окружение(снимок):
+    """Вернуть окружение к снимку: снять ВСЁ названное, восстановить только бывшее.
+
+    ОДНА ТОЧКА ВМЕСТО ЧЕТЫРЁХ РАЗВИЛОК (27.08.2026, греп по классу 8в-5). В четырёх
+    стендах восстановление писалось вручную как `pop` + `if _keep is not None`, и это
+    известный класс собственного дефекта: в среде батареи переменной обычно нет НИКОГДА,
+    поэтому одно плечо `if` стоит мёртвым и ворота покрытия его не берут. Хуже того, в
+    одном из четырёх мест (ADDFUT_ASOF_OVERRIDE) `pop` отсутствовал вовсе: при пустом
+    снимке переменная оставалась выставленной и УТЕКАЛА в следующие случаи батареи —
+    подмена даты жила дольше своего стенда.
+    Здесь развилки нет: снимаем все ключи снимка, затем возвращаем словарём тех, у кого
+    было значение. Оба исхода (ключ был / не был) проходят через один и тот же код.
+    """
+    for _k in снимок:
+        _os0.environ.pop(_k, None)
+    _os0.environ.update({_k: _v for _k, _v in снимок.items() if _v is not None})
+
 (_pl0.Path(_os0.environ['ADDFUT_LOCK_DIR']) / 'route.txt').write_text('F')
 # ADDFUT_ACCOUNT СНИМАЕТСЯ ТОЖЕ (разбор /code-review 22.08). Автопилот его ЭКСПОРТИРУЕТ, и
 # оператор, запустивший батарею из своей оболочки после тика, получал отказ стенда пары
@@ -835,9 +854,7 @@ def _a31u(beh):
         lo_e, hi_e = br.unit_ref('ESU26', 'FUT')
         lo_f, hi_f = br.unit_ref('CSPX', 'ETF')
     finally:
-        os.environ.pop('ADDFUT_REGISTRY', None)
-        if _keep is not None:
-            os.environ['ADDFUT_REGISTRY'] = _keep
+        _вернуть_окружение({'ADDFUT_REGISTRY': _keep})
     _spy = 7747.5 / 10.0
     return (lo_m <= 50.0 * _spy <= hi_m          # единица MES внутри своей полосы
             and not (lo_m <= 500.0 * _spy <= hi_m)   # и полоса НЕ равна полосе ES
@@ -1250,9 +1267,7 @@ def _a44cal(beh):
             _fut_ok = False
     finally:
         FDc.exchange_today = _keep_t
-        os.environ.pop('ADDFUT_REGISTRY', None)
-        if _keep_r is not None:
-            os.environ['ADDFUT_REGISTRY'] = _keep_r
+        _вернуть_окружение({'ADDFUT_REGISTRY': _keep_r})
     return bool(_fund_ok and _fut_ok)
 
 
@@ -4622,9 +4637,7 @@ def _rules45_case(kind):
             out['raised'] = True
             out['error'] = f'{type(ex).__name__}: {ex}'
         finally:
-            _os20.environ.pop('ADDFUT_LOCK_DIR', None)
-            if _keep20 is not None:
-                _os20.environ['ADDFUT_LOCK_DIR'] = _keep20
+            _вернуть_окружение({'ADDFUT_LOCK_DIR': _keep20})
         return out
     if kind == 'правила45: журнал §7 пишется атомарно и переживает утрату терминатора':
         # СПЛОШНОЙ АУДИТ 27.08.2026, находки №9 и №10 реестра §5в — одна правка на обе.
@@ -7759,8 +7772,8 @@ def _tr_run(case):
             except Exception as ex:
                 out['raised'] = True; out['error'] = f'{type(ex).__name__}: {ex}'
             finally:
-                if _keep is not None:
-                    _oe.environ['ADDFUT_ASOF_OVERRIDE'] = _keep
+                # ЗДЕСЬ НЕ БЫЛО СНЯТИЯ ВООБЩЕ — подмена даты утекала в следующие случаи.
+                _вернуть_окружение({'ADDFUT_ASOF_OVERRIDE': _keep})
         elif 'замер' in case:
             # МАРЖА ПЕРЕХОДА (шестнадцатый круг, №4; закрыт и старый пробел: у защит
             # двенадцатого-тринадцатого кругов не было ни одного стенда). Замер обязан
@@ -9226,6 +9239,13 @@ def _sig_run(case):
                 if case == 'источник разошёлся с историей' and d == seed[-3]:
                     b = 1 - b                     # один бит истории подделан
                 f.write(f'{d:%Y-%m-%d},{e},{b}\n')
+        # ФИКСТУРА ОБЯЗАНА БЫТЬ ПОХОЖА НА ЖИЗНЬ (27.08.2026, по итогам правки №31).
+        # ADDFUT_SIGNALS указывает сюда, значит для кода это ЖИВОЙ ряд, а живой ряд всегда
+        # заверен: его пишет и заверяет сам signal_update. Пока сверки отпечатка перед
+        # чтением не было, отсутствие сайдкара сходило с рук, и пятнадцать стендов слоя
+        # держались на этом умолчании. Заверяем ТЕМ ЖЕ кодом, что и бой (_ensure_digest),
+        # а не своим — иначе фикстура и норматив разъедутся ровно там, где стенд молчит.
+        SU._ensure_digest(live)
         if case == 'уровни пересчитаны поставщиком':
             # Первый прогон пишет сайдкар уровней; затем поставщик «пересчитал историю»
             # НЕОДНОРОДНО (одному месяцу — свой множитель): биты SMA те же, уровни — нет.
@@ -9256,6 +9276,11 @@ def _sig_run(case):
             lp = live.with_name('signals_levels.csv')
             pd.read_csv(lp, parse_dates=[0], index_col=0).iloc[:-3].to_csv(lp)
             pd.read_csv(live, parse_dates=[0], index_col=0).iloc[:-3].to_csv(live)
+            # РЯД УКОРОЧЕН ЗАКОННО — значит и заверен заново. Стенд моделирует ряд,
+            # отставший на три месяца, а не подмену: такой ряд в жизни писал бы сам
+            # signal_update и заверил бы его. Без этой строки сверка отпечатка (№31)
+            # срабатывает РАНЬШЕ проверяемого TRADES-среза, и стенд меряет не то.
+            SU._ensure_digest(live)
             raw_spy = list(bars[spy_id])
             d_mid, px_mid = bars[spy_id][-2]
             bars[spy_id][-2] = (d_mid, px_mid * 1.02)

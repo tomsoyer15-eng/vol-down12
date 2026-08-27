@@ -1692,10 +1692,13 @@ if not _pair_here:
             try:
                 T._live_margins()
             finally:
-                for _k3, _v3 in _keep3.items():
+                # БЕЗ РАЗВИЛКИ (27.08.2026, греп по классу 8в-5): снять все ключи
+                # снимка, вернуть словарём только бывшие. Плечо `if ... is not None`
+                # стоит мёртвым там, где переменной в среде нет, и ворота его не видят.
+                for _k3 in _keep3:
                     _os1.environ.pop(_k3, None)
-                    if _v3 is not None:
-                        _os1.environ[_k3] = _v3
+                _os1.environ.update({_k3: _v3 for _k3, _v3 in _keep3.items()
+                                     if _v3 is not None})
     except Exception as _exm:
         _missm = [f'машинная пара недоступна либо замер непригоден: {_exm}']
     # ДВЕ РАЗНЫЕ ПРОВЕРКИ БЫЛИ СМЕШАНЫ В ОДНУ (27.08.2026, находка №13 сплошного аудита).
