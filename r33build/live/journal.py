@@ -21,7 +21,7 @@
 НАБЛЮДЕНИЕ — ЭТО СЕССИЯ, А НЕ СТРОКА. Двадцать строк можно набрать мелкими заявками
 одного дня; порог §7 считается по различным датам.
 """
-import csv, fcntl, hashlib, io, os
+import csv, fcntl, hashlib, io, os, tempfile
 from pathlib import Path
 
 BASE = ['date', 'leg', 'instrument', 'qty', 'px_order', 'px_fill', 'commission',
@@ -93,15 +93,65 @@ def append(path, row):
             # рвётся, и §7 заперт — а книга и брокер к этому моменту уже изменены. Нулевой
             # файл достижим смертью сразу после open(..., 'a') и восстановлением каталога.
             try:
-                new = path.stat().st_size == 0
+                _старое = path.read_bytes()
             except OSError:
-                new = True
-            with open(path, 'a', newline='', encoding='utf-8') as f:
-                w = csv.DictWriter(f, fieldnames=COLS, extrasaction='raise')
-                if new:
-                    w.writeheader()
-                w.writerow(rec)
-                f.flush(); os.fsync(f.fileno())
+                _старое = b''
+            # ЗАПИСЬ АТОМАРНА, КАК У КНИГИ И ЯКОРЯ (находки №9 и №10 сплошного аудита
+            # 27.08.2026). Журнал §7 был ЕДИНСТВЕННЫМ долговечным артефактом, который
+            # писался обычным дописыванием: книга (state.save), намерение (save_intent) и
+            # якорь (worm_anchor._atomic_write) давно идут через temp+fsync+rename. При
+            # ENOSPC или обрыве посреди системного вызова в файле оставалась усечённая
+            # строка, и дальше отказывало ВСЁ сразу: read, verify, append, снимок WORM,
+            # замыкание дня. Автоматического выхода нет по построению — дописывать итог
+            # задним числом запрещено, а append не может даже начать новую строку, потому
+            # что _last_hash идёт через тот же read.
+            #
+            # ТА ЖЕ ПРАВКА ЗАКРЫВАЕТ ВТОРУЮ НАХОДКУ: утрату ТЕРМИНАТОРА последней строки.
+            # Измерено: файл, у которого последняя строка полна, но не завершена переводом
+            # строки, read и verify считают ЗДОРОВЫМ — а следующий append дописывает встык
+            # и затирает row_hash предыдущей строки, разрушая цепочку НЕОБРАТИМО. То есть
+            # писатель, ради целостности которого цепочка и заведена, сам её и ломал.
+            # Терминатор восстанавливается, и это безопасно ровно потому, что цепочка к
+            # этому моменту УЖЕ проверена: _last_hash выше идёт через read(), и повреждение
+            # содержимого дало бы отказ раньше. Восстановление ГРОМКОЕ: обрыв записи — это
+            # событие для О-5, даже если данные уцелели.
+            if _старое and not _старое.endswith(b'\n'):
+                print(f'ВНИМАНИЕ: журнал §7 {path} не завершён переводом строки — '
+                      f'предыдущая запись оборвалась. Цепочка хэшей цела (проверена выше), '
+                      f'терминатор восстановлен; событие требует разбора (О-5).')
+                _старое += b'\r\n'
+            _buf = io.StringIO()
+            _w = csv.DictWriter(_buf, fieldnames=COLS, extrasaction='raise')
+            if not _старое:
+                _w.writeheader()
+            _w.writerow(rec)
+            _новое = _старое + _buf.getvalue().encode('utf-8')
+            # РЕЖИМ ДОСТУПА СОХРАНЯЕТСЯ (угол «от чужой правки»): mkstemp создаёт 0600, а
+            # журнал живёт с 0664, и selfcheck сверяет lstat-снимок ~/.addfut. Переход на
+            # атомарную запись не должен молча менять права — иначе первая же запись после
+            # правки выглядела бы как вмешательство в машинное состояние.
+            try:
+                _режим = path.stat().st_mode & 0o777
+            except OSError:
+                _режим = 0o664
+            _fd, _tmp = tempfile.mkstemp(dir=str(path.parent), suffix='.tmp')
+            try:
+                os.fchmod(_fd, _режим)
+                with os.fdopen(_fd, 'wb') as f:
+                    f.write(_новое)
+                    f.flush(); os.fsync(f.fileno())
+                os.replace(_tmp, path)
+                _dfd = os.open(str(path.parent), os.O_DIRECTORY)
+                try:
+                    os.fsync(_dfd)      # иначе rename может не пережить сбой питания
+                finally:
+                    os.close(_dfd)
+            except BaseException:
+                try:
+                    os.unlink(_tmp)
+                except OSError:
+                    pass
+                raise
             return rec['row_hash']
         finally:
             fcntl.flock(lk, fcntl.LOCK_UN)

@@ -1671,6 +1671,49 @@ def _run_mutations():
         orig = _Im9.LOCK_SRC
         return orig, str(_dir), _Im9, 'LOCK_SRC'
 
+    def journal_append_not_atomic():
+        """Журнал §7 снова дописывается обычным append — как было до разбора находок №9
+        и №10: утрата терминатора последней строки затирает row_hash предыдущей и рвёт
+        цепочку необратимо, а обрыв записи оставляет усечённую строку."""
+        import csv as _csv
+        import journal as J
+
+        def _mut(path, row):
+            from pathlib import Path as _P
+            import fcntl as _fc, os as _os
+            path = _P(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            lock = path.with_suffix(path.suffix + '.lock')
+            with open(lock, 'w') as lk:
+                _fc.flock(lk, _fc.LOCK_EX)
+                try:
+                    prev = J._last_hash(path)
+                    rec = {c: ('' if row.get(c) is None else str(row.get(c)))
+                           for c in J.BASE}
+                    rec['prev_hash'] = prev
+                    rec['row_hash'] = J._digest(prev, rec)
+                    try:
+                        new = path.stat().st_size == 0
+                    except OSError:
+                        new = True
+                    with open(path, 'a', newline='', encoding='utf-8') as f:
+                        w = _csv.DictWriter(f, fieldnames=J.COLS, extrasaction='raise')
+                        if new:
+                            w.writeheader()
+                        w.writerow(rec)
+                        f.flush(); _os.fsync(f.fileno())
+                    return rec['row_hash']
+                finally:
+                    _fc.flock(lk, _fc.LOCK_UN)
+        return J.append, _mut, J, 'append'
+
+    def j7_gate_silent():
+        """Ворота целостности журнала §7 снова молчат — как было на пути «состояние принято
+        по намерению» до разбора находки №8: утраченный журнал начинается заново с GENESIS,
+        verify отдаёт 1, и подмена истории проходит все дальнейшие проверки."""
+        import daily as D
+        return D._j7_gate, (lambda *a, **k: None), D, '_j7_gate'
+
     def provisional_locks_emergency():
         """Сторож незамкнутой книги снова запирает АВАРИЙНЫЙ выход — как было до разбора
         сплошного аудита 27.08: с 08:45 до 02:00 следующего дня выхода из маршрута Е нет,
@@ -2152,6 +2195,8 @@ def _run_mutations():
             ('каталог копий не приводится к Path', worm_bdir_not_normalized),
             ('история якорей ничего не помнит', worm_ever_attested_blind),
             ('возраст сердцебиения откатывается на mtime', hb_age_falls_back_to_mtime),
+            ('журнал §7 дописывается неатомарно', journal_append_not_atomic),
+            ('ворота журнала §7 молчат', j7_gate_silent),
             ('незамкнутая книга запирает аварию', provisional_locks_emergency),
             ('реестр перехода сверяется по точному имени', registry_exact_name_only),
             ('поиск по корню без проверки серии', registry_root_without_series),
