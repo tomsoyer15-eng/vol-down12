@@ -1023,7 +1023,45 @@ def _adapter_mutations():
             return True
         return orig, patched
 
+    # ТРИ МУТАЦИИ ПЕРЕЕХАЛИ ИЗ RUN-СЕМЬИ (28.08.2026, рецензия, находка №6).
+    # Их убийцы — @ainv-утверждения (_a_partial, _a_px_minus_one, _a_qty_fmt), а @ainv
+    # исполняет ТОЛЬКО run_adapter(). Судья run-семьи до них не доходит физически, поэтому
+    # мутации были неубиваемы по построению: прогон честно писал «НЕ ПОЙМАНА» и валил
+    # выпуск. Не стенды плохи — запись была не в той семье.
+    def partial_fill_reported_full():
+        """Недобор исполнения снова сообщается как полное: адаптер отдаёт ЗАКАЗАННОЕ
+        количество вместо фактического. Книга разойдётся со счётом молча — контур сочтёт
+        ногу набранной, тогда как у брокера её половина."""
+        import ib_broker as B
+        _orig = B.IBBroker._rec
+
+        def _mut(self, tr, instrument, qty, px_order=None):
+            rec = _orig(self, tr, instrument, qty, px_order)
+            rec['filled'] = float(qty)
+            return rec
+        # ТРЁХЭЛЕМЕНТНЫЙ КОРТЕЖ: раннер адаптера читает (orig, patched, holder), имя
+        # атрибута берёт из списка и на длину 4 падает AssertionError.
+        return _orig, _mut, B.IBBroker
+
+    def price_ok_by_emptiness():
+        """Годность цены снова определяется НЕПУСТОТОЙ, как было до разбора сплошного
+        аудита 27.08: значение -1, которым IBKR обозначает отсутствие стороны стакана,
+        считается настоящей ценой, и mid выходит вдвое заниженным."""
+        import ib_broker as B
+        return B._px_ok, (lambda x: (float(x) if x else None)), B
+
+    def qty_format_int_only():
+        """Количество в отказе снова печатается как целое — как было до разбора сплошного
+        аудита 27.08: на дробном количестве (а оно приходит из sell_units/buy_units всегда)
+        форматирование падает ValueError, и доменный BrokerError не возникает вовсе."""
+        import ib_broker as B
+        return B._q, (lambda x: f'{x:+d}'), B
+
+
     return [('продажа единиц идёт покупкой', 'sell_units', units_direction_inverted),
+            ('недобор исполнения выдаётся за полное', '_rec', partial_fill_reported_full),
+            ('годность цены определяется непустотой', '_px_ok', price_ok_by_emptiness),
+            ('количество в отказе печатается как целое', '_q', qty_format_int_only),
             ('покупка единиц идёт продажей', 'buy_units', buy_direction_inverted),
             ('часы непарной позиции стоят', 'minutes_since', pair_clock_never_advances),
             ('кэш доходности липнет и к живому', '_dref_once', dref_cache_sticky),
@@ -1868,50 +1906,6 @@ def _run_mutations():
         import transition as T
         return T.reg_of, (lambda reg, i: reg.get(i) or reg.get(T.fut_root(i))), T, 'reg_of'
 
-    def partial_fill_reported_full():
-        """Недобор исполнения снова сообщается как полное: адаптер отдаёт ЗАКАЗАННОЕ
-        количество вместо фактического. Книга разойдётся со счётом молча — контур сочтёт
-        ногу набранной, тогда как у брокера её половина."""
-        import ib_broker as B
-        _orig = B.IBBroker._rec
-
-        def _mut(self, tr, instrument, qty, px_order=None):
-            rec = _orig(self, tr, instrument, qty, px_order)
-            rec['filled'] = float(qty)
-            return rec
-        return _orig, _mut, B.IBBroker, '_rec'
-
-    def price_ok_by_emptiness():
-        """Годность цены снова определяется НЕПУСТОТОЙ, как было до разбора сплошного
-        аудита 27.08: значение -1, которым IBKR обозначает отсутствие стороны стакана,
-        считается настоящей ценой, и mid выходит вдвое заниженным."""
-        import ib_broker as B
-        return B._px_ok, (lambda x: (float(x) if x else None)), B, '_px_ok'
-
-    def qty_format_int_only():
-        """Количество в отказе снова печатается как целое — как было до разбора сплошного
-        аудита 27.08: на дробном количестве (а оно приходит из sell_units/buy_units всегда)
-        форматирование падает ValueError, и доменный BrokerError не возникает вовсе."""
-        import ib_broker as B
-        return B._q, (lambda x: f'{x:+d}'), B, '_q'
-
-    def inactive_cancel_trusted():
-        """Снятие заявки Inactive снова принимается за факт брокера — как было до разбора
-        сплошного аудита 27.08: ib_insync пишет 'Cancelled' сам, а адаптер возвращает
-        «снята, сделок нет». Заявка при этом жива и может исполниться на открытии."""
-        import ib_broker as B
-        _orig = B.IBBroker.cancel_order
-        _src = _orig
-
-        def _mut(self, oid):
-            try:
-                return _orig(self, oid)
-            except B.BrokerError as e:
-                if 'была Inactive' in str(e):
-                    return dict(terminal=True, cancelled=True, status='Cancelled', filled=0.0)
-                raise
-        return _src, _mut, B.IBBroker, 'cancel_order'
-
     def verdict_reads_whole_answer():
         """Вердикт вахты снова читается как «весь ответ начинается с LOW» — как было до
         45-го круга, №1: диагностические строки ib_insync встают перед маркером, разбор
@@ -2345,11 +2339,24 @@ def _run_mutations():
             # СНИМАЕТСЯ, А НЕ ПРЕВРАЩАЕТСЯ В ПУСТУЮ: мутация-заглушка ничего не меняет,
             # значит её никто не убьёт, и прогон честно объявит её непойманной.
             ] + ([('выгрузка копий всегда возвращает 0', backup_push_always_zero)]
-                 if _P_bp(_I_bp.BACKUP_PUSH_SH).exists() else []) + [
+                 if _P_bp(_I_bp.BACKUP_PUSH_SH).exists() else []) + (
+                # ТОТ ЖЕ ГЕЙТ ЕЩЁ ТРЁМ ЗАПИСЯМ (28.08.2026, рецензия, находки №5 и №7).
+                # Вчера я поставил `.exists()` ОДНОЙ мутации — той, которую назвал выпуск, —
+                # и вписал в коммит греп, где эти три уже числились. Класс один, разнится
+                # лишь то, чего в пакете не хватает:
+                #   own_run_frees_everything     ЧИТАЕТ tools/branch_cover.py -> FileNotFoundError;
+                #   registry_exact_name_only     и её пара УБИВАЮТСЯ стендом, который в пакете
+                #   registry_root_without_series пропускается (нет live/instruments_live.csv),
+                #                                значит выживают и валят выпуск.
+                # Первое падает громко, второе тихо — потому вчера я увидел только первое.
+                [('освобождение по объявлению безусловно', own_run_frees_everything)]
+                if _P_bp(_I_bp.BRANCH_COVER).exists() else []) + (
+                [('реестр перехода сверяется по точному имени', registry_exact_name_only),
+                 ('поиск по корню без проверки серии', registry_root_without_series)]
+                if (_I_bp.ROOT / 'live' / 'instruments_live.csv').exists() else []) + [
             ('статус уборщика становится статусом снимка', rotation_status_becomes_snapshot_status),
             ('предупреждение о замере запаздывает', margin_age_warns_too_late),
             ('уборщик отметок теряет дни 20-29', marker_cleanup_skips_late_days),
-            ('освобождение по объявлению безусловно', own_run_frees_everything),
             ('горизонт только активного маршрута', calendar_horizon_active_route_only),
             ('потерянный маршрут молча становится Ф', lost_route_defaults_to_f),
             ('оценка плана заявок течёт каталогами', plan_orders_leaks_tmpdir),
@@ -2357,12 +2364,6 @@ def _run_mutations():
             ('журнал §7 дописывается неатомарно', journal_append_not_atomic),
             ('ворота журнала §7 молчат', j7_gate_silent),
             ('незамкнутая книга запирает аварию', provisional_locks_emergency),
-            ('реестр перехода сверяется по точному имени', registry_exact_name_only),
-            ('поиск по корню без проверки серии', registry_root_without_series),
-            ('недобор исполнения выдаётся за полное', partial_fill_reported_full),
-            ('годность цены определяется непустотой', price_ok_by_emptiness),
-            ('количество в отказе печатается как целое', qty_format_int_only),
-            ('снятие заявки Inactive принято за факт', inactive_cancel_trusted),
             ('вердикт вахты читается целиком', verdict_reads_whole_answer),
             ('белый список сторожа окружения открыт', env_guard_whitelist_open),
             ('тревога сторожа окружения без даты', env_guard_alarm_undated),
