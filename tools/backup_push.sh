@@ -9,8 +9,13 @@ cd /home/alex/claude-projects/vol-down12 || {
   echo "$(date '+%F %T') backup_push: каталог проекта недоступен — копии НЕ сняты" >> ~/.addfut/autopilot.log
   exit 3
 }
-git push -q mirror master 2>/dev/null && echo "$(date '+%F %T') зеркало ok" >> ~/.addfut/autopilot.log
-git push -q origin master 2>/dev/null && echo "$(date '+%F %T') github ok" >> ~/.addfut/autopilot.log
+# ОТКАЗ GIT PUSH — ТОЖЕ ОТКАЗ ВЫГРУЗКИ (28.08.2026, рецензия; правка по ТЗ, воспроизведено:
+# оба пуша rc 128 при исправном rclone давали exit 0, в журнале «drive ok»; на живой машине
+# 13.08 два отказа GitHub прошли непосчитанными — «зеркало ok» x74 против «github ok» x72).
+# Находка №11 закрыла только rclone-половину; зеркало и GitHub — точки восстановления
+# правила 11, их потеря обязана считаться тем же счётчиком push-fails.
+git push -q mirror master 2>/dev/null && echo "$(date '+%F %T') зеркало ok" >> ~/.addfut/autopilot.log || _rc=1
+git push -q origin master 2>/dev/null && echo "$(date '+%F %T') github ok" >> ~/.addfut/autopilot.log || _rc=1
 # бэкапы состояния — вторая локальная точка (другой каталог, переживает rm -rf проекта)
 mkdir -p ~/state-mirror && cp -u ~/.addfut-backups/addfut-*.tgz ~/state-mirror/ 2>/dev/null
 
