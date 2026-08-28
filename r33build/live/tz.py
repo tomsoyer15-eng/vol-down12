@@ -51,15 +51,20 @@ def install():
         if _есть == _нужно:
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
-        _tmp = dst.with_name(dst.name + '.tmp')
+        # ИМЯ ВРЕМЕННОГО ФАЙЛА УНИКАЛЬНО ПО ПРОЦЕССУ (28.08.2026, рецензия; правка по ТЗ,
+        # класс D, воспроизведена: 5 падений из 160 у меня, 14 из 240 у рецензента).
+        # Общее имя '.tmp' делили ВСЕ параллельные импортёры: один создаёт, другой
+        # перезаписывает или удаляет в finally, и os.replace первого падает
+        # FileNotFoundError ИЗ import tz — умирает сессия, диагност или сверка. PID в
+        # имени разводит процессы; последний победивший replace кладёт тот же байтовый
+        # состав, поэтому исход гонки безразличен. unlink(missing_ok=True) вместо
+        # exists()+unlink: сама пара «проверил-удалил» была второй гонкой того же рода.
+        _tmp = dst.with_name(dst.name + f'.tmp{os.getpid()}')
         try:
             _tmp.write_bytes(_нужно)
             os.replace(_tmp, dst)
         finally:
-            # Хвост от неудачной попытки не оставляем: он не мешает работе, но копится и
-            # путает разбор каталога.
-            if _tmp.exists():
-                _tmp.unlink()
+            _tmp.unlink(missing_ok=True)
         made.append(legacy if _есть is None else legacy + ' (был повреждён, переписан)')
     if DIR.is_dir() and str(DIR) not in zoneinfo.TZPATH:
         zoneinfo.reset_tzpath([str(DIR)] + list(zoneinfo.TZPATH))
