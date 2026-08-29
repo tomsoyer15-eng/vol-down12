@@ -48,6 +48,12 @@ def отправить(тема, текст):
     п['To'] = адрес
     п['Date'] = formatdate(localtime=True)
     п['Subject'] = f'[ADD-FUT пилот] {тема}'
+    # ПОМЕТКА «ВАЖНОЕ» (просьба заказчика 29.08.2026): каждое письмо этого канала — событие,
+    # а не рассылка. Заголовки важности ставятся всегда; Gmail дополнительно сортирует их
+    # фильтром заказчика по теме «[ADD-FUT пилот]».
+    п['Importance'] = 'High'
+    п['X-Priority'] = '1 (Highest)'
+    п['Priority'] = 'urgent'
     машина = socket.gethostname()
     п.set_content(f'{текст}\n\n-- \nмашина {машина}, наблюдатель vol-down12')
     with smtplib.SMTP('smtp.gmail.com', 587, timeout=60) as с:
