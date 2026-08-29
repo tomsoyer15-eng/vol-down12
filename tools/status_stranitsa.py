@@ -6,7 +6,10 @@
 пульс: файл пишется каждые полчаса, и если отметка старше сорока минут, значит машина или
 её выгрузка лежат. Мёртвая машина не может обновить страницу — свежесть и есть проверка.
 
-Чистый питон + rclone (уже настроен для копий). Без Claude и без шлюза: страница читает
+Выгружается ДВУМЯ файлами: ADD-FUT-STATUS.pdf — красивый, Drive рендерит его в
+браузере и в приложении одним кликом (заказчик просил «посмотреть онлайн»; html
+Drive не рендерит, конверсия в Google-Док капризна — PDF надёжнее всех), и
+ADD-FUT-STATUS.txt — машинно-читаемый запасной. Чистый питон + rclone. Без Claude и без шлюза: страница читает
 ФАЙЛЫ (книга, журналы), а не дёргает брокера — внутридневная переоценка счёта сознательно
 не запрашивается, NLV даётся на последнее замыкание. Любой кусок данных не смеет валить
 страницу: недоступное честно помечается «?».
@@ -113,22 +116,129 @@ def собрать():
     return '\n'.join(з) + '\n'
 
 
+def собрать_структуру():
+    """Те же данные кусками — для PDF. Один сборщик правды: всё берётся из текста
+    страницы, чтобы txt и pdf не могли разойтись."""
+    т = собрать()
+    куски = {'шапка': [], 'тело': [], 'записи': [], 'план': []}
+    режим = 'шапка'
+    for с in т.splitlines():
+        if с.startswith('Последние записи'):
+            режим = 'записи'
+            continue
+        if с.startswith('Ближайшее по плану'):
+            режим = 'план'
+            continue
+        if с.startswith('Каналы:') or с.startswith('=') or not с.strip():
+            continue
+        if режим == 'шапка' and (с.startswith('ADD-FUT') or с.startswith('Обновлено')
+                                 or с.startswith('ПРАВИЛО')):
+            куски['шапка'].append(с)
+            continue
+        режим2 = 'тело' if режим == 'шапка' else режим
+        куски[режим2].append(с.strip())
+    return куски
+
+
+def нарисовать_pdf(файл):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.colors import HexColor
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.pdfgen import canvas
+    pdfmetrics.registerFont(TTFont('DV', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'))
+    pdfmetrics.registerFont(TTFont('DVB', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'))
+    к = собрать_структуру()
+    тревога = any('ТРЕВОГИ:' in с or 'НЕ НОРМА' in с for с in к['тело'] + к['шапка'])
+    c = canvas.Canvas(str(файл), pagesize=A4)
+    ш, в = A4
+    y = в - 50
+    c.setFont('DVB', 20)
+    c.setFillColor(HexColor('#1a1a1a'))
+    c.drawString(40, y, 'ADD-FUT — статус бумажного пилота')
+    y -= 30
+    # вердикт крупно и цветом: одного взгляда достаточно
+    c.setFont('DVB', 15)
+    c.setFillColor(HexColor('#b00020' if тревога else '#1b7a2f'))
+    c.drawString(40, y, 'ЕСТЬ ПРОБЛЕМА — смотри почту' if тревога else
+                 'ВСЁ РАБОТАЕТ ШТАТНО')
+    y -= 24
+    c.setFont('DV', 10)
+    c.setFillColor(HexColor('#555555'))
+    for с in к['шапка']:
+        if с.startswith('ADD-FUT'):
+            continue
+        c.drawString(40, y, с)
+        y -= 14
+    y -= 8
+    c.setFillColor(HexColor('#1a1a1a'))
+    c.setFont('DV', 12)
+    for с in к['тело']:
+        if с.startswith('Внутридневная') or с.startswith('а не дёргает'):
+            c.setFont('DV', 9)
+            c.setFillColor(HexColor('#777777'))
+            c.drawString(40, y, с)
+            c.setFont('DV', 12)
+            c.setFillColor(HexColor('#1a1a1a'))
+            y -= 13
+        else:
+            c.drawString(40, y, с)
+            y -= 18
+    y -= 8
+    c.setFont('DVB', 12)
+    c.drawString(40, y, 'Последние записи робота')
+    y -= 16
+    c.setFont('DV', 8.5)
+    c.setFillColor(HexColor('#333333'))
+    for с in к['записи']:
+        c.drawString(46, y, с[:118])
+        y -= 12
+    y -= 10
+    c.setFont('DVB', 12)
+    c.setFillColor(HexColor('#1a1a1a'))
+    c.drawString(40, y, 'Ближайшее по плану')
+    y -= 16
+    c.setFont('DV', 10)
+    for с in к['план']:
+        c.drawString(46, y, с)
+        y -= 14
+    c.setFont('DV', 8)
+    c.setFillColor(HexColor('#999999'))
+    c.drawString(40, 28, 'Обновляется каждые полчаса. Письма: пульс ежедневно, сводка по '
+                         'понедельникам, события, тревоги — папка ADD-FUT.')
+    c.showPage()
+    c.save()
+
+
 def главная():
     текст = собрать()
-    файл = ПРОЕКТ / 'docs' / 'ADD-FUT-STATUS.txt'
-    файл.write_text(текст, encoding='utf-8')
+    тхт = ПРОЕКТ / 'docs' / 'ADD-FUT-STATUS.txt'
+    тхт.write_text(текст, encoding='utf-8')
+    пдф = ПРОЕКТ / 'docs' / 'ADD-FUT-STATUS.pdf'
+    try:
+        нарисовать_pdf(пдф)
+    except Exception as ошибка:
+        # PDF — витрина; его поломка не смеет валить канал целиком, txt уедет всё равно.
+        пдф = None
+        with ЖУРНАЛ.open('a', encoding='utf-8') as ф:
+            ф.write(f'{datetime.datetime.now().strftime("%F %T")} PDF не собрался: '
+                    f'{type(ошибка).__name__}: {ошибка}\n')
     метка = datetime.datetime.now().strftime('%F %T')
     if not RCLONE.exists():
         with ЖУРНАЛ.open('a', encoding='utf-8') as ф:
             ф.write(f'{метка} нет rclone — страница не выгружена\n')
         return 2
-    ход = subprocess.run([str(RCLONE), 'copyto', str(файл),
-                          УДАЛЁНКА + 'ADD-FUT-STATUS.txt'],
-                         capture_output=True, text=True, timeout=120)
-    with ЖУРНАЛ.open('a', encoding='utf-8') as ф:
-        ф.write(f'{метка} выгрузка: код {ход.returncode}'
-                + (f' ({ход.stderr.strip()[:120]})' if ход.returncode else '') + '\n')
-    return ход.returncode
+    итог = 0
+    for ф_путь, имя in ((пдф, 'ADD-FUT-STATUS.pdf'), (тхт, 'ADD-FUT-STATUS.txt')):
+        if ф_путь is None:
+            continue
+        ход = subprocess.run([str(RCLONE), 'copyto', str(ф_путь), УДАЛЁНКА + имя],
+                             capture_output=True, text=True, timeout=120)
+        итог = итог or ход.returncode
+        with ЖУРНАЛ.open('a', encoding='utf-8') as ф:
+            ф.write(f'{метка} выгрузка {имя}: код {ход.returncode}'
+                    + (f' ({ход.stderr.strip()[:100]})' if ход.returncode else '') + '\n')
+    return итог
 
 
 if __name__ == '__main__':
