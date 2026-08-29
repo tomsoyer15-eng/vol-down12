@@ -36,7 +36,9 @@ def настройка():
     if not из.get('ADRES') or not из.get('PAROL'):
         print(f'почта не настроена: в {КОНФ} нужны ADRES= и PAROL=', file=sys.stderr)
         raise SystemExit(2)
-    return из['ADRES'], из['PAROL']
+    # Google показывает пароль приложения группами по четыре с пробелами — пробелы не
+    # значимы, снимаем сами: скопированный «как есть» пароль не должен ломать вход.
+    return из['ADRES'], из['PAROL'].replace(' ', '')
 
 
 def отправить(тема, текст):
