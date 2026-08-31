@@ -1712,6 +1712,53 @@ def _run_mutations():
     import invariants as _I_bp
     from pathlib import Path as _P_bp
 
+    def gw_wait_removed():
+        """Ожидание готовности исчезает: «прогрелся с первой пробы» всегда. Ловится
+        утверждением «проб до успеха == 3» при двух осечках стенда."""
+        import gw_gotovnost as GWm
+        _orig = GWm.дождаться
+
+        def _mut(host='127.0.0.1', port=4002, бюджет_с=120, шаг_с=5, таймаут_пробы_с=10):
+            return True
+        return _orig, _mut, GWm, 'дождаться'
+
+    def gw_object_reused():
+        """Проба переиспользует ОДИН объект IB — прежний дефект (кэш мёртвой попытки).
+        Ловится утверждением «создано == подключений»."""
+        import gw_gotovnost as GWm
+        _orig = GWm.дождаться
+
+        def _mut(host='127.0.0.1', port=4002, бюджет_с=120, шаг_с=5, таймаут_пробы_с=10):
+            import socket as _s
+            import time as _t
+            предел = _t.monotonic() + бюджет_с
+            import ib_insync
+            ib = ib_insync.IB()               # ОДИН объект на все пробы — мутация
+            while _t.monotonic() < предел:
+                try:
+                    к = _s.create_connection((host, port), timeout=3)
+                    к.close()
+                except OSError:
+                    _t.sleep(шаг_с)
+                    continue
+                try:
+                    ib.connect(host, port, clientId=GWm.ПРОБНЫЙ_CLIENT_ID,
+                               timeout=таймаут_пробы_с)
+                    ib.disconnect()
+                    return True
+                except Exception:
+                    _t.sleep(шаг_с)
+            print(GWm.КОД_ПРИЧИНЫ, flush=True)
+            return False
+        return _orig, _mut, GWm, 'дождаться'
+
+    def gw_cause_code_silent():
+        """Код причины прогрева замолкает при исчерпании бюджета. Ловится утверждением
+        «код_причины_напечатан»."""
+        import gw_gotovnost as GWm
+        _orig = GWm.КОД_ПРИЧИНЫ
+        return _orig, 'ПРИЧИНА-ЗАМОЛЧАЛА', GWm, 'КОД_ПРИЧИНЫ'
+
     def backup_push_always_zero():
         """Выгрузка копий снова всегда возвращает 0 — как было до разбора находки №11:
         последней командой скрипта был echo, счётчик неудач обнулялся каждое замыкание, и
@@ -2338,6 +2385,9 @@ def _run_mutations():
             # правило 8в-5: ворота назвали ОДНО место, а мест было два.
             # СНИМАЕТСЯ, А НЕ ПРЕВРАЩАЕТСЯ В ПУСТУЮ: мутация-заглушка ничего не меняет,
             # значит её никто не убьёт, и прогон честно объявит её непойманной.
+            ('готовность шлюза не ждёт', gw_wait_removed),
+            ('проба готовности одним объектом', gw_object_reused),
+            ('код причины прогрева молчит', gw_cause_code_silent),
             ] + ([('выгрузка копий всегда возвращает 0', backup_push_always_zero)]
                  if _P_bp(_I_bp.BACKUP_PUSH_SH).exists() else []) + (
                 # ТОТ ЖЕ ГЕЙТ ЕЩЁ ТРЁМ ЗАПИСЯМ (28.08.2026, рецензия, находки №5 и №7).

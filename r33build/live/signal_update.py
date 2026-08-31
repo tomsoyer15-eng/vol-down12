@@ -559,6 +559,10 @@ def _update_locked(ib, LIVE, pd):
 if __name__ == '__main__':
     from ib_insync import IB
     ib = IB()
+    # Первый потребитель холодного шлюза в тике — ждёт прогрева тем же
+    # модулем, что сессия и ensure_gw (перечинка 31.08, рецензия).
+    import gw_gotovnost as _GW
+    _GW.дождаться(бюджет_с=90)
     ib.connect(os.environ.get('IB_HOST', '127.0.0.1'),
                int(os.environ.get('IB_PORT', '4002')), clientId=37, timeout=30)
     ib.reqMarketDataType(3)

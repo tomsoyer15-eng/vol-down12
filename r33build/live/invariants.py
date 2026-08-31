@@ -2710,6 +2710,8 @@ if BRANCH_COVER_OK:
     RUN_CASES = RUN_CASES + ('правила45: ворота покрытия наблюдают сами себя',)
 RUN_CASES = RUN_CASES + ('worm: повреждённый архив опознаётся',)
 RUN_CASES = RUN_CASES + ('worm: брокер отвечает некорректно',)
+RUN_CASES = RUN_CASES + ('gw-готовность',)
+RUN_CASES = RUN_CASES + ('gw-диагност',)
 
 _ROLLGAP_K = 2
 
@@ -3107,6 +3109,170 @@ def _session_run(case):
     except Exception:
         out['j7_rows'] = []
     return out
+
+
+def _gw_diagnost_case():
+    """ДИАГНОСТ И ПРОГРЕВ (перечинка 31.08, рецензия). Два зеркальных утверждения:
+    (1) ПОЗИТИВ: тело с машинным кодом производителя опознаётся причиной прогрева;
+    (2) НЕГАТИВ — то, из-за чего снят прозаический якорь: тело «после торговли» с
+        трейсбеком через отчёты исполнений и словами «исход НЕИЗВЕСТЕН» НЕ смеет
+        получать прогрев ни первой, ни какой-либо причиной — совет «снять тревогу»
+        на тревоге правила 7 был опаснейшей находкой рецензии, проверен исполнением."""
+    import diagnose as D
+    out = dict(case='gw-диагност', raised=False, error='', placed=0, positions={},
+               saved=None, provisional=None, lev=None, journal=Path('/nonexistent'))
+    try:
+        тело_код = ('ADDFUT-ПРИЧИНА: ШЛЮЗ-НЕ-ПРОГРЕЛСЯ; полное подключение не прошло '
+                    'за 120 с (9 проб)')
+        хиты_к = D.classify(тело_код)
+        out['код_опознан'] = any('прогрев' in h[0] or 'ШЛЮЗ' in h[0] for h in хиты_к[:1])
+
+        тело_р7 = (
+            'Traceback (most recent call last):\n'
+            '  File ".../ib_insync/ib.py", line 835, in reqExecutions\n'
+            '    return self._run(self.reqExecutionsAsync(execFilter))\n'
+            'BrokerError: барьер отчётов об исполнении недоступен\n'
+            'RuntimeError: заявка подана, статус ранее поданных заявок НЕИЗВЕСТЕН, '
+            'повтор не выполняется\n')
+        хиты_р7 = D.classify(тело_р7)
+        out['прогрев_не_лезет_в_правило_7'] = not any(
+            'прогрел' in h[0] or 'ШЛЮЗ-НЕ-ПРОГРЕЛСЯ' in h[0] for h in хиты_р7)
+        out['исход_назван'] = any('неизвестен' in h[0] for h in хиты_р7)
+        out['ok'] = all([out['код_опознан'], out['прогрев_не_лезет_в_правило_7'],
+                         out['исход_назван']])
+    except Exception as ex:
+        out['raised'] = True
+        out['error'] = f'{type(ex).__name__}: {ex}'
+        out['ok'] = False
+    return out
+
+
+def _gw_gotovnost_case():
+    """ГОТОВНОСТЬ ШЛЮЗА (перечинка 31.08.2026). Три утверждения одним случаем:
+    (1) холодный шлюз: пробы идут до прогрева, объект IB каждый раз СВЕЖИЙ — дефект первой
+        редакции (наследование кэша мёртвой попытки) наблюдаем счётчиком созданных
+        объектов; (2) вечно холодный: бюджет выходит, печатается машинный код причины
+        (ворота 8в-3), возврат False; (3) сессия зовёт ожидание ДО подключения — порядок
+        наблюдаем журналом вызовов. Порт поднимает сам стенд (живой listener на эфемерном
+        порту): проверка порта в модуле настоящая, подменяется только ib_insync."""
+    import contextlib
+    import io
+    import socket
+    import sys as _sys
+    import threading
+    import types
+    import gw_gotovnost as GW
+    # БЕЗ reload (31.08, пойман собственным зондом мутаций): reload восстанавливает
+    # подменённую функцию и делает стенд слепым к мутациям — известный класс граблей.
+
+    слушатель = socket.socket()
+    слушатель.bind(('127.0.0.1', 0))
+    слушатель.listen(16)
+    порт = слушатель.getsockname()[1]
+    состояние = {'жив': True}
+
+    def принимать():
+        while состояние['жив']:
+            try:
+                к, _ = слушатель.accept()
+                к.close()
+            except OSError:
+                return
+    threading.Thread(target=принимать, daemon=True).start()
+
+    счёт = {'создано': 0, 'подключений': 0}
+
+    def фальш_ib(осечек):
+        внутр = {'н': 0}
+
+        class IB:
+            def __init__(self):
+                счёт['создано'] += 1
+
+            def connect(self, host, port_, clientId=None, timeout=30):
+                счёт['подключений'] += 1
+                внутр['н'] += 1
+                if внутр['н'] <= осечек:
+                    raise TimeoutError('прогрев (стенд)')
+
+            def disconnect(self):
+                pass
+        м = types.ModuleType('ib_insync')
+        м.IB = IB
+        return м
+
+    out = dict(case='gw-готовность', raised=False, error='', placed=0, positions={},
+               saved=None, provisional=None, lev=None, journal=Path('/nonexistent'))
+    _наст = _sys.modules.get('ib_insync')
+    try:
+        _sys.modules['ib_insync'] = фальш_ib(2)
+        with contextlib.redirect_stdout(io.StringIO()):
+            ок = GW.дождаться('127.0.0.1', порт, бюджет_с=30, шаг_с=0, таймаут_пробы_с=1)
+        out['прогрелся'] = bool(ок)
+        out['проб_до_успеха'] = счёт['подключений']
+        out['объект_свежий_каждый_раз'] = (счёт['создано'] == счёт['подключений'] >= 3)
+
+        счёт['создано'] = счёт['подключений'] = 0
+        _sys.modules['ib_insync'] = фальш_ib(10 ** 9)
+        буф2 = io.StringIO()
+        with contextlib.redirect_stdout(буф2):
+            ок2 = GW.дождаться('127.0.0.1', порт, бюджет_с=2, шаг_с=0, таймаут_пробы_с=1)
+        out['бюджет_отказал'] = (ок2 is False)
+        # ЛИТЕРАЛ, а не константа модуля: мутация константы меняла бы обе стороны
+        # сверки согласованно, и проверка ничего не проверяла бы (пойман зондом).
+        out['код_причины_напечатан'] = ('ADDFUT-ПРИЧИНА: ШЛЮЗ-НЕ-ПРОГРЕЛСЯ'
+                                        in буф2.getvalue())
+
+        порядок = []
+        _ждать_наст = GW.дождаться
+        GW.дождаться = lambda *a, **k: (порядок.append('готовность'), True)[1]
+
+        class IBСессии:
+            def connect(self, *a, **k):
+                порядок.append('connect')
+
+            def reqMarketDataType(self, *_):
+                pass
+        _sys.modules['ib_insync'] = types.ModuleType('ib_insync')
+        _sys.modules['ib_insync'].IB = IBСессии
+        try:
+            import session as SS
+            SS._connect(9)
+        finally:
+            GW.дождаться = _ждать_наст
+        out['сессия_ждёт_до_подключения'] = (порядок == ['готовность', 'connect'])
+        out['ok'] = all([out['прогрелся'], out['проб_до_успеха'] == 3,
+                         out['объект_свежий_каждый_раз'], out['бюджет_отказал'],
+                         out['код_причины_напечатан'],
+                         out['сессия_ждёт_до_подключения']])
+    except Exception as ex:
+        out['raised'] = True
+        out['error'] = f'{type(ex).__name__}: {ex}'
+        out['ok'] = False
+    finally:
+        if _наст is not None:
+            _sys.modules['ib_insync'] = _наст
+        else:
+            _sys.modules.pop('ib_insync', None)
+        состояние['жив'] = False
+        слушатель.close()
+    return out
+
+
+@rinv('диагност прогрева: код опознаётся, тревога правила 7 прогревом не зовётся',
+      needs=lambda r: r.get('case') == 'gw-диагност')
+def _gw2(r):
+    """Негатив здесь главнее позитива: прозаический якорь первой редакции звал «снять
+    тревогу» на исходе-неизвестен — проверено исполнением при разборе рецензии."""
+    return (not r['raised']) and r.get('ok') is True
+
+
+@rinv('готовность шлюза: пробы до прогрева, свежий объект, код причины, порядок в сессии',
+      needs=lambda r: r.get('case') == 'gw-готовность')
+def _gw1(r):
+    """Перечинка 31.08: четыре слагаемых — четыре закрытых дефекта первой редакции
+    (слепой повтор тем же объектом, тем же clientId, без кода причины, не с той стороны)."""
+    return (not r['raised']) and r.get('ok') is True
 
 
 @rinv('наблюдение не подаёт заявок и не меняет состояние',
@@ -7630,6 +7796,8 @@ def run_run(stop_on_first=False):
                  else _session_statedir() if case == 'пути состояния: один namespace'
                  else _worm_case(case) if case.startswith('worm:')
                  else _rules45_case(case) if case.startswith('правила45:')
+                 else _gw_gotovnost_case() if case == 'gw-готовность'
+                 else _gw_diagnost_case() if case == 'gw-диагност'
                  else _autopilot_case(case) if case.startswith('автопилот:')
                  else _session_run(case))
         except Exception as ex:
