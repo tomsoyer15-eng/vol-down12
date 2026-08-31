@@ -1,0 +1,48 @@
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/alex/claude-projects/vol-down12/r33build/live/session.py", line 931, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/home/alex/claude-projects/vol-down12/r33build/live/session.py", line 914, in main
+    ib = _connect(a.client_id)
+         ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/alex/claude-projects/vol-down12/r33build/live/session.py", line 88, in _connect
+    ib.connect(HOST, PORT, clientId=client_id, timeout=30)
+  File "/home/alex/claude-projects/vol-down12/.venv/lib/python3.12/site-packages/ib_insync/ib.py", line 279, in connect
+    return self._run(self.connectAsync(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/alex/claude-projects/vol-down12/.venv/lib/python3.12/site-packages/ib_insync/ib.py", line 318, in _run
+    return util.run(*awaitables, timeout=self.RequestTimeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/alex/claude-projects/vol-down12/.venv/lib/python3.12/site-packages/ib_insync/util.py", line 341, in run
+    result = loop.run_until_complete(task)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/alex/claude-projects/vol-down12/.venv/lib/python3.12/site-packages/ib_insync/ib.py", line 1782, in connectAsync
+    await asyncio.wait_for(self.reqExecutionsAsync(), timeout)
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 519, in wait_for
+    async with timeouts.timeout(timeout):
+  File "/usr/lib/python3.12/asyncio/timeouts.py", line 115, in __aexit__
+    raise TimeoutError from exc_val
+TimeoutError
+
+── ДИАГНОСТ (автоматический разбор; О-5: ничего не чинилось) ──
+Причина не классифицирована — сигнатура отказа не в таблице; читать сырой вывод выше, он полный.
+── Факты ──
+  Чикаго 2026-08-31 08:45
+  книга F: сессия 13 за 2026-08-28, замкнута=да
+  порт шлюза 4002: отвечает
+  тревог всего: 1 ['ALARM-trade-2026-08-31.txt']
+  стоп-файла нет
+  лог:   File "/usr/lib/python3.12/asyncio/timeouts.py", line 115, in __aexit__
+  лог:     raise TimeoutError from exc_val
+  лог: TimeoutError
