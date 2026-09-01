@@ -17,6 +17,14 @@ GW_VER="${GW_VER:-1045}"
 DISPLAY_NUM="${DISPLAY_NUM:-:97}"
 MODE="${TRADING_MODE:-paper}"
 
+FORCE=no
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=yes ;;
+    *) echo "ОШИБКА: неизвестный аргумент «$arg» (допустим только --force)" >&2; exit 2 ;;
+  esac
+done
+
 command -v Xvfb >/dev/null || {
   echo "ОШИБКА: Xvfb не установлен. Нужен один раз и с правами root:" >&2
   echo "    sudo apt-get install -y xvfb" >&2
@@ -24,6 +32,27 @@ command -v Xvfb >/dev/null || {
 }
 [ -d "$GW_DIR/ibgateway/$GW_VER/jars" ] || { echo "ОШИБКА: шлюз не найден в $GW_DIR" >&2; exit 3; }
 [ -f "$IBC_DIR/IBC.jar" ]  || { echo "ОШИБКА: IBC не найден в $IBC_DIR" >&2; exit 3; }
+
+# ВТОРОЙ ШЛЮЗ НЕ ПОДНИМАЕМ (01.09.2026). Здесь дисплей ещё играет роль замка: на занятом
+# :97 скрипт выходит кодом 4 и дубля не создаёт. Но замок этот держится на совпадении, а
+# не на проверке — эта копия делит с vol-down12 И экран :97, И порт 4002. Стоит экрану
+# освободиться, как запуск поднимет шлюз, который не сможет занять чужой порт и просто
+# повиснет, держа память. Именно так в соседнем проекте накопилось семь процессов.
+# Выход НУЛЁМ: «шлюз уже работает» — это успех, ошибка заставила бы вызывающего повторять.
+API_PORT="$(sed -n 's/^OverrideTwsApiPort=\([0-9][0-9]*\).*$/\1/p' "$HERE/config.ini" | head -1)"
+[ -n "$API_PORT" ] || { echo "ОШИБКА: в $HERE/config.ini нет OverrideTwsApiPort" >&2; exit 3; }
+if [ "$FORCE" = no ]; then
+  if LISTENING="$(ss -ltn 2>/dev/null)"; then
+    if printf '%s\n' "$LISTENING" | grep -q ":${API_PORT} "; then
+      echo "шлюз уже работает: порт $API_PORT занят — второй не запускаю"
+      echo "если повторный запуск всё же нужен, вызовите с --force"
+      exit 0
+    fi
+  else
+    echo "ПРЕДУПРЕЖДЕНИЕ: ss недоступен, занятость порта $API_PORT не проверена" >&2
+  fi
+fi
+
 : "${IB_LOGIN:?задайте IB_LOGIN в окружении}"
 : "${IB_PASSWORD:?задайте IB_PASSWORD в окружении}"
 
