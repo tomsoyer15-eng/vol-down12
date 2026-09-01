@@ -17,6 +17,14 @@ GW_VER="${GW_VER:-1045}"
 DISPLAY_NUM="${DISPLAY_NUM:-:97}"
 MODE="${TRADING_MODE:-paper}"
 
+FORCE=no
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=yes ;;
+    *) echo "ОШИБКА: неизвестный аргумент «$arg» (допустим только --force)" >&2; exit 2 ;;
+  esac
+done
+
 command -v Xvfb >/dev/null || {
   echo "ОШИБКА: Xvfb не установлен. Нужен один раз и с правами root:" >&2
   echo "    sudo apt-get install -y xvfb" >&2
@@ -24,6 +32,33 @@ command -v Xvfb >/dev/null || {
 }
 [ -d "$GW_DIR/ibgateway/$GW_VER/jars" ] || { echo "ОШИБКА: шлюз не найден в $GW_DIR" >&2; exit 3; }
 [ -f "$IBC_DIR/IBC.jar" ]  || { echo "ОШИБКА: IBC не найден в $IBC_DIR" >&2; exit 3; }
+
+# ВТОРОЙ ШЛЮЗ НЕ ПОДНИМАЕМ (01.09.2026). Правка 14.08 «живой дисплей переиспользуется»
+# убрала выход кодом 4 на занятом :97 — и вместе с ним единственное, что мешало поднять
+# ЕЩЁ ОДИН шлюз поверх работающего. Своей проверки «шлюз уже есть» тут никогда не было:
+# она не требовалась, пока роль замка играл дисплей. За две недели так накопилось семь
+# процессов примерно на 1,6 ГБ, память сервера кончилась и он встал на несколько часов.
+#
+# Признак — занятый порт API: второй шлюз всё равно не сможет его занять, он лишь повиснет
+# и будет держать память. Выход НУЛЁМ, а не ошибкой: для ensure_gw «шлюз уже работает» —
+# это успех; ошибка заставила бы его повторять попытки и завести ещё один экземпляр.
+# Порт читается из config.ini, чтобы копии проекта с другим портом не проверяли чужой.
+API_PORT="$(sed -n 's/^OverrideTwsApiPort=\([0-9][0-9]*\).*$/\1/p' "$HERE/config.ini" | head -1)"
+[ -n "$API_PORT" ] || { echo "ОШИБКА: в $HERE/config.ini нет OverrideTwsApiPort" >&2; exit 3; }
+if [ "$FORCE" = no ]; then
+  # Отсутствие ss не должно останавливать торговлю: предупреждаем громко и работаем как
+  # прежде. Молчаливого пропуска проверки при этом не остаётся — предупреждение в логе.
+  if LISTENING="$(ss -ltn 2>/dev/null)"; then
+    if printf '%s\n' "$LISTENING" | grep -q ":${API_PORT} "; then
+      echo "шлюз уже работает: порт $API_PORT занят — второй не запускаю"
+      echo "если повторный запуск всё же нужен, вызовите с --force"
+      exit 0
+    fi
+  else
+    echo "ПРЕДУПРЕЖДЕНИЕ: ss недоступен, занятость порта $API_PORT не проверена" >&2
+  fi
+fi
+
 : "${IB_LOGIN:?задайте IB_LOGIN в окружении}"
 : "${IB_PASSWORD:?задайте IB_PASSWORD в окружении}"
 
@@ -70,7 +105,7 @@ fi
 
 export DISPLAY="$DISPLAY_NUM"
 echo "экран $DISPLAY_NUM поднят (pid $XVFB_PID); шлюз $GW_VER, режим $MODE"
-echo "порт API: $(grep -E '^OverrideTwsApiPort=' "$HERE/config.ini" | cut -d= -f2)"
+echo "порт API: $API_PORT"
 echo "ReadOnlyApi: $(grep -E '^ReadOnlyApi=' "$HERE/config.ini" | cut -d= -f2) (заявки запрещены, пока стоит yes)"
 
 # gatewaystart.sh НЕ разбирает аргументы: это шаблон с зашитыми путями, который полагается
