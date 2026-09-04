@@ -2792,6 +2792,21 @@ def _transition_mutations():
                         st[_k] = _v
         return orig, patched, _Ta, '_run_lots'
 
+    def porog8_bez_signala():
+        """Прежний тупик 04.09.2026: ниже порога §8 движок сигнала в Е НЕ выдаёт, значит
+        одобрять нечего и маршрут Е недостижим для любого счёта меньше 3 млн."""
+        import mr_engine as _Mp
+        orig = _Mp.нужен_сигнал_в_E
+        return orig, (lambda route, nlv: False), _Mp, 'нужен_сигнал_в_E'
+
+    def porog8_signal_vsegda():
+        """Обратная порча: сигнал в Е выдаётся ВСЕГДА, в том числе выше порога §8, — то
+        есть движок гонит счёт из Ф независимо от размера. Ловится верхней половиной того
+        же стенда; без неё правка была бы наблюдаема только с одной стороны."""
+        import mr_engine as _Mp
+        orig = _Mp.нужен_сигнал_в_E
+        return orig, (lambda route, nlv: route == 'F'), _Mp, 'нужен_сигнал_в_E'
+
     def mr_digest_off():
         """ТРИДЦАТЬ ПЕРВЫЙ КРУГ, №13: содержимое нормативного журнала МР снова не
         заверяется — пин сторожит только личность файла, и валидная правка «на месте»
@@ -2800,7 +2815,9 @@ def _transition_mutations():
         orig = _Mm._verify_journal_digest
         return orig, (lambda j, body: None), _Mm, '_verify_journal_digest'
 
-    return [('остаток не вычитает внутрилотовый прогресс', pv_remainder_ignores_partial),
+    return [('порог §8 не выдаёт сигнала в Е (прежний тупик)', porog8_bez_signala),
+            ('сигнал в Е выдаётся всегда, и выше порога', porog8_signal_vsegda),
+            ('остаток не вычитает внутрилотовый прогресс', pv_remainder_ignores_partial),
             ('квота дня считается по файлу прогресса', orders_counted_locally),
             ('дата перехода принимается на веру', asof_trusted),
             ('край общего окна не проверяется', gate_no_window),

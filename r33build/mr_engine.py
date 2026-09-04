@@ -467,6 +467,15 @@ def journal_rows(journal, asof=None):
         if asof is None or d <= asof: out.append((d, r['event'], r['detail']))
     return out
 
+def нужен_сигнал_в_E(route, nlv):
+    """Обязан ли движок выдать рекомендацию перейти в Е: маршрут Ф ниже порога §8.
+
+    ОТДЕЛЬНОЙ ФУНКЦИЕЙ — ради ОДНОЙ точки приложения парной мутации (правило 8в): пока
+    правило жило четырьмя строками внутри run(), мутация «вернуть прежний тупик» не имела
+    места, куда встать, и защита была бы ненаблюдаема."""
+    return route == 'F' and nlv < MIN_NLV_F
+
+
 def derive_state(journal, asof):
     journal = canonical_journal(journal)
     """Возвращает (route, pending, mixed, anomalies). COMPLETE действует ТОЛЬКО при
@@ -699,12 +708,21 @@ def run(inputs, tariff, state_path, journal, asof, nlv, emerg=None, prearranged=
     except ValueError as ex:
         print(f'DECISION=INVALID ({ex})'); return INVALID
     f_blocked = nlv < MIN_NLV_F
+    # ПОРОГ §8 ОБЯЗАН ВЫДАВАТЬ СИГНАЛ В Е, А НЕ ТОЛЬКО ОТКАЗ (04.09.2026, живой отказ
+    # перевода пилота; решение заказчика в тот же день). Здесь стоял безусловный
+    # `return REVIEW`, и он замыкал круг: исполнение перехода требует OWNER_APPROVE на
+    # КОНКРЕТНЫЙ сигнал, одобрять можно только ОЖИДАЮЩИЙ сигнал, а выдать его в состоянии
+    # «маршрут Ф, NLV ниже порога» было НЕКОМУ — квартальная ветвь стоит ниже возврата,
+    # аварийная ещё ниже и вдобавок заперта условием decision == HOLD. Начальный маршрут в
+    # derive_state зашит как 'F', меняет его только ЗАВЕРШЁННЫЙ переход, поэтому маршрут Е
+    # был недостижим для ЛЮБОГО счёта ниже порога — то есть и для пилота (1 млн), и для
+    # живого старта (~100 тыс.), ради которого он и предусмотрен нормативом.
+    # РЕШЕНИЕ ОСТАЁТСЯ ЗА ЗАКАЗЧИКОМ: сигнал — рекомендация, фактический маршрут не
+    # меняется, исполнение по-прежнему требует его подписи и разрешения по гранулярности.
+    # Пополнение счёта выше порога остаётся его правом: он вправе не одобрять сигнал.
+    навязан_E = нужен_сигнал_в_E(route, nlv)
     if f_blocked:
         print(f'  ПОРОГ §8: NLV {nlv:,.0f} ниже {MIN_NLV_F:,.0f} — маршрут Ф недоступен')
-        if route == 'F':
-            print('DECISION=REVIEW (действующий маршрут Ф при NLV ниже порога §8 — '
-                  'требуется решение заказчика: пополнение счёта либо перевод в Е)')
-            return REVIEW
     if anomalies:
         for a in anomalies: print('  АНОМАЛИЯ ЖУРНАЛА: ' + a)
         print('DECISION=REVIEW (журнал содержит несверенные события — переключения заблокированы)')
@@ -714,39 +732,53 @@ def run(inputs, tariff, state_path, journal, asof, nlv, emerg=None, prearranged=
         return REVIEW
     print(f'МР v7.7 [{asof}] маршрут {route}, pending {pending or "—"}, переключений/3г {n_sw}, '
           f'NLV {nlv/1e6:.2f} млн, тариф {t_date}, Е = {e_cost:.4f}')
-    rows = list(csv.DictReader(open(inputs, encoding='utf-8')))
-    errs = validate(rows, asof)
-    for e in errs: print('  ОШИБКА: ' + e)
     decision = HOLD; note = 'условий переключения нет'; target = None
-    if errs:
-        decision, note = INVALID, 'входы невалидны'
-    else:
-        done = sorted([r for r in rows if '_we' in r and r['_we'] <= asof], key=lambda r: r['_we'])
-        if len(done) < 2: note = f'завершённых кварталов {len(done)} < 2'
-        elif done[-2]['status'] != 'OK' or done[-1]['status'] != 'OK':
-            note = 'последние завершённые не подтверждены'
-        elif done[-2]['_we'] != done[-1]['_ws']: note = 'последние завершённые не смежны'
+    if навязан_E:
+        # ВХОДЫ КВАРТАЛЬНОГО СРАВНЕНИЯ ЗДЕСЬ НЕ ЧИТАЮТСЯ НАМЕРЕННО: решение вытекает из
+        # порога §8, а не из издержек, и прежняя ветвь возвращалась ДО чтения файла —
+        # чтение сделало бы отсутствующий или битый файл входов новым препятствием там,
+        # где его не было. Сторожа переходов те же, что у квартальной ветви.
+        target = 'E'
+        if pending == 'E': note = 'переход уже инициирован, ожидает исполнения'
+        elif pending is not None:
+            decision, note = REVIEW, f'встречный сигнал при незакрытом pending {pending}'
+        elif budget_exhausted(n_sw):
+            decision, note = REVIEW, f'бюджет переключений исчерпан ({n_sw}/{MAX_SWITCHES_3Y} за 3 года)'
         else:
-            def gap(r):
-                basis = _num(r['basis_to_effr_pp']) if r['quote_base'] == 'SOFR3M' else \
-                        (_num(r['basis_to_effr_pp']) if r['basis_to_effr_pp'].strip() not in ('', 'NA') else 0.0)
-                return eq_F(_num(r['s_eq_pp']), _num(r['s_zn_pp']), basis) - e_cost
-            ga, gb = gap(done[-2]), gap(done[-1])
-            print(f'  последние два: {done[-2]["quarter_id"]} {ga:+.3f} / {done[-1]["quarter_id"]} {gb:+.3f}')
-            if abs(ga) >= GAP and abs(gb) >= GAP and (ga > 0) == (gb > 0):
-                target = 'E' if gb > 0 else 'F'
-                if target == route: note = f'цель {target} уже действует'
-                elif pending == target: note = 'переход уже инициирован, ожидает исполнения'
-                elif pending is not None:
-                    decision, note = REVIEW, f'встречный сигнал при незакрытом pending {pending}'
-                elif budget_exhausted(n_sw):
-                    decision, note = REVIEW, f'бюджет переключений исчерпан ({n_sw}/{MAX_SWITCHES_3Y} за 3 года)'
-                elif target == 'F' and f_blocked:
-                    decision, note = REVIEW, f'сигнал в Ф при NLV ниже порога §8 ({MIN_NLV_F:,.0f})'
-                else:
-                    decision = SWITCH_E if target == 'E' else SWITCH_F
-                    note = 'два последних смежных однонаправленно ≥0,25'
-            else: note = 'мёртвая зона либо разнонаправленно'
+            decision, note = SWITCH_E, f'маршрут Ф недоступен при NLV ниже порога §8 ({MIN_NLV_F:,.0f})'
+    else:
+        rows = list(csv.DictReader(open(inputs, encoding='utf-8')))
+        errs = validate(rows, asof)
+        for e in errs: print('  ОШИБКА: ' + e)
+        if errs:
+            decision, note = INVALID, 'входы невалидны'
+        else:
+            done = sorted([r for r in rows if '_we' in r and r['_we'] <= asof], key=lambda r: r['_we'])
+            if len(done) < 2: note = f'завершённых кварталов {len(done)} < 2'
+            elif done[-2]['status'] != 'OK' or done[-1]['status'] != 'OK':
+                note = 'последние завершённые не подтверждены'
+            elif done[-2]['_we'] != done[-1]['_ws']: note = 'последние завершённые не смежны'
+            else:
+                def gap(r):
+                    basis = _num(r['basis_to_effr_pp']) if r['quote_base'] == 'SOFR3M' else \
+                            (_num(r['basis_to_effr_pp']) if r['basis_to_effr_pp'].strip() not in ('', 'NA') else 0.0)
+                    return eq_F(_num(r['s_eq_pp']), _num(r['s_zn_pp']), basis) - e_cost
+                ga, gb = gap(done[-2]), gap(done[-1])
+                print(f'  последние два: {done[-2]["quarter_id"]} {ga:+.3f} / {done[-1]["quarter_id"]} {gb:+.3f}')
+                if abs(ga) >= GAP and abs(gb) >= GAP and (ga > 0) == (gb > 0):
+                    target = 'E' if gb > 0 else 'F'
+                    if target == route: note = f'цель {target} уже действует'
+                    elif pending == target: note = 'переход уже инициирован, ожидает исполнения'
+                    elif pending is not None:
+                        decision, note = REVIEW, f'встречный сигнал при незакрытом pending {pending}'
+                    elif budget_exhausted(n_sw):
+                        decision, note = REVIEW, f'бюджет переключений исчерпан ({n_sw}/{MAX_SWITCHES_3Y} за 3 года)'
+                    elif target == 'F' and f_blocked:
+                        decision, note = REVIEW, f'сигнал в Ф при NLV ниже порога §8 ({MIN_NLV_F:,.0f})'
+                    else:
+                        decision = SWITCH_E if target == 'E' else SWITCH_F
+                        note = 'два последних смежных однонаправленно ≥0,25'
+                else: note = 'мёртвая зона либо разнонаправленно'
     if emerg and decision == HOLD:
         # АВАРИЙНЫЙ ФАЙЛ РАЗБИРАЕТСЯ ПОД ПЕРЕХВАТОМ, КАК И ТАРИФ (27.08.2026, находка №35).
         # Соседний load_tariff обёрнут в try и при отказе печатает «DECISION=INVALID (...)»,
