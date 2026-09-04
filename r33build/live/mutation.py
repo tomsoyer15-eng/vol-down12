@@ -2792,6 +2792,28 @@ def _transition_mutations():
                         st[_k] = _v
         return orig, patched, _Ta, '_run_lots'
 
+    def grant_pervyy():
+        """Прежнее поведение 04.09.2026: действует ПЕРВОЕ разрешение owner-cap, а не
+        наибольшее. Заниженная заранее цифра запирает переход навсегда — поднять потолок
+        второй записью нельзя, а нового сигнала движок при ожидающем не выдаёт."""
+        import mr_engine as _Mg
+        orig = _Mg.find_grant
+
+        def patched(journal, asof, sid):
+            import math as _m
+            from datetime import date as _d
+            for _, ev, det in _Mg.journal_rows(
+                    journal, _d.fromisoformat(asof) if isinstance(asof, str) else asof):
+                if ev == 'GRANULARITY_EXCEPTION':
+                    parts = [x.strip() for x in det.split('|')]
+                    if len(parts) >= 2 and parts[0] == sid:
+                        v = float(parts[1])
+                        if not _m.isfinite(v) or v <= 0:
+                            raise _Mg.JournalCorrupt('лимит недопустим')
+                        return v
+            return None
+        return orig, patched, _Mg, 'find_grant'
+
     def porog8_bez_signala():
         """Прежний тупик 04.09.2026: ниже порога §8 движок сигнала в Е НЕ выдаёт, значит
         одобрять нечего и маршрут Е недостижим для любого счёта меньше 3 млн."""
@@ -2815,7 +2837,8 @@ def _transition_mutations():
         orig = _Mm._verify_journal_digest
         return orig, (lambda j, body: None), _Mm, '_verify_journal_digest'
 
-    return [('порог §8 не выдаёт сигнала в Е (прежний тупик)', porog8_bez_signala),
+    return [('действует ПЕРВОЕ разрешение owner-cap, а не наибольшее', grant_pervyy),
+            ('порог §8 не выдаёт сигнала в Е (прежний тупик)', porog8_bez_signala),
             ('сигнал в Е выдаётся всегда, и выше порога', porog8_signal_vsegda),
             ('остаток не вычитает внутрилотовый прогресс', pv_remainder_ignores_partial),
             ('квота дня считается по файлу прогресса', orders_counted_locally),
