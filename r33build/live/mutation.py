@@ -2792,6 +2792,47 @@ def _transition_mutations():
                         st[_k] = _v
         return orig, patched, _Ta, '_run_lots'
 
+    def porog8_bez_route():
+        """Из предиката §8 выброшена половина «мы на маршруте Ф»: движок гонит счёт в Е,
+        даже когда он УЖЕ в Е. Рецензия 04.09 показала, что эту мутацию не убивал никто —
+        стенд не имел случая «уже на маршруте Е»."""
+        import mr_engine as _Mp
+        orig = _Mp.нужен_сигнал_в_E
+        return orig, (lambda route, nlv: nlv < _Mp.MIN_NLV_F), _Mp, 'нужен_сигнал_в_E'
+
+    def porog8_bez_byudzheta():
+        """Сторож бюджета переключений снят: ниже порога §8 сигнал выдаётся сверх лимита
+        3 лет. Рецензия 04.09: ветвь не исполнялась стендом ни разу."""
+        import mr_engine as _Mp
+        orig = _Mp.budget_exhausted
+        return orig, (lambda n: False), _Mp, 'budget_exhausted'
+
+    def grant_posledniy():
+        """Действует ПОСЛЕДНЕЕ разрешение, а не наибольшее: дописанное меньшее число
+        опускает уже данный потолок. Рецензия 04.09: «наибольшее» было неотличимо от
+        «последнего», потому что стенд не дописывал меньшее после большего."""
+        import mr_engine as _Mg
+        orig = _Mg.find_grant
+
+        def patched(journal, asof, sid):
+            import math as _m
+            from datetime import date as _d
+            последнее = None
+            for _, ev, det in _Mg.journal_rows(
+                    journal, _d.fromisoformat(asof) if isinstance(asof, str) else asof):
+                if ev == 'GRANULARITY_EXCEPTION':
+                    parts = [x.strip() for x in det.split('|')]
+                    if len(parts) >= 2 and parts[0] == sid:
+                        try:
+                            v = float(parts[1])
+                        except ValueError:
+                            raise _Mg.JournalCorrupt('неразбираемый лимит')
+                        if not _m.isfinite(v) or v <= 0:
+                            raise _Mg.JournalCorrupt('лимит недопустим')
+                        последнее = v
+            return последнее
+        return orig, patched, _Mg, 'find_grant'
+
     def grant_pervyy():
         """Прежнее поведение 04.09.2026: действует ПЕРВОЕ разрешение owner-cap, а не
         наибольшее. Заниженная заранее цифра запирает переход навсегда — поднять потолок
@@ -2838,6 +2879,9 @@ def _transition_mutations():
         return orig, (lambda j, body: None), _Mm, '_verify_journal_digest'
 
     return [('действует ПЕРВОЕ разрешение owner-cap, а не наибольшее', grant_pervyy),
+            ('действует ПОСЛЕДНЕЕ разрешение owner-cap', grant_posledniy),
+            ('порог §8 без проверки текущего маршрута', porog8_bez_route),
+            ('сторож бюджета переключений снят', porog8_bez_byudzheta),
             ('порог §8 не выдаёт сигнала в Е (прежний тупик)', porog8_bez_signala),
             ('сигнал в Е выдаётся всегда, и выше порога', porog8_signal_vsegda),
             ('остаток не вычитает внутрилотовый прогресс', pv_remainder_ignores_partial),

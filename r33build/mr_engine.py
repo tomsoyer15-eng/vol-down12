@@ -738,14 +738,27 @@ def run(inputs, tariff, state_path, journal, asof, nlv, emerg=None, prearranged=
         # порога §8, а не из издержек, и прежняя ветвь возвращалась ДО чтения файла —
         # чтение сделало бы отсутствующий или битый файл входов новым препятствием там,
         # где его не было. Сторожа переходов те же, что у квартальной ветви.
+        # ОТКАЗЫ ЭТОЙ ВЕТВИ ВОЗВРАЩАЮТСЯ СРАЗУ, НИЧЕГО НЕ ЗАПИСЫВАЯ (рецензия 04.09.2026).
+        # Прежний `return REVIEW` стоял ВЫШЕ хвоста записи, и отказ не оставлял следов. Мой
+        # проход через общий хвост это менял: `elif write and decision in (REDUCE, REVIEW)`
+        # дописывал REVIEW_SIGNAL на КАЖДЫЙ прогон, а счёт ниже порога — состояние
+        # постоянное и для пилота, и для живого старта. Журнал рос бы без границ, digest
+        # переставлялся каждый раз, а mr_journal.csv закреплён манифестом — то есть каждый
+        # холостой прогон ломал бы выпущенный пакет. Заодно ранний возврат снимает вторую
+        # находку: при HOLD стал достижим аварийный разбор, и просто несвежий файл --emerg
+        # превращал REVIEW в INVALID со сменой кода возврата.
         target = 'E'
-        if pending == 'E': note = 'переход уже инициирован, ожидает исполнения'
-        elif pending is not None:
-            decision, note = REVIEW, f'встречный сигнал при незакрытом pending {pending}'
-        elif budget_exhausted(n_sw):
-            decision, note = REVIEW, f'бюджет переключений исчерпан ({n_sw}/{MAX_SWITCHES_3Y} за 3 года)'
-        else:
-            decision, note = SWITCH_E, f'маршрут Ф недоступен при NLV ниже порога §8 ({MIN_NLV_F:,.0f})'
+        if pending == 'E':
+            print('DECISION=HOLD (переход в Е уже инициирован, ожидает исполнения)')
+            return HOLD
+        if pending is not None:
+            print(f'DECISION=REVIEW (встречный сигнал при незакрытом pending {pending})')
+            return REVIEW
+        if budget_exhausted(n_sw):
+            print(f'DECISION=REVIEW (бюджет переключений исчерпан '
+                  f'({n_sw}/{MAX_SWITCHES_3Y} за 3 года))')
+            return REVIEW
+        decision, note = SWITCH_E, f'маршрут Ф недоступен при NLV ниже порога §8 ({MIN_NLV_F:,.0f})'
     else:
         rows = list(csv.DictReader(open(inputs, encoding='utf-8')))
         errs = validate(rows, asof)
@@ -911,8 +924,17 @@ def confirm_transition(journal, state_path, asof, target, kind='complete', tid='
 
 def grant_granularity(journal, state_path, asof, sid, limit_usd):
     """Разовое разрешение заказчика на превышение owner-cap для конкретного сигнала:
-    журнальное событие с привязкой sid и АБСОЛЮТНЫМ лимитом в долларах."""
-    append_event(journal, asof, 'GRANULARITY_EXCEPTION', f'{sid}|{limit_usd}')
+    журнальное событие с привязкой sid и АБСОЛЮТНЫМ лимитом в долларах.
+
+    ЗНАЧЕНИЕ ПРОВЕРЯЕТСЯ НА ЗАПИСИ (рецензия 04.09.2026). Прежде путь записи не проверял
+    ничего, а читатель с 04.09 разбирает ВСЕ строки сигнала: ноль, минус, nan или описка
+    навсегда делали разрешение нечитаемым, и переход по этому сигналу становился
+    невозможен — журнал только дописывается, события отзыва нет. Дешевле не пустить."""
+    if not (isinstance(limit_usd, (int, float)) and math.isfinite(float(limit_usd))
+            and float(limit_usd) > 0):
+        raise ValueError(f'GRANULARITY_EXCEPTION: лимит должен быть конечным положительным '
+                         f'числом, получено {limit_usd!r}')
+    append_event(journal, asof, 'GRANULARITY_EXCEPTION', f'{sid}|{float(limit_usd)}')
     d = date.fromisoformat(asof) if isinstance(asof, str) else asof
     write_state_cache(state_path, journal, d)
 
@@ -957,7 +979,16 @@ def find_grant(journal, asof, sid):
         if ev == 'GRANULARITY_EXCEPTION':
             parts = [x.strip() for x in det.split('|')]
             if len(parts) >= 2 and parts[0] == sid:
-                v = float(parts[1])
+                # РАЗБОР ЧИСЛА — ТОЖЕ ПОРЧА ЖУРНАЛА, А НЕ ГОЛЫЙ ValueError (рецензия
+                # 04.09.2026). Голый float() падал типом, которого вызывающий не ловит:
+                # transition перехватывает только JournalCorrupt, и «450 000» с пробелом
+                # или запятой — самая вероятная описка при ручном поднятии потолка —
+                # уходила наружу трейсбеком без кода причины. Прежде строка была
+                # недостижима: возврат стоял на первой.
+                try:
+                    v = float(parts[1])
+                except ValueError:
+                    raise JournalCorrupt(f'GRANULARITY_EXCEPTION с неразбираемым лимитом {parts[1]!r}')
                 if not math.isfinite(v) or v <= 0:
                     raise JournalCorrupt(f'GRANULARITY_EXCEPTION с неконечным/недопустимым лимитом {parts[1]!r}')
                 лучшее = v if лучшее is None else max(лучшее, v)
