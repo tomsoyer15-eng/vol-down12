@@ -1,0 +1,14 @@
+WORM-якорь ADD-FUT v1.6.0 ред. 33 — 2026-09-09 (маршрут F, сессия 20)
+книга: 2026-09-09, замкнута=да, digest dbbaf3b20de6e383ece9563149aaabc5b82175eb1f90b032c6204f94f86f8777 (payload сверен state.load)
+журнал §7: строк 32, корень цепочки 275be8d5c13d14aa3687a41c6944bda7726cbce9f78a5488613da426c1b1ae4a
+sha256 журнала-файла: 97c47e14ada6959ee837b8c8fba593c456c721d801f1eae562800701f478afa0
+sha256 реестра (instruments_live.csv): b5d56fc9e373d2cfde31ade3f42d668c4a1781c121f24703b5b3d2051145ed13
+пара реестр/замер: поколения согласованы
+sha256 замера маржи (margins_live.json): 3c46481b8325c8c34a6c0dfbf8304690d1514692a8dc34d3872a0f15f34851b0
+sha256 живого ряда сигналов: cf9c84ce322d9e29120333fed6f930c0448e05bdc0a2c1baf9c9d80bea9f8d5e
+sha256 сайдкара уровней: c863b25d8fb0f0e7eccd82d2c3a9dd67b1010bcb40c4f7c49825ff0b660caf7f
+sha256 пина счёта: f361bf1e1b31e90721910d817e95bb6698e6389c2c47a571c3c35db8c949c368
+sha256 контрольной суммы ряда: 125cc7d95464a6551e5b8af6aee817313d5d9a3da203959b74f84bea47b86f22
+sha256 журнала МР (mr_journal.csv): 82d9e153160e239eb9c67f0ed9417f7d83539f7d88e3fd2586dbe45d21314764
+sha256 конфигурации развёртывания МР: f37d9f257b9b1f6221218dcc5c4e1b1a34fe974de3d16c3fcc66ef8fa5bcae4e
+sha256 архива (addfut-2026-09-09-160529.tgz): 32f525200afe12cb5dfcc0bbbcd62ab5d203736f33c0fb0002d3b8a8d04cc520
