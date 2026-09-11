@@ -894,6 +894,19 @@ def _adapter_mutations():
             return _d
         return orig, patched
 
+    def preview_frac_etf():
+        """Предпросмотр снова НЕ округляет количество фондов — как было до 11.09.2026.
+        Живой IBKR отвергает дробную заявку по CSPX ошибкой 10243 и ПУСТЫМ whatIf, значит
+        предпросмотр становится недоказуем, переход откладывается и после трёх попыток
+        законный перевод Ф->Е уходит в ABORT. Мутация возвращает ту самую предпосылку
+        «UCITS-ETF торгуются долями», которой программный интерфейс не поддерживает."""
+        import contracts as _CT
+        orig = B._kolichestvo_whatif
+        # НОСИТЕЛЬ — МОДУЛЬ, а не класс адаптера: функция модульная, и имя атрибута
+        # раннер берёт из списка мутаций, четвёртый элемент он не читает.
+        return orig, (lambda instr, qty: float(qty) if str(instr) in _CT.ETF_EXPECT
+                      else float(int(round(float(qty))))), B
+
     def preview_drops_carveouts():
         """Беспланный предпросмотр снова игнорирует аварийность и «всё исполнено» — как
         было до разбора /code-review: аварийный выход Е->Ф запирается ровно при
@@ -1066,6 +1079,7 @@ def _adapter_mutations():
             ('часы непарной позиции стоят', 'minutes_since', pair_clock_never_advances),
             ('кэш доходности липнет и к живому', '_dref_once', dref_cache_sticky),
             ('беспланный предпросмотр без исключений', 'preview', preview_drops_carveouts),
+            ('предпросмотр шлёт фонды дробными', '_kolichestvo_whatif', preview_frac_etf),
             ('отчёты дня всегда пусты', 'todays_executions', executions_empty),
             ('предпросмотр без плана судит по единице', 'preview',
              preview_noplan_unit_threshold),

@@ -952,8 +952,18 @@ def _a45nopl(beh):
     if _c_h is None or float(_c_h) < _DLn.O3E_MIN:
         return False            # здоровый конец обязан быть здоровым, иначе доказано ничто
     _ok = _br_h.preview() is True and _br_h._preview_why == ''
+    # ДРОБНОЕ КОЛИЧЕСТВО ФОНДА ДОХОДИТ ДО ШЛЮЗА ЦЕЛЫМ (11.09.2026, живой отказ перехода).
+    # Предпросмотр отправлял в IBKR 1204,96 доли CSPX; шлюз отвечает ошибкой 10243 и ПУСТЫМ
+    # whatIf, предпросмотр объявляется недоказуемым, переход откладывается и после трёх
+    # попыток уходит в ABORT. Стаб теперь отвергает дробность так же, как рынок, поэтому
+    # утверждение наблюдаемо: план с дробным количеством обязан ПРОЙТИ (адаптер округляет),
+    # а в шлюз обязано уйти целое число. Проверяются обе стороны: и исход, и сама заявка.
+    _frac_ok = _br_h.preview([('CSPX', 1204.96)]) is True
+    _посл = getattr(_ib_h, '_last_whatif_order', None)
+    _кол = abs(float(getattr(_посл, 'totalQuantity', 0) or 0)) if _посл is not None else -1.0
+    _frac_int = abs(_кол - round(_кол)) < 1e-9 and _кол > 0
     return (_thin_no and _emerg and _done and _dust_no and _dust_em
-            and _dust_ok and _rel_ok and _rel_no and _ok)
+            and _dust_ok and _rel_ok and _rel_no and _ok and _frac_ok and _frac_int)
 
 
 def _dref_probe(br):
