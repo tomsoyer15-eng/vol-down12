@@ -1,4 +1,4 @@
-# git-base 85d287a5fd045f94b18b97788fe704c361e2037d (+3 изменённых файлов r33build относительно HEAD на момент выпуска)
+# git-base 07c0459fcda547eef2c735b4dd97e4f089959aac (+0 изменённых файлов r33build относительно HEAD на момент выпуска)
 4a2a4f0baa44444bdf45be87b77f657b47b102a3d51c2e383d08c0fc6aa3ac86  ADD-FUT-v1_6_0-r33.pdf
 4c04659fa710400d8048de49e9c17bf5358acbdd0d998a5648076a687fbcb799  ADD-FUT-v1_6_0-r33.txt
 f4fb81a4f5bd5b1e4205411c0da0340ee10d7f7732fb4b432bd41384e99aa9bd  README-192.md
