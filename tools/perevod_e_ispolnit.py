@@ -16,6 +16,7 @@ import json, pathlib, sys
 sys.path.insert(0, '/home/alex/claude-projects/vol-down12/r33build/live')
 sys.path.insert(0, '/home/alex/claude-projects/vol-down12/r33build')
 import datetime as dt
+import json
 from ib_insync import IB, Stock, Future
 import ib_broker as IBB
 import transition as T
@@ -33,6 +34,15 @@ ib = IB(); ib.connect('127.0.0.1', 4002, clientId=74, timeout=30); ib.reqMarketD
 try:
     св = {t.tag: t.value for t in ib.accountSummary(счёт)}
     капитал = float(св['NetLiquidation'])
+    # ВОЗОБНОВЛЕНИЕ ИДЁТ С КАПИТАЛОМ ИСХОДНОГО ЗАПУСКА, А НЕ С ТЕКУЩИМ (15.09.2026).
+    # Идентификатор перехода считается от связки «сигнал+маршруты+КАПИТАЛ+план», а капитал
+    # меняется непрерывно: после обрыва текущий NLV даёт ДРУГОЙ идентификатор, и исполнитель
+    # честно отказывается трогать чужой открытый переход. Величина передаётся явно ключом
+    # --kapital, чтобы она была ВИДНА в команде, а не подставлялась молча.
+    for _i, _a in enumerate(sys.argv):
+        if _a == '--kapital':
+            капитал = float(sys.argv[_i + 1])
+            print(f'капитал исходного запуска задан явно: {капитал:,.2f}')
     поз = {p.contract.localSymbol: p.position for p in ib.positions(счёт)}
 
     def закрытие(c):
@@ -42,6 +52,17 @@ try:
     es = Future(conId=515416632, exchange='CME'); ib.qualifyContracts(es)
     cspx = Stock(conId=76023663, exchange='SMART'); ib.qualifyContracts(cspx)
     p_es, p_cspx = закрытие(es), закрытие(cspx)
+    # ПРИ ВОЗОБНОВЛЕНИИ НОГИ СТРОЯТСЯ ИЗ СНИМКА ПРОГРЕССА И ЦЕН ИСХОДНОГО ЗАПУСКА:
+    # текущие позиции уже промежуточные (часть продана), и план из них дал бы ДРУГОЙ
+    # идентификатор перехода — а по нему исполнитель и отличает свой переход от чужого.
+    if '--resume' in sys.argv:
+        _пр = json.loads(pathlib.Path(
+            f'~/.addfut/perehod-{dt.date.today().isoformat()}.json').expanduser().read_text())
+        _сн = _пр['snapshot']
+        p_es = float(_пр['executed_usd']) / 50.0        # единица ES записана исполнением
+        p_cspx = float(sys.argv[sys.argv.index('--cspx') + 1])
+        поз = {'ESZ6': _сн['ESZ26'], 'MESZ6': _сн['MESZ26']}
+        print(f'возобновление: снимок {_сн}, ES {p_es}, CSPX {p_cspx}')
     ноги = {'А': dict(src=[('ESZ26', int(поз.get('ESZ6', 0)), p_es*50),
                            ('MESZ26', int(поз.get('MESZ6', 0)), p_es*5)],
                       dst=('CSPX', p_cspx, 'ETF'))}
@@ -63,6 +84,10 @@ try:
         капитал, ноги,
         signal_id='2026-09-04#1', from_route='F', to_route='E',
         in_common_window=в_окне,
+        # ВОЗОБНОВЛЕНИЕ ПОСЛЕ ОБРЫВА (15.09.2026): прогресс уже записан, и повтор
+        # запрещён — какие лоты завершены, считается по файлу прогресса, а не по
+        # памяти. Флагом управляет вызывающий: --resume.
+        resume=('--resume' in sys.argv),
         journal=str(КОРЕНЬ / 'mr_journal.csv'),
         mr_state=str(КОРЕНЬ / 'mr_state.csv'),
         asof=сегодня.isoformat(),
