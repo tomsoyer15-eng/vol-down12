@@ -2806,6 +2806,22 @@ def _transition_mutations():
                         st[_k] = _v
         return orig, patched, _Ta, '_run_lots'
 
+    def params_tid_ne_sohranyayutsya():
+        """Параметры tid НЕ сохраняются в прогрессе (как было до 15.09.2026): после обрыва
+        перехода исходный капитал взять неоткуда, идентификатор не воспроизводится, и
+        переход остаётся открытым навсегда — ни продолжить, ни закрыть событием."""
+        import transition as _Tp
+        orig = _Tp.параметры_tid
+        return orig, (lambda capital, legs: {}), _Tp, 'параметры_tid'
+
+    def params_tid_bez_kapitala():
+        """Обратная порча: ноги сохраняются, а капитал — нет. Идентификатор всё равно
+        невосстановим, но снаружи параметры выглядят заполненными."""
+        import transition as _Tp
+        orig = _Tp.параметры_tid
+        return orig, (lambda capital, legs: {k: v for k, v in orig(capital, legs).items()
+                                             if k != 'capital'}), _Tp, 'параметры_tid'
+
     def porog8_bez_route():
         """Из предиката §8 выброшена половина «мы на маршруте Ф»: движок гонит счёт в Е,
         даже когда он УЖЕ в Е. Рецензия 04.09 показала, что эту мутацию не убивал никто —
@@ -2892,7 +2908,9 @@ def _transition_mutations():
         orig = _Mm._verify_journal_digest
         return orig, (lambda j, body: None), _Mm, '_verify_journal_digest'
 
-    return [('действует ПЕРВОЕ разрешение owner-cap, а не наибольшее', grant_pervyy),
+    return [('параметры tid не сохраняются в прогрессе', params_tid_ne_sohranyayutsya),
+            ('в параметрах tid нет капитала', params_tid_bez_kapitala),
+            ('действует ПЕРВОЕ разрешение owner-cap, а не наибольшее', grant_pervyy),
             ('действует ПОСЛЕДНЕЕ разрешение owner-cap', grant_posledniy),
             ('порог §8 без проверки текущего маршрута', porog8_bez_route),
             ('сторож бюджета переключений снят', porog8_bez_byudzheta),

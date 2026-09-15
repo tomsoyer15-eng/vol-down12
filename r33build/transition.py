@@ -583,6 +583,31 @@ def _atomic(path, obj):
     try: os.fsync(fd)
     finally: os.close(fd)
 
+def параметры_tid(capital, legs):
+    """Величины, из которых посчитан transition_id, — для записи в файл прогресса.
+
+    15.09.2026, ЖИВОЙ ОБРЫВ ПЕРЕХОДА Ф->Е. transition_id считается от связки
+    «сигнал+маршруты+КАПИТАЛ+план», а капитал меняется непрерывно. После обрыва следующий
+    запуск берёт текущий NLV, получает ДРУГОЙ tid и упирается в «в журнале открыт ДРУГОЙ
+    переход — исполнение запрещено до ручного разбора». Продолжить нельзя, закрыть событием
+    тоже нельзя: оба пути требуют совпадения tid. Переход оставался открытым НАВСЕГДА, с
+    возможной непарной позицией на счёте.
+    В тот день выкрутились расчётом: цена ES вывелась из записанного executed_usd, цена цели
+    — из количества поданной заявки, а капитал 980 127,86 нашёлся ПЕРЕБОРОМ по хэшу за 105
+    секунд. Это везение, а не механизм: план мог зависеть от капитала, цены могли не
+    восстанавливаться, перебор мог не сойтись.
+    Здесь величины просто сохраняются, и восстановление становится чтением файла.
+
+    ОТДЕЛЬНОЙ ФУНКЦИЕЙ — ради ОДНОЙ точки приложения парной мутации (правило 8в): пока
+    сборка жила двумя одинаковыми блоками внутри _execute_locked, мутации «параметры не
+    сохраняются» негде было встать, и защита оставалась ненаблюдаемой.
+    """
+    return dict(capital=round(float(capital), 2),
+                legs={n: dict(src=[[str(i), float(u), float(uu)] for i, u, uu in s['src']],
+                              dst=[str(s['dst'][0]), float(s['dst'][1]), str(s['dst'][2])])
+                      for n, s in legs.items()})
+
+
 def transition_id(signal_id, from_route, to_route, capital, plan):
     key = json.dumps([signal_id, from_route, to_route, round(capital, 2), plan], sort_keys=True)
     return hashlib.sha256(key.encode()).hexdigest()[:16]
@@ -1594,12 +1619,7 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
             # ПАРАМЕТРЫ tid СОХРАНЯЮТСЯ И НА ЭТОЙ ВЕТВИ (15.09.2026): состояние здесь
             # пересоздаётся заново, и без них возобновление после обрыва снова стало бы
             # недостижимым — см. соседнюю ветвь.
-            _pr_params = dict(capital=round(float(capital), 2),
-                              legs={_n: dict(src=[[str(_i), float(_u), float(_uu)]
-                                                  for _i, _u, _uu in _s['src']],
-                                             dst=[str(_s['dst'][0]), float(_s['dst'][1]),
-                                                  str(_s['dst'][2])])
-                                    for _n, _s in legs.items()})
+            _pr_params = параметры_tid(capital, legs)
             st = dict(tid=tid, asof=str(asof or ''), postponed=st.get('postponed', 0),
                       done=[], executed_usd=0.0, order_ids=[],
                       snapshot=_snap_base, log=[], params=_pr_params)
@@ -1634,12 +1654,7 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
         # хэшу за 105 секунд. Это везение, а не механизм: план мог зависеть от капитала,
         # цены могли не восстанавливаться, перебор мог не сойтись.
         # Здесь — одно поле, и восстановление становится обычным чтением файла.
-        _pr_params = dict(capital=round(float(capital), 2),
-                          legs={_n: dict(src=[[str(_i), float(_u), float(_uu)]
-                                              for _i, _u, _uu in _s['src']],
-                                         dst=[str(_s['dst'][0]), float(_s['dst'][1]),
-                                              str(_s['dst'][2])])
-                                for _n, _s in legs.items()})
+        _pr_params = параметры_tid(capital, legs)
         st = dict(tid=tid, asof=str(asof or ''), postponed=0, done=[], executed_usd=0.0,
                   order_ids=[], snapshot=_snap_base, log=[], params=_pr_params)
         _atomic(state_path, st)
