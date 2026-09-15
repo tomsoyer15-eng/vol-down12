@@ -1591,9 +1591,18 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
             # расчётах прогресса и финальных дельт. Гонка «позиция старая, заявки уже нет»
             # попадала прямо в опору всех вычислений.
             _snap_base, _ = _snapshot_pair(broker)
+            # ПАРАМЕТРЫ tid СОХРАНЯЮТСЯ И НА ЭТОЙ ВЕТВИ (15.09.2026): состояние здесь
+            # пересоздаётся заново, и без них возобновление после обрыва снова стало бы
+            # недостижимым — см. соседнюю ветвь.
+            _pr_params = dict(capital=round(float(capital), 2),
+                              legs={_n: dict(src=[[str(_i), float(_u), float(_uu)]
+                                                  for _i, _u, _uu in _s['src']],
+                                             dst=[str(_s['dst'][0]), float(_s['dst'][1]),
+                                                  str(_s['dst'][2])])
+                                    for _n, _s in legs.items()})
             st = dict(tid=tid, asof=str(asof or ''), postponed=st.get('postponed', 0),
                       done=[], executed_usd=0.0, order_ids=[],
-                      snapshot=_snap_base, log=[])
+                      snapshot=_snap_base, log=[], params=_pr_params)
             _atomic(state_path, st)
     else:
         # RESUME БЕЗ ФАЙЛА ПРОГРЕССА — АВАРИЯ, А НЕ НАЧАЛО С НУЛЯ (тридцать девятый круг,
@@ -1613,8 +1622,26 @@ def _execute_locked(broker, state_path, capital, legs, signal_id, from_route, to
                 f'промежуточными. Начать «с нуля» значит исполнить план повторно и увести '
                 f'источник в short; ручной разбор (О-5)')
         _snap_base, _ = _snapshot_pair(broker)
+        # ПАРАМЕТРЫ, ПО КОТОРЫМ СЧИТАН tid, СОХРАНЯЮТСЯ В ПРОГРЕССЕ (15.09.2026, живой
+        # обрыв перехода Ф->Е). transition_id считается от связки «сигнал+маршруты+КАПИТАЛ
+        # +план», а капитал меняется непрерывно: после любого обрыва следующий запуск
+        # берёт текущий NLV, получает ДРУГОЙ tid и упирается в «в журнале открыт ДРУГОЙ
+        # переход ... исполнение запрещено до ручного разбора». Продолжить нельзя, закрыть
+        # событием тоже нельзя — оба пути требуют совпадения tid. То есть переход оставался
+        # открытым НАВСЕГДА, с возможной непарной позицией на счёте.
+        # 15.09 выкрутились расчётом: цена ES выводилась из записанного executed_usd, цена
+        # цели — из количества поданной заявки, а капитал 980 127,86 нашёлся ПЕРЕБОРОМ по
+        # хэшу за 105 секунд. Это везение, а не механизм: план мог зависеть от капитала,
+        # цены могли не восстанавливаться, перебор мог не сойтись.
+        # Здесь — одно поле, и восстановление становится обычным чтением файла.
+        _pr_params = dict(capital=round(float(capital), 2),
+                          legs={_n: dict(src=[[str(_i), float(_u), float(_uu)]
+                                              for _i, _u, _uu in _s['src']],
+                                         dst=[str(_s['dst'][0]), float(_s['dst'][1]),
+                                              str(_s['dst'][2])])
+                                for _n, _s in legs.items()})
         st = dict(tid=tid, asof=str(asof or ''), postponed=0, done=[], executed_usd=0.0,
-                  order_ids=[], snapshot=_snap_base, log=[])
+                  order_ids=[], snapshot=_snap_base, log=[], params=_pr_params)
         _atomic(state_path, st)
     if resume:
         # ОТМЕНЫ РАНЬШЕ PREVIEW (восемнадцатый круг, №4): отказ preview со старой живой

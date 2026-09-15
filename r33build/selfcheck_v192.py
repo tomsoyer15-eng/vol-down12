@@ -683,6 +683,28 @@ for _ in range(3):
     try: rr.append(T.execute(_B(preview=False), SP, 1e6, L1, signal_id='s1', **KW)['postponed'])
     except T.Incident: rr.append('INC')
 chk('Исполнитель: счётчик preview стоек', rr == [1, 2, 'INC'])
+# ПАРАМЕТРЫ tid СОХРАНЕНЫ В ПРОГРЕССЕ И ВОСПРОИЗВОДЯТ ЕГО (15.09.2026, живой обрыв).
+# transition_id считается от связки «сигнал+маршруты+КАПИТАЛ+план», капитал меняется
+# непрерывно, и после обрыва следующий запуск получал ДРУГОЙ tid: ни продолжить, ни закрыть
+# событием — оба требуют совпадения. Переход оставался открытым навсегда. 15.09 капитал
+# пришлось искать ПЕРЕБОРОМ по хэшу (105 с) — везение, а не механизм. Проверяется то, что
+# делает механизм механизмом: файл прогресса несёт capital и legs, и восстановленный из
+# файла tid совпадает с записанным.
+try:
+    import json as _json_pp
+    _prg = _json_pp.load(open(SP))
+    _pp = _prg.get('params') or {}
+    _legs_r = {_n: dict(src=[(str(_i), _u, _uu) for _i, _u, _uu in _v['src']],
+                        dst=(str(_v['dst'][0]), _v['dst'][1], str(_v['dst'][2])))
+               for _n, _v in (_pp.get('legs') or {}).items()}
+    _tid_r = (T.transition_id('s1', 'F', 'E', _pp['capital'],
+                              T.plan_lots(_legs_r, _pp['capital']))
+              if _legs_r and 'capital' in _pp else '')
+    chk('Исполнитель: прогресс несёт параметры tid и воспроизводит его',
+        bool(_pp) and _pp.get('capital') == 1e6 and _tid_r == _prg.get('tid'),
+        f"capital={_pp.get('capital')}, tid={_prg.get('tid')}, восстановлен={_tid_r}")
+except Exception as _ex_pp:
+    chk('Исполнитель: прогресс несёт параметры tid и воспроизводит его', False, repr(_ex_pp))
 _cl(); _sig('E', grant=98565.0)
 try: T.execute(_B(timeout=True, netpos={'ZN': 1, 'CBU0': 0}), SP, 1e6, L1, signal_id='s1', **KW)
 except T.Incident: pass
